@@ -7,6 +7,7 @@ import shlex
 
 from .config import Settings
 from .git_reader import GitReader
+from .trash import TrashManager
 from .workspace import Workspace
 
 
@@ -21,6 +22,7 @@ class SandboxedWorkspace:
         self.settings = settings
         self.workspace = Workspace(settings)
         self.git = git or GitReader(settings)
+        self.trash = TrashManager(self.workspace)
 
     def run_shell(self, command: str) -> str:
         """Parse a tiny shell-like grammar without invoking a real shell."""

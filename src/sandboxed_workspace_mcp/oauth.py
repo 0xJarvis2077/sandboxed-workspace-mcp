@@ -16,7 +16,14 @@ import jwt
 from mcp.server.auth.provider import AccessToken
 
 SUPPORTED_SCOPES = frozenset(
-    {"workspace.read", "workspace.write", "tasks.read", "tasks.run"}
+    {
+        "workspace.read",
+        "workspace.write",
+        "workspace.delete",
+        "workspace.purge",
+        "tasks.read",
+        "tasks.run",
+    }
 )
 DEFAULT_OAUTH_SCOPES = (
     "workspace.read",

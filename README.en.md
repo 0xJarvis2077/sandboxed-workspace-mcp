@@ -2,13 +2,14 @@
 
 [中文](README.md) · [Security boundary](SECURITY.md) · [Task template](examples/tasks.json) · [Execution profile template](examples/execution-profiles.json)
 
-Expose one local project root as a bounded MCP server. Clients can read, search, edit text, and inspect Git; trusted operators can optionally run fixed tasks or execution profiles inside Docker/Podman against a disposable workspace snapshot. The server does not execute project code by default and does not provide a host shell, port mapping, or delete tool.
+Expose one local project root as a bounded MCP server. Clients can read, search, edit text, and inspect Git; trusted operators can optionally run fixed tasks or execution profiles inside Docker/Podman against a disposable workspace snapshot. The server does not execute project code, clean up files, or provide a host shell or port mapping by default; when explicitly enabled, cleanup remains bounded and permanent deletion requires separate authorization.
 
 ## Three things to know first
 
 - One server instance owns one `--root`. Run separate instances for unrelated projects.
 - Workspace tools are writable by default; pass `--read-only` explicitly for production or read-only use.
 - `--read-only` disables workspace write tools. Authorized tasks still run in a disposable snapshot and never write back to the real workspace.
+- The recycle bin is disabled by default. `--allow-trash` also requires writes and provides single-file trash plus non-overwriting restoration to the original or a safe alternate path. Irreversible single-item purge requires the separate `--allow-trash-purge` flag.
 - Container execution is opt-in through a trusted JSON file outside the workspace. Images must be full registry digests or full local `sha256` image IDs.
 
 For the threat model, file semantics, Git restrictions, and container boundary, see [SECURITY.md](SECURITY.md).
@@ -66,6 +67,8 @@ The compatibility entrypoint remains available:
 | Directories | `list_directory`, `tree` | Bounded traversal without following directory symlinks |
 | Files | `read_file`, `read_file_versioned`, `search_text` | Bounded text access, search, and SHA-256 version tokens |
 | Writes | `create_directory`, `write_file`, `replace_text`, `append_file` | Atomic writes; disabled in read-only mode |
+| Recycle bin (optional) | `trash_file`, `list_trashed_files`, `restore_trashed_file`, `restore_trashed_file_to` | Disabled by default; bounded single-file trash and non-overwriting restore |
+| Permanent purge (optional) | `purge_trashed_file` | Registered only with separate purge enablement; SHA-checked and irreversible |
 | Git | `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_rev_parse`, `git_ls_files` | Fixed read-only Git queries |
 | Compatibility commands | `run_shell` | Closed read-only grammar; never starts a shell |
 | Fixed tasks | `list_tasks`, `run_task` | Operator-defined synchronous tasks |
@@ -81,6 +84,12 @@ Without a task config, the task manager, container backend, and dynamic executio
 ### Read and edit code
 
 Use `tree`, `read_file`, and `search_text` to locate code. For an existing file, pass the SHA-256 returned by versioned reads as `expected_sha256` when writing. A stale token returns an explicit conflict instead of silently overwriting a concurrent edit.
+
+### Use the recycle bin
+
+`--allow-trash` registers `trash_file`, `list_trashed_files`, `restore_trashed_file`, and `restore_trashed_file_to`. Every restore call requires the current SHA from the list result. If the original path now contains a new file, it is never overwritten: call `create_directory("recovered")` first and then use `restore_trashed_file_to(..., "recovered/basic.txt")`. The alternate-path tool requires both `workspace.delete` and `workspace.write`; its parent must already exist and its target must be empty. Agents should branch on the structured `error.code`, not parse English messages.
+
+`--allow-trash-purge` is available only with trash and writes enabled and registers `purge_trashed_file`, which requires `workspace.delete` and `workspace.purge`. It requires the current SHA and permanently removes exactly one regular file; directories, globs, batches, and `empty_trash` are unsupported. A full quota rejects new trash and never evicts items automatically.
 
 ### Run tests or checks
 
@@ -164,6 +173,10 @@ Common settings:
 | --- | --- |
 | `--root` / `SANDBOXED_WORKSPACE_MCP_ROOT` | The one workspace root |
 | `--read-only` / `SANDBOXED_WORKSPACE_MCP_READ_ONLY` | Disable all workspace write tools |
+| `--allow-trash` / `SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH` | Enable the restricted recoverable single-file recycle bin |
+| `--allow-trash-purge` / `SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH_PURGE` | Enable verified, irreversible single-item purge separately |
+| `--max-trash-items` / `SANDBOXED_WORKSPACE_MCP_MAX_TRASH_ITEMS` | Maximum retained recycle-bin entries (default 200) |
+| `--max-trash-bytes` / `SANDBOXED_WORKSPACE_MCP_MAX_TRASH_BYTES` | Maximum aggregate payload bytes (default 256 MiB) |
 | `--block-path` | Add a root-relative blocked glob |
 | `--ignore-dir` | Add a directory basename excluded from automatic scans |
 | `--task-config` / `SANDBOXED_WORKSPACE_MCP_TASK_CONFIG` | Trusted task JSON outside the workspace |
@@ -177,6 +190,7 @@ Common settings:
 src/sandboxed_workspace_mcp/
   workspace.py          # Safe paths, file I/O, traversal, and atomic writes
   access_policy.py      # Blocked globs and Git exclusion policy
+  trash.py              # Protected recycle-bin metadata, transactions, and recovery
   git_reader.py         # Bounded read-only Git adapter
   service.py            # run_shell grammar and application orchestration
   server.py             # MCP tools, scope checks, and auth challenges

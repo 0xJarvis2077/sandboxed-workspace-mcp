@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import BinaryIO
 
 from .access_policy import AccessPolicy, NarrowingPathFilter
@@ -28,6 +28,14 @@ _PATH_LOCK_STRIPE_COUNT = 64
 
 class WorkspaceError(ValueError):
     """Raised when a workspace operation violates its contract."""
+
+
+class RestoreTargetError(WorkspaceError):
+    """Classify a safe restore-target validation failure for the trash adapter."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(message)
 
 
 @dataclass(slots=True)
@@ -148,6 +156,83 @@ class Workspace:
         self._require_allowed(resolved_relative, value)
         return resolved
 
+    def safe_regular_file_path(self, value: str) -> Path:
+        """Resolve an existing regular file without accepting symlink aliases."""
+
+        target = self.safe_path(value)
+        lexical, relative = self._lexical_workspace_path(value)
+        self._reject_symlink_components(lexical, relative, value)
+        try:
+            status = lexical.lstat()
+        except OSError as exc:
+            raise WorkspaceError(f"cannot inspect file safely: {value}") from exc
+        if not stat.S_ISREG(status.st_mode):
+            raise WorkspaceError(f"not a regular file: {value}")
+        return target
+
+    def safe_restore_target(self, value: str, *, require_absent: bool = True) -> Path:
+        """Validate a stored relative path and its existing real parent directory."""
+
+        if (
+            not isinstance(value, str)
+            or not value
+            or value in {".", ".."}
+            or value.startswith(("/", "\\", "~"))
+            or "\\" in value
+            or "\x00" in value
+            or PureWindowsPath(value).drive
+            or any(character in value for character in "*?[]{}")
+            or any(part in {"", ".", ".."} for part in value.split("/"))
+        ):
+            raise RestoreTargetError("invalid", "restore destination is invalid")
+        try:
+            lexical, relative = self._lexical_workspace_path(value)
+            self._require_allowed(relative, value)
+        except WorkspaceError as exc:
+            raise RestoreTargetError(
+                "invalid", "restore destination is invalid"
+            ) from exc
+        if not relative.parts:
+            raise RestoreTargetError("invalid", "cannot restore to the workspace root")
+        try:
+            self._reject_symlink_components(
+                lexical.parent, relative.parent, value, allow_missing=False
+            )
+        except WorkspaceError as exc:
+            raise RestoreTargetError(
+                "invalid", "restore destination is invalid"
+            ) from exc
+        try:
+            parent_status = lexical.parent.lstat()
+        except FileNotFoundError as exc:
+            raise RestoreTargetError(
+                "invalid", "restore destination parent does not exist"
+            ) from exc
+        except OSError as exc:
+            raise RestoreTargetError(
+                "invalid", "restore destination is unavailable"
+            ) from exc
+        if not stat.S_ISDIR(parent_status.st_mode):
+            raise RestoreTargetError(
+                "invalid", "restore destination parent is not a directory"
+            )
+        if require_absent:
+            try:
+                lexical.lstat()
+            except FileNotFoundError:
+                pass
+            except PermissionError as exc:
+                raise RestoreTargetError(
+                    "invalid", "restore destination cannot be inspected"
+                ) from exc
+            except OSError as exc:
+                raise RestoreTargetError(
+                    "invalid", "restore destination cannot be inspected"
+                ) from exc
+            else:
+                raise RestoreTargetError("exists", "restore destination already exists")
+        return lexical
+
     def relative_path(self, path: Path) -> str:
         """Render a trusted workspace path relative to the root."""
 
@@ -171,7 +256,11 @@ class Workspace:
             f"Blocked patterns: {len(self.settings.blocked_patterns)}\n"
             f"Scan entry budget: {self.settings.max_scan_entries}\n"
             f"Search byte budget: {self.settings.max_search_bytes}\n"
-            f"Concurrent searches: {self.settings.max_concurrent_searches}"
+            f"Concurrent searches: {self.settings.max_concurrent_searches}\n"
+            f"Trash enabled: {self.settings.allow_trash}\n"
+            f"Trash purge enabled: {self.settings.allow_trash_purge}\n"
+            f"Trash item limit: {self.settings.max_trash_items}\n"
+            f"Trash byte limit: {self.settings.max_trash_bytes}"
         )
 
     def list_directory(self, path: str = ".") -> str:
@@ -903,6 +992,44 @@ class Workspace:
         except ValueError as exc:
             raise WorkspaceError(f"path escapes workspace: {original}") from exc
 
+    def _lexical_workspace_path(self, value: str) -> tuple[Path, Path]:
+        if "\x00" in value:
+            raise WorkspaceError("NUL byte is not allowed in a path")
+        supplied = Path(value or ".").expanduser()
+        candidate = supplied if supplied.is_absolute() else self.root / supplied
+        lexical = Path(os.path.abspath(candidate))
+        try:
+            relative = lexical.relative_to(self.root)
+        except ValueError as exc:
+            raise WorkspaceError(f"path escapes workspace: {value}") from exc
+        return lexical, relative
+
+    def _reject_symlink_components(
+        self,
+        path: Path,
+        relative: Path,
+        original: str,
+        *,
+        allow_missing: bool = True,
+    ) -> None:
+        current = self.root
+        for component in relative.parts:
+            current /= component
+            try:
+                status = current.lstat()
+            except FileNotFoundError:
+                if allow_missing:
+                    return
+                raise WorkspaceError(
+                    f"path component does not exist: {original}"
+                ) from None
+            except OSError as exc:
+                raise WorkspaceError(f"cannot inspect path safely: {original}") from exc
+            if stat.S_ISLNK(status.st_mode):
+                raise WorkspaceError(f"symbolic links are not allowed: {original}")
+        if path != current:
+            raise WorkspaceError(f"path changed while being checked: {original}")
+
     def _require_allowed(self, relative: Path, original: str) -> None:
         pattern = self.policy.blocking_pattern(relative.as_posix())
         if pattern is not None:
@@ -1136,7 +1263,7 @@ class Workspace:
 
     @staticmethod
     def _require_expected_sha256(supplied: str | None, current: _FileState) -> None:
-        if supplied is None:
+        if not isinstance(supplied, str):
             raise WorkspaceError(
                 "conflict: expected_sha256 is required; call read_file_versioned first"
             )

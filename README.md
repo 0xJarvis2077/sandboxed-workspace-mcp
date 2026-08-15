@@ -2,13 +2,14 @@
 
 [English](README.en.md) · [安全边界](SECURITY.md) · [任务模板](examples/tasks.json) · [Execution profile 模板](examples/execution-profiles.json)
 
-把一个本地项目根目录安全地暴露为 MCP 工具：可以读取、搜索、编辑文本和查询 Git；也可以在操作者明确授权后，把工作区快照交给 Docker/Podman 中的固定任务或执行 profile。默认不会执行项目代码，也不会提供宿主 Shell、端口映射或删除工具。
+把一个本地项目根目录安全地暴露为 MCP 工具：可以读取、搜索、编辑文本和查询 Git；也可以在操作者明确授权后，把工作区快照交给 Docker/Podman 中的固定任务或执行 profile。默认不会执行项目代码、清理文件或提供宿主 Shell、端口映射；显式开启后提供受限、可恢复的回收站，永久清理仍需单独授权。
 
 ## 先看这三点
 
 - 一个服务实例只负责一个 `--root`。需要多个项目时，启动多个实例。
 - 默认工作区工具可写；生产或只读场景应显式传 `--read-only`。
 - `--read-only` 只关闭工作区写工具；已授权的任务仍在一次性快照中运行，不会写回真实工作区。
+- 回收站默认关闭；`--allow-trash` 需要同时允许写入，提供单文件回收、原路径恢复和安全备用路径恢复。不可恢复的单项 purge 还需要单独的 `--allow-trash-purge`。
 - 容器任务是可选能力，必须通过工作区外的可信 JSON 显式开启；配置文件中的 image 必须是完整 digest 或完整本地 `sha256` ID。
 
 详细的威胁模型、文件安全语义、Git 约束和容器边界见 [SECURITY.md](SECURITY.md)。
@@ -66,6 +67,8 @@ python -m venv .venv
 | 目录 | `list_directory`, `tree` | 有界遍历，不跟随目录符号链接 |
 | 文件 | `read_file`, `read_file_versioned`, `search_text` | 有界文本读取、搜索和 SHA-256 版本令牌 |
 | 写入 | `create_directory`, `write_file`, `replace_text`, `append_file` | 原子写入；需要非只读模式 |
+| 回收站（可选） | `trash_file`, `list_trashed_files`, `restore_trashed_file`, `restore_trashed_file_to` | 默认不注册；受限单文件回收和不覆盖恢复 |
+| 永久清理（可选） | `purge_trashed_file` | 仅单独开启 purge 时注册；必须 SHA 校验，不可恢复 |
 | Git | `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_rev_parse`, `git_ls_files` | 固定的只读 Git 查询 |
 | 兼容命令 | `run_shell` | 只解析封闭的只读语法，从不启动 Shell |
 | 固定任务 | `list_tasks`, `run_task` | 操作者预定义的同步任务 |
@@ -81,6 +84,12 @@ python -m venv .venv
 ### 读取和编辑代码
 
 先用 `tree`/`read_file`/`search_text` 定位，再使用版本化读取返回的 SHA-256 作为写入操作的 `expected_sha256`。并发修改时，过期令牌会得到明确的 conflict，而不是静默覆盖。
+
+### 使用回收站
+
+`--allow-trash` 注册 `trash_file`、`list_trashed_files`、`restore_trashed_file` 和 `restore_trashed_file_to`。恢复工具都必须使用 list 返回的当前 SHA；原路径已有新文件时不会覆盖，可以先调用 `create_directory("recovered")`，再调用 `restore_trashed_file_to(..., "recovered/basic.txt")`。`restore_trashed_file_to` 需要 `workspace.delete` 和 `workspace.write`，目标父目录必须已存在且目标必须为空。机器应根据结构化错误中的 `error.code` 分支，而不是解析英文 message。
+
+`--allow-trash-purge` 只在同时启用回收站和写入时生效，并注册需要 `workspace.delete` 与 `workspace.purge` 的 `purge_trashed_file`。它必须携带当前 SHA，只能永久清理单个普通文件；不支持目录、glob、批量或 `empty_trash`。quota 满时会拒绝新回收，不会自动清理。
 
 ### 运行测试或检查
 
@@ -164,6 +173,10 @@ stop_task(started["task_id"])
 | --- | --- |
 | `--root` / `SANDBOXED_WORKSPACE_MCP_ROOT` | 唯一 workspace 根目录 |
 | `--read-only` / `SANDBOXED_WORKSPACE_MCP_READ_ONLY` | 关闭所有工作区写工具 |
+| `--allow-trash` / `SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH` | 开启受限、可恢复的单文件回收站 |
+| `--allow-trash-purge` / `SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH_PURGE` | 单独开启经过 SHA 校验的不可恢复单项 purge |
+| `--max-trash-items` / `SANDBOXED_WORKSPACE_MCP_MAX_TRASH_ITEMS` | 回收站最多保留的条目数（默认 200） |
+| `--max-trash-bytes` / `SANDBOXED_WORKSPACE_MCP_MAX_TRASH_BYTES` | 回收站 payload 总字节上限（默认 256 MiB） |
 | `--block-path` | 追加 root-relative blocked glob |
 | `--ignore-dir` | 追加不主动扫描的目录 basename |
 | `--task-config` / `SANDBOXED_WORKSPACE_MCP_TASK_CONFIG` | 工作区外的可信任务 JSON |
@@ -177,6 +190,7 @@ stop_task(started["task_id"])
 src/sandboxed_workspace_mcp/
   workspace.py          # 安全路径、文件 IO、遍历和原子写入
   access_policy.py      # blocked glob 和 Git 排除策略
+  trash.py              # 受保护回收站元数据、事务和恢复
   git_reader.py         # 有界只读 Git 适配器
   service.py            # run_shell 语法和应用编排
   server.py             # MCP 工具注册、scope 检查和认证 challenge

@@ -28,6 +28,7 @@ from .config import Settings
 from .oauth import JWTTokenVerifier, OAuthSettings
 from .service import SandboxedWorkspace
 from .task_manager import TaskManager
+from .trash import TrashError
 
 READ_ONLY = ToolAnnotations(
     readOnlyHint=True,
@@ -42,6 +43,18 @@ MUTATING = ToolAnnotations(
     openWorldHint=False,
 )
 TASK_EXECUTION = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=False,
+)
+TRASH_MUTATING = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
+    idempotentHint=False,
+    openWorldHint=False,
+)
+TRASH_RESTORE = ToolAnnotations(
     readOnlyHint=False,
     destructiveHint=False,
     idempotentHint=False,
@@ -78,39 +91,68 @@ _STRICT_TOOL_ARGUMENTS = {
     "run_python_script": frozenset({"profile", "path"}),
     "run_command": frozenset({"profile", "program", "args", "cwd"}),
     "start_command": frozenset({"profile", "program", "args", "cwd"}),
+    "trash_file": frozenset({"path", "expected_sha256"}),
+    "list_trashed_files": frozenset({"offset", "limit"}),
+    "restore_trashed_file": frozenset({"trash_id", "expected_sha256"}),
+    "restore_trashed_file_to": frozenset(
+        {"trash_id", "expected_sha256", "destination_path"}
+    ),
+    "purge_trashed_file": frozenset({"trash_id", "expected_sha256"}),
 }
-_TOOL_SCOPES = {
-    "project_info": "workspace.read",
-    "list_directory": "workspace.read",
-    "tree": "workspace.read",
-    "read_file": "workspace.read",
-    "read_file_versioned": "workspace.read",
-    "search_text": "workspace.read",
-    "git_status": "workspace.read",
-    "git_diff": "workspace.read",
-    "git_log": "workspace.read",
-    "git_show": "workspace.read",
-    "git_branch": "workspace.read",
-    "git_rev_parse": "workspace.read",
-    "git_ls_files": "workspace.read",
-    "run_shell": "workspace.read",
-    "create_directory": "workspace.write",
-    "write_file": "workspace.write",
-    "replace_text": "workspace.write",
-    "append_file": "workspace.write",
-    "list_tasks": "tasks.read",
-    "task_status": "tasks.read",
-    "task_logs": "tasks.read",
-    "run_task": "tasks.run",
-    "start_task": "tasks.run",
-    "stop_task": "tasks.run",
-    "list_execution_profiles": "tasks.read",
-    "python_version": "tasks.run",
-    "run_pytest": "tasks.run",
-    "run_python_script": "tasks.run",
-    "run_command": "tasks.run",
-    "start_command": "tasks.run",
+_TOOL_SCOPES: dict[str, frozenset[str]] = {
+    "project_info": frozenset({"workspace.read"}),
+    "list_directory": frozenset({"workspace.read"}),
+    "tree": frozenset({"workspace.read"}),
+    "read_file": frozenset({"workspace.read"}),
+    "read_file_versioned": frozenset({"workspace.read"}),
+    "search_text": frozenset({"workspace.read"}),
+    "git_status": frozenset({"workspace.read"}),
+    "git_diff": frozenset({"workspace.read"}),
+    "git_log": frozenset({"workspace.read"}),
+    "git_show": frozenset({"workspace.read"}),
+    "git_branch": frozenset({"workspace.read"}),
+    "git_rev_parse": frozenset({"workspace.read"}),
+    "git_ls_files": frozenset({"workspace.read"}),
+    "run_shell": frozenset({"workspace.read"}),
+    "create_directory": frozenset({"workspace.write"}),
+    "write_file": frozenset({"workspace.write"}),
+    "replace_text": frozenset({"workspace.write"}),
+    "append_file": frozenset({"workspace.write"}),
+    "trash_file": frozenset({"workspace.delete"}),
+    "list_trashed_files": frozenset({"workspace.delete"}),
+    "restore_trashed_file": frozenset({"workspace.delete"}),
+    "restore_trashed_file_to": frozenset({"workspace.delete", "workspace.write"}),
+    "purge_trashed_file": frozenset({"workspace.delete", "workspace.purge"}),
+    "list_tasks": frozenset({"tasks.read"}),
+    "task_status": frozenset({"tasks.read"}),
+    "task_logs": frozenset({"tasks.read"}),
+    "run_task": frozenset({"tasks.run"}),
+    "start_task": frozenset({"tasks.run"}),
+    "stop_task": frozenset({"tasks.run"}),
+    "list_execution_profiles": frozenset({"tasks.read"}),
+    "python_version": frozenset({"tasks.run"}),
+    "run_pytest": frozenset({"tasks.run"}),
+    "run_python_script": frozenset({"tasks.run"}),
+    "run_command": frozenset({"tasks.run"}),
+    "start_command": frozenset({"tasks.run"}),
 }
+
+
+def _trash_error_result(error: TrashError) -> CallToolResult:
+    """Adapt a domain error to an MCP result without leaking host details."""
+
+    return CallToolResult(
+        content=[TextContent(type="text", text=error.message)],
+        isError=True,
+        structuredContent=error.public_error,
+    )
+
+
+def _call_trash(operation: Any, *arguments: Any) -> Any:
+    try:
+        return operation(*arguments)
+    except TrashError as exc:
+        return _trash_error_result(exc)
 
 
 class _SelectiveOAuthApp:
@@ -154,11 +196,11 @@ class SandboxedWorkspaceMCPServer(MCPServer[None]):
             if tool.name in _STRICT_TOOL_ARGUMENTS:
                 tool.input_schema["additionalProperties"] = False
             if self.oauth is not None:
-                scope = _TOOL_SCOPES.get(tool.name)
-                if scope is not None:
+                scopes = _TOOL_SCOPES.get(tool.name)
+                if scopes is not None:
                     metadata = dict(tool.meta or {})
                     metadata["securitySchemes"] = [
-                        {"type": "oauth2", "scopes": [scope]}
+                        {"type": "oauth2", "scopes": sorted(scopes)}
                     ]
                     tool.meta = metadata
         return tools
@@ -177,17 +219,21 @@ class SandboxedWorkspaceMCPServer(MCPServer[None]):
                     f"unexpected argument(s) for {name}: {', '.join(unexpected)}"
                 )
         if self.oauth is not None:
-            required_scope = _TOOL_SCOPES.get(name)
-            if required_scope is not None:
+            required_scopes = _TOOL_SCOPES.get(name)
+            if required_scopes is not None:
                 access_token = get_access_token()
                 if access_token is None:
-                    return self._auth_error(required_scope, "invalid_token")
-                if required_scope not in access_token.scopes:
-                    return self._auth_error(required_scope, "insufficient_scope")
-        return await super().call_tool(name, arguments, context)
+                    return self._auth_error(required_scopes, "invalid_token")
+                if not required_scopes.issubset(access_token.scopes):
+                    return self._auth_error(required_scopes, "insufficient_scope")
+        try:
+            return await super().call_tool(name, arguments, context)
+        except TrashError as exc:
+            return _trash_error_result(exc)
 
-    def _auth_error(self, scope: str, error: str) -> CallToolResult:
+    def _auth_error(self, scopes: frozenset[str], error: str) -> CallToolResult:
         assert self.oauth is not None
+        scope = " ".join(sorted(scopes))
         description = (
             "Authentication required"
             if error == "invalid_token"
@@ -238,6 +284,10 @@ def create_server(
         required_scopes = {"workspace.read"}
         if settings.allow_writes:
             required_scopes.add("workspace.write")
+        if settings.allow_trash:
+            required_scopes.add("workspace.delete")
+        if settings.allow_trash_purge:
+            required_scopes.add("workspace.purge")
         if task_manager is not None:
             required_scopes.update({"tasks.read", "tasks.run"})
         missing = sorted(required_scopes.difference(oauth.scopes))
@@ -250,7 +300,11 @@ def create_server(
     server: SandboxedWorkspaceMCPServer = SandboxedWorkspaceMCPServer(
         "sandboxed-workspace-mcp",
         title="Sandboxed Workspace MCP",
-        description="Size-bounded filesystem and read-only Git access within one root.",
+        description=(
+            "Capability-bounded workspace file operations with optional recycle-bin "
+            "trash, recovery, alternate-path restore, and read-only Git access within "
+            "one root."
+        ),
         instructions=(
             "All paths are confined to the configured workspace. Use replace_text for "
             "precise edits and inspect files again before resolving ambiguous changes."
@@ -314,6 +368,72 @@ def create_server(
         """Read text and SHA-256; use this before modifying an existing file."""
 
         return computer.workspace.read_file_versioned(path, start_line, end_line)
+
+    if settings.allow_trash:
+
+        @server.tool(annotations=TRASH_MUTATING, structured_output=True)
+        def trash_file(path: str, expected_sha256: str) -> dict[str, object]:
+            """Move one version-checked regular file into the protected recycle bin."""
+
+            return _call_trash(computer.trash.trash_file, path, expected_sha256)
+
+        @server.tool(annotations=READ_ONLY, structured_output=True)
+        def list_trashed_files(offset: int = 0, limit: int = 50) -> dict[str, object]:
+            """List bounded recycle-bin metadata without exposing payload contents."""
+
+            return _call_trash(computer.trash.list_trashed_files, offset, limit)
+
+        @server.tool(annotations=TRASH_RESTORE, structured_output=True)
+        def restore_trashed_file(
+            trash_id: str, expected_sha256: str
+        ) -> dict[str, object]:
+            """Restore one item to its original path without overwriting it.
+
+            Use the current SHA from list_trashed_files or read_file_versioned.
+            This tool supports one regular file only and never directories, globs,
+            batches, or permanent deletion.
+            """
+
+            return _call_trash(
+                computer.trash.restore_trashed_file, trash_id, expected_sha256
+            )
+
+        @server.tool(annotations=TRASH_RESTORE, structured_output=True)
+        def restore_trashed_file_to(
+            trash_id: str, expected_sha256: str, destination_path: str
+        ) -> dict[str, object]:
+            """Restore or recover one trashed recycle-bin file to an alternate path.
+
+            Use this when the original path is occupied or the file should be
+            recovered elsewhere in the workspace. Supply the current SHA from
+            list_trashed_files. The destination parent must exist and the target must
+            not exist. This tool never overwrites, permanently deletes, or purges data
+            and supports only one regular file.
+            """
+
+            return _call_trash(
+                computer.trash.restore_trashed_file,
+                trash_id,
+                expected_sha256,
+                destination_path,
+            )
+
+        if settings.allow_trash_purge:
+
+            @server.tool(annotations=TRASH_MUTATING, structured_output=True)
+            def purge_trashed_file(
+                trash_id: str, expected_sha256: str
+            ) -> dict[str, object]:
+                """Permanently delete one verified item; this cannot be undone.
+
+                Use the current SHA from list_trashed_files. Purge is single-item
+                only and never accepts directories, globs, batches, or empty-trash
+                requests; the payload is verified before it is removed.
+                """
+
+                return _call_trash(
+                    computer.trash.purge_trashed_file, trash_id, expected_sha256
+                )
 
     @server.tool(annotations=READ_ONLY)
     async def search_text(text: str, path: str = ".", max_results: int = 200) -> str:
