@@ -210,7 +210,7 @@ task config 是服务操作者授予的执行权限，不是不可信 MCP 调用
 Execution profile 的能力如下：
 
 - `python_version(profile)` 在同一固定容器镜像中运行 `python --version`，不会读取宿主 Python。
-- `run_pytest(...)` 只接受 `targets`、有界 `keyword`、`quiet`、0–2 的 `verbosity`、`exit_first`、`no_capture` 和 `auto|short|long` traceback。服务端生成 `python -m pytest` argv；caller 不能添加 pytest option。
+- `run_pytest(...)` 只接受 `targets`、有界 `keyword`、`quiet`、0–2 的 `verbosity`、`exit_first`、`no_capture` 和 `auto|short|long` traceback。服务端生成 `python -m pytest -o cache_dir=/tmp/cache/pytest` argv；caller 不能添加 pytest option。
 - pytest target 最多 32 个、每个最多 1024 UTF-8 字节。目录、文件及 `FILE::NODE` 的文件前缀必须真实存在于 workspace，且不能穿越、命中 blocked/ignored、经过符号链接或指向特殊文件。
 - `run_python_script(profile, path)` 只接受一个真实的 workspace `.py` 普通文件，不支持 script args、`-c` 或 caller 选择的 `-m MODULE`。
 - `run_command(profile, program, args, cwd)` 同步执行通用容器 argv，返回格式与 `run_task` 一致；`start_command` 使用同一 service manager，返回随机 `task_id`，继续通过 `task_status`、`task_logs` 和 `stop_task` 管理。
@@ -307,6 +307,8 @@ docker image inspect --format '{{.Id}}' sandboxed-workspace-mcp-task:local
 每次 task 或 execution profile 执行都先从当前唯一根目录建立临时快照。核心 blocked 路径、ignored 目录、所有符号链接和特殊文件不会进入快照；文件数与总字节数有硬上限。总 timeout 从快照创建前开始计算，遍历和每个复制块都会检查 deadline/cancellation。容器只挂载该快照到固定 `/workspace`，真实根目录从不 bind mount。执行成功、失败、超时、取消、停止或服务退出后都会清理快照，修改不会同步回来。
 
 每个任务的 `workspace_access` 默认为 `read-only`，此时 `/workspace` 使用只读 bind mount。确实需要生成构建产物的任务必须在工作区外配置中显式声明 `"workspace_access": "writable"`，同时显式设置 `max_workspace_file_bytes`、`max_workspace_growth_bytes` 和 `"allow_best_effort_disk_limit": true`，否则配置加载即失败。可写任务使用容器 `fsize` ulimit 限制单文件，并由宿主线程监视快照总增长，越限时停止容器并报告 `workspace_limit_exceeded`。总增长检查存在采样窗口，是降低宿主磁盘写满风险的 best-effort 防线，不是文件系统或内核级硬配额；高风险任务仍应运行在有独立磁盘配额的专用主机或 VM 上。
+
+只读任务/profile 的通用临时缓存使用受 64 MiB tmpfs 限制的 `/tmp`：XDG、Ruff、mypy、coverage 和 npm 缓存/状态分别指向 `/tmp/cache` 下的对应目录、`/tmp/.coverage` 和 `/tmp/npm-cache`，并禁用 Python bytecode 与 pip cache。结构化 `run_pytest` 会自动使用 `/tmp/cache/pytest`；通用 `run_command`/`start_command` 或固定 task 中的 pytest 不注入全局 `PYTEST_ADDOPTS`，需要在 argv 中显式传入 `-o cache_dir=/tmp/cache/pytest`。`build/`、`dist/`、`htmlcov/` 等显式构建或报告产物不会自动重定向；在只读 profile 中应通过工具参数写入 `/tmp`，需要写入 workspace 时则使用受限的 writable task/profile。
 
 生产后端只用参数数组调用配置指定的 Docker 或 Podman，不使用 Shell，也不回退到宿主机运行 Python、Node、Go、pytest 或项目代码。容器使用 `--pull=never`、无网络、只读根文件系统、drop 全部 capabilities、`no-new-privileges`、非 root 用户、CPU/内存/PID 限制及隔离 tmpfs；不会继承宿主代理、凭证、SSH agent、用户 HOME 或 Docker socket。
 

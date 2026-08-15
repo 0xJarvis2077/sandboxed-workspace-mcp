@@ -73,7 +73,7 @@ class PythonCommandCompiler:
             )
 
         validated_targets = [self._pytest_target(target) for target in target_values]
-        argv = ["python", "-m", "pytest"]
+        argv = ["python", "-m", "pytest", "-o", "cache_dir=/tmp/cache/pytest"]
         if quiet:
             argv.append("-q")
         if verbosity:

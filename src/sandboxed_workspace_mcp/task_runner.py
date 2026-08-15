@@ -145,7 +145,8 @@ class _CliContainerHandle:
             return
         try:
             while True:
-                chunk = stream.read(64 * 1024)  # type: ignore[attr-defined]
+                # BufferedReader.read(size) may wait for size bytes or EOF.
+                chunk = stream.read1(64 * 1024)  # type: ignore[attr-defined]
                 if not chunk:
                     return
                 callback(chunk)
@@ -248,6 +249,12 @@ def build_container_argv(executable: str, request: ContainerRequest) -> list[str
         "TMPDIR=/tmp",
         "--env",
         "XDG_CACHE_HOME=/tmp/cache",
+        "--env",
+        "RUFF_CACHE_DIR=/tmp/cache/ruff",
+        "--env",
+        "MYPY_CACHE_DIR=/tmp/cache/mypy",
+        "--env",
+        "COVERAGE_FILE=/tmp/.coverage",
         "--env",
         "PYTHONDONTWRITEBYTECODE=1",
         "--env",
