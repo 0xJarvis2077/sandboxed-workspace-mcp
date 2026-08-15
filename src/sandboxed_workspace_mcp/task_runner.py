@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 from .task_config import TaskDefinition, TaskLimits
@@ -29,6 +29,7 @@ class ContainerRequest:
     snapshot_path: Path
     task: TaskDefinition
     limits: TaskLimits
+    container_workdir: str = "/workspace"
     initial_workspace_bytes: int = 0
     started_at: float | None = None
     deadline: float | None = None
@@ -234,7 +235,7 @@ def build_container_argv(executable: str, request: ContainerRequest) -> list[str
         "--pids-limit",
         str(limits.pids),
         "--workdir",
-        "/workspace",
+        _validated_container_workdir(request.container_workdir),
         "--mount",
         mount,
         "--tmpfs",
@@ -519,6 +520,16 @@ def _container_user() -> str:
         if uid > 0:
             return f"{uid}:{gid}"
     return "65532:65532"
+
+
+def _validated_container_workdir(value: str) -> str:
+    if not isinstance(value, str) or "\x00" in value or "\\" in value:
+        raise TaskExecutionError("container workdir must be inside /workspace")
+    if value != "/workspace" and not value.startswith("/workspace/"):
+        raise TaskExecutionError("container workdir must be inside /workspace")
+    if PurePosixPath(value).as_posix() != value or ".." in PurePosixPath(value).parts:
+        raise TaskExecutionError("container workdir must be a canonical workspace path")
+    return value
 
 
 def _runtime_environment() -> dict[str, str]:

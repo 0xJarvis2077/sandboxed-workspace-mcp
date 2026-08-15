@@ -76,6 +76,8 @@ _STRICT_TOOL_ARGUMENTS = {
         }
     ),
     "run_python_script": frozenset({"profile", "path"}),
+    "run_command": frozenset({"profile", "program", "args", "cwd"}),
+    "start_command": frozenset({"profile", "program", "args", "cwd"}),
 }
 _TOOL_SCOPES = {
     "project_info": "workspace.read",
@@ -106,6 +108,8 @@ _TOOL_SCOPES = {
     "python_version": "tasks.run",
     "run_pytest": "tasks.run",
     "run_python_script": "tasks.run",
+    "run_command": "tasks.run",
+    "start_command": "tasks.run",
 }
 
 
@@ -443,7 +447,16 @@ def create_server(
         async def start_task(name: str) -> dict[str, object]:
             """Start one configured service-mode task for diagnostics and logs."""
 
-            return await asyncio.to_thread(task_manager.start_task, name)
+            cancellation = threading.Event()
+            try:
+                return await asyncio.to_thread(
+                    task_manager.start_task,
+                    name,
+                    cancellation_event=cancellation,
+                )
+            except asyncio.CancelledError:
+                cancellation.set()
+                raise
 
         @server.tool(annotations=READ_ONLY)
         def task_status(task_id: str) -> dict[str, object]:
@@ -547,5 +560,82 @@ def create_server(
                 except asyncio.CancelledError:
                     cancellation.set()
                     raise
+
+        if any(
+            "run_command" in profile.tools and profile.allow_arbitrary_commands
+            for profile in task_manager.configuration.profiles.values()
+        ):
+
+            @server.tool(annotations=TASK_EXECUTION)
+            async def run_command(
+                profile: str,
+                program: str,
+                args: list[str] | None = None,
+                cwd: str = ".",
+            ) -> dict[str, object]:
+                """Run caller argv in an explicitly authorized container profile."""
+
+                cancellation = threading.Event()
+                try:
+                    return await asyncio.to_thread(
+                        task_manager.run_command,
+                        profile,
+                        program,
+                        args,
+                        cwd,
+                        cancellation_event=cancellation,
+                    )
+                except asyncio.CancelledError:
+                    cancellation.set()
+                    raise
+
+        command_services_enabled = any(
+            "start_command" in profile.tools and profile.allow_arbitrary_commands
+            for profile in task_manager.configuration.profiles.values()
+        )
+        if command_services_enabled:
+
+            @server.tool(annotations=TASK_EXECUTION)
+            async def start_command(
+                profile: str,
+                program: str,
+                args: list[str] | None = None,
+                cwd: str = ".",
+            ) -> dict[str, object]:
+                """Start caller argv for bounded diagnostics and log observation."""
+
+                cancellation = threading.Event()
+                try:
+                    return await asyncio.to_thread(
+                        task_manager.start_command,
+                        profile,
+                        program,
+                        args,
+                        cwd,
+                        cancellation_event=cancellation,
+                    )
+                except asyncio.CancelledError:
+                    cancellation.set()
+                    raise
+
+        if command_services_enabled and not task_manager.configuration.tasks:
+
+            @server.tool(annotations=READ_ONLY)
+            def task_status(task_id: str) -> dict[str, object]:
+                """Inspect one service command created by this server instance."""
+
+                return task_manager.task_status(task_id)
+
+            @server.tool(annotations=READ_ONLY)
+            def task_logs(task_id: str, cursor: int = 0) -> dict[str, object]:
+                """Read bounded command stdout/stderr from an absolute byte cursor."""
+
+                return task_manager.task_logs(task_id, cursor)
+
+            @server.tool(annotations=TASK_EXECUTION)
+            async def stop_task(task_id: str) -> dict[str, object]:
+                """Stop one service command tracked by this server instance."""
+
+                return await asyncio.to_thread(task_manager.stop_task, task_id)
 
     return server

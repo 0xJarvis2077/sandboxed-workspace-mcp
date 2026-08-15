@@ -18,7 +18,7 @@ from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.oauth import JWTTokenVerifier, OAuthSettings
 from sandboxed_workspace_mcp.server import create_server
 from sandboxed_workspace_mcp.task_config import (
-    PythonExecutionProfile,
+    ExecutionProfile,
     TaskConfiguration,
     TaskDefinition,
     TaskLimits,
@@ -293,8 +293,11 @@ class OAuthServerTests(unittest.TestCase):
             ),
             profiles=MappingProxyType(
                 {
-                    "debug": PythonExecutionProfile(
-                        "debug", IMAGE, frozenset({"python_version"})
+                    "debug": ExecutionProfile(
+                        "debug",
+                        IMAGE,
+                        frozenset({"python_version", "run_command", "start_command"}),
+                        allow_arbitrary_commands=True,
                     )
                 }
             ),
@@ -327,6 +330,14 @@ class OAuthServerTests(unittest.TestCase):
         )
         self.assertEqual(
             by_name["python_version"].meta["securitySchemes"],
+            [{"type": "oauth2", "scopes": ["tasks.run"]}],
+        )
+        self.assertEqual(
+            by_name["run_command"].meta["securitySchemes"],
+            [{"type": "oauth2", "scopes": ["tasks.run"]}],
+        )
+        self.assertEqual(
+            by_name["start_command"].meta["securitySchemes"],
             [{"type": "oauth2", "scopes": ["tasks.run"]}],
         )
         self.assertEqual(
@@ -372,11 +383,20 @@ class OAuthServerTests(unittest.TestCase):
             ):
                 run = await server.call_tool("run_task", {"name": "test"})
                 version = await server.call_tool("python_version", {"profile": "debug"})
+                command = await server.call_tool(
+                    "run_command",
+                    {
+                        "profile": "debug",
+                        "program": "ruff",
+                        "args": ["check", "."],
+                    },
+                )
                 self.assertFalse(run.is_error)
                 self.assertFalse(version.is_error)
+                self.assertFalse(command.is_error)
 
         asyncio.run(exercise())
-        self.assertEqual(len(backend.requests), 2)
+        self.assertEqual(len(backend.requests), 3)
         manager.shutdown()
 
     def test_resource_metadata_and_http_challenge_trigger_oauth_discovery(self) -> None:

@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import os
-import stat
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import PurePosixPath
 
+from .command_execution import ExecutionPathError, WorkspaceExecutionPathValidator
 from .config import Settings
-from .workspace import Workspace, WorkspaceError
 
 MAX_PYTEST_TARGETS = 32
 MAX_PYTEST_TARGET_BYTES = 1024
@@ -23,7 +21,7 @@ class PythonCommandCompiler:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.workspace = Workspace(settings)
+        self.paths = WorkspaceExecutionPathValidator(settings)
 
     @staticmethod
     def python_version() -> tuple[str, ...]:
@@ -125,70 +123,8 @@ class PythonCommandCompiler:
         return "::".join([relative, *parts[1:]])
 
     def _workspace_entry(self, value: str) -> tuple[str, bool]:
-        if not isinstance(value, str) or not value or "\x00" in value:
-            raise PythonExecutionError("execution path must be a non-empty string")
-        if "\\" in value or value.startswith("~") or PureWindowsPath(value).drive:
-            raise PythonExecutionError(
-                "execution paths use workspace-relative '/' path syntax"
-            )
-        supplied = PurePosixPath(value)
-        if ".." in supplied.parts:
-            raise PythonExecutionError("execution paths must not contain '..'")
-        raw_path = Path(value)
-        candidate = (
-            raw_path if raw_path.is_absolute() else self.settings.root / raw_path
-        )
-        lexical = Path(os.path.abspath(candidate))
         try:
-            lexical_relative = lexical.relative_to(self.settings.root)
-        except ValueError as exc:
-            raise PythonExecutionError("execution path escapes workspace") from exc
-        try:
-            resolved = self.workspace.safe_path(value)
-        except WorkspaceError as exc:
+            entry = self.paths.entry(value)
+        except ExecutionPathError as exc:
             raise PythonExecutionError(str(exc)) from exc
-        try:
-            relative = resolved.relative_to(self.settings.root)
-        except ValueError as exc:  # defensive: safe_path already enforces this
-            raise PythonExecutionError("execution path escapes workspace") from exc
-        if relative != lexical_relative:
-            raise PythonExecutionError(
-                f"execution path must not contain symbolic links: {value}"
-            )
-        candidate = lexical
-        if any(part in self.settings.ignored_dirs for part in lexical_relative.parts):
-            raise PythonExecutionError(
-                "execution path is omitted from disposable workspace snapshots"
-            )
-
-        current = self.settings.root
-        for part in lexical_relative.parts:
-            current = current / part
-            try:
-                metadata = current.lstat()
-            except OSError as exc:
-                raise PythonExecutionError(
-                    f"execution path does not exist: {value}"
-                ) from exc
-            if stat.S_ISLNK(metadata.st_mode):
-                raise PythonExecutionError(
-                    f"execution path must not contain symbolic links: {value}"
-                )
-        try:
-            metadata = candidate.lstat()
-        except OSError as exc:
-            raise PythonExecutionError(
-                f"execution path does not exist: {value}"
-            ) from exc
-        if stat.S_ISDIR(metadata.st_mode):
-            is_directory = True
-        elif stat.S_ISREG(metadata.st_mode):
-            is_directory = False
-        else:
-            raise PythonExecutionError(
-                f"execution path is not a regular file or directory: {value}"
-            )
-        return (
-            "." if not lexical_relative.parts else lexical_relative.as_posix(),
-            is_directory,
-        )
+        return entry.relative, entry.is_directory

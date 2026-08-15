@@ -14,7 +14,7 @@ from unittest.mock import patch
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.server import create_server
 from sandboxed_workspace_mcp.task_config import (
-    PythonExecutionProfile,
+    ExecutionProfile,
     TaskConfiguration,
     TaskDefinition,
     TaskLimits,
@@ -161,10 +161,13 @@ def profile_configuration(
     limits: TaskLimits | None = None,
 ) -> TaskConfiguration:
     profiles = {
-        "debug": PythonExecutionProfile(
+        "debug": ExecutionProfile(
             "debug",
             PINNED_IMAGE,
             tools,
+            allow_arbitrary_commands=bool(
+                {"run_command", "start_command"}.intersection(tools)
+            ),
         )
     }
     return TaskConfiguration(
@@ -211,6 +214,44 @@ class ContainerRunnerTests(unittest.TestCase):
         self.assertNotIn("shell", argv)
         self.assertNotIn("-c", argv[: argv.index(PINNED_IMAGE)])
         self.assertEqual(argv[-3:], ["python", "-m", "unittest"])
+
+    def test_command_workdir_and_argv_cannot_become_runtime_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory)
+            task = TaskDefinition(
+                "coding-run_command",
+                "run",
+                PINNED_IMAGE,
+                ("tool", "--network=host", "-c", "echo unsafe"),
+            )
+            request = ContainerRequest(
+                "sandboxed-workspace-mcp-command",
+                snapshot,
+                task,
+                TaskLimits(),
+                container_workdir="/workspace/src",
+            )
+            argv = build_container_argv("/usr/bin/docker", request)
+
+        image_index = argv.index(PINNED_IMAGE)
+        self.assertEqual(argv[argv.index("--workdir") + 1], "/workspace/src")
+        self.assertEqual(
+            argv[image_index + 1 :],
+            ["tool", "--network=host", "-c", "echo unsafe"],
+        )
+        self.assertNotIn("--network=host", argv[:image_index])
+        self.assertNotIn("sh", argv[:image_index])
+
+        with tempfile.TemporaryDirectory() as directory:
+            unsafe = ContainerRequest(
+                "sandboxed-workspace-mcp-command",
+                Path(directory),
+                task,
+                TaskLimits(),
+                container_workdir="/tmp",
+            )
+            with self.assertRaisesRegex(TaskExecutionError, "inside /workspace"):
+                build_container_argv("/usr/bin/docker", unsafe)
 
     def test_writable_mount_has_fsize_ulimit_and_growth_monitor_stops_task(
         self,
@@ -514,6 +555,127 @@ class TaskManagerTests(unittest.TestCase):
         self.assertNotIn(PINNED_IMAGE, repr(public))
         self.assertNotIn(str(self.base), repr(public))
         self.assertNotIn("argv", repr(public))
+
+    def test_run_command_uses_profile_image_caller_argv_and_validated_cwd(self) -> None:
+        (self.root / "src").mkdir()
+        backend = FakeBackend(stdout=b"checked\n")
+        manager = TaskManager(
+            self.settings,
+            profile_configuration(
+                self.base,
+                tools=frozenset({"run_command"}),
+            ),
+            backend=backend,
+        )
+
+        result = manager.run_command(
+            "debug",
+            "ruff",
+            ["check", "--fix", "."],
+            "src",
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["stdout"], "checked\n")
+        request = backend.requests[0]
+        self.assertEqual(request.task.image, PINNED_IMAGE)
+        self.assertEqual(request.task.mode, "run")
+        self.assertEqual(request.task.argv, ("ruff", "check", "--fix", "."))
+        self.assertEqual(request.container_workdir, "/workspace/src")
+        self.assertFalse(request.snapshot_path.exists())
+
+        public = manager.list_execution_profiles()
+        self.assertNotIn(PINNED_IMAGE, repr(public))
+        self.assertNotIn("argv", repr(public))
+        with self.assertRaisesRegex(TaskManagerError, "does not authorize"):
+            TaskManager(
+                self.settings,
+                profile_configuration(
+                    self.base,
+                    tools=frozenset({"python_version"}),
+                ),
+                backend=FakeBackend(),
+            ).run_command("debug", "python", cwd="../outside")
+
+    def test_start_command_reuses_service_logs_capacity_stop_and_shutdown(self) -> None:
+        backend = FakeBackend(stdout=b"ready\n", stderr=b"warning\n", blocking=True)
+        limits = TaskLimits(
+            timeout_seconds=3,
+            max_output_bytes=1024,
+            max_concurrent_tasks=1,
+        )
+        manager = TaskManager(
+            self.settings,
+            profile_configuration(
+                self.base,
+                tools=frozenset({"run_command", "start_command"}),
+                limits=limits,
+            ),
+            backend=backend,
+        )
+
+        started = manager.start_command(
+            "debug",
+            "uvicorn",
+            ["app:app", "--log-level", "debug"],
+        )
+        task_id = started["task_id"]
+        assert isinstance(task_id, str)
+        request = backend.requests[0]
+
+        self.assertNotEqual(task_id, request.container_name)
+        self.assertEqual(request.task.mode, "service")
+        self.assertEqual(
+            request.task.argv,
+            ("uvicorn", "app:app", "--log-level", "debug"),
+        )
+        self.assertEqual(request.container_workdir, "/workspace")
+        self.assertNotIn("uvicorn", repr(manager.task_status(task_id)))
+        self.assertEqual(manager.task_logs(task_id)["stdout"], "ready\n")
+        self.assertEqual(manager.task_logs(task_id)["stderr"], "warning\n")
+        with self.assertRaisesRegex(TaskManagerError, "concurrent"):
+            manager.run_command("debug", "ruff", ["check", "."])
+
+        stopped = manager.stop_task(task_id)
+        self.assertEqual(stopped["status"], "stopped")
+        self.assertTrue(backend.handles[0].stopped)
+        self.assertFalse(request.snapshot_path.exists())
+
+        cancelled_backend = FakeBackend(blocking=True)
+        cancelled_manager = TaskManager(
+            self.settings,
+            profile_configuration(
+                self.base,
+                tools=frozenset({"start_command"}),
+            ),
+            backend=cancelled_backend,
+        )
+        cancellation = threading.Event()
+        cancellation.set()
+        with self.assertRaisesRegex(TaskManagerError, "failed to start"):
+            cancelled_manager.start_command(
+                "debug",
+                "uvicorn",
+                ["app:app"],
+                cancellation_event=cancellation,
+            )
+        self.assertEqual(cancelled_backend.requests, [])
+        self.assertTrue(cancelled_manager._capacity.acquire(blocking=False))
+        cancelled_manager._capacity.release()
+
+        shutdown_backend = FakeBackend(blocking=True)
+        shutdown_manager = TaskManager(
+            self.settings,
+            profile_configuration(
+                self.base,
+                tools=frozenset({"start_command"}),
+            ),
+            backend=shutdown_backend,
+        )
+        shutdown_manager.start_command("debug", "python", ["-m", "http.server"])
+        shutdown_manager.shutdown()
+        self.assertTrue(shutdown_backend.handles[0].stopped)
+        self.assertFalse(shutdown_backend.requests[0].snapshot_path.exists())
 
     def test_python_profile_rejects_unauthorized_options_and_unsafe_paths(self) -> None:
         manager = TaskManager(
@@ -960,6 +1122,68 @@ class TaskManagerTests(unittest.TestCase):
                 )
 
         asyncio.run(exercise())
+
+    def test_server_registers_generic_commands_only_for_authorized_profiles(
+        self,
+    ) -> None:
+        backend = FakeBackend()
+        manager = TaskManager(
+            self.settings,
+            profile_configuration(
+                self.base,
+                tools=frozenset({"run_command", "start_command"}),
+            ),
+            backend=backend,
+        )
+        command_server = create_server(self.settings, task_manager=manager)
+        by_name = {tool.name: tool for tool in asyncio.run(command_server.list_tools())}
+        command_tools = {
+            "run_command",
+            "start_command",
+            "task_status",
+            "task_logs",
+            "stop_task",
+        }
+        self.assertTrue(command_tools.issubset(by_name))
+        self.assertNotIn("run_task", by_name)
+        for name in ("run_command", "start_command"):
+            self.assertEqual(
+                set(by_name[name].input_schema["properties"]),
+                {"profile", "program", "args", "cwd"},
+            )
+            self.assertFalse(by_name[name].input_schema["additionalProperties"])
+
+        async def exercise() -> None:
+            run = await command_server.call_tool(
+                "run_command",
+                {
+                    "profile": "debug",
+                    "program": "ruff",
+                    "args": ["check", "."],
+                },
+            )
+            started = await command_server.call_tool(
+                "start_command",
+                {
+                    "profile": "debug",
+                    "program": "uvicorn",
+                    "args": ["app:app"],
+                },
+            )
+            self.assertFalse(run.is_error)
+            self.assertFalse(started.is_error)
+            with self.assertRaisesRegex(ValueError, "unexpected argument"):
+                await command_server.call_tool(
+                    "run_command",
+                    {
+                        "profile": "debug",
+                        "program": "python",
+                        "env": {"TOKEN": "secret"},
+                    },
+                )
+
+        asyncio.run(exercise())
+        self.assertEqual(len(backend.requests), 2)
 
 
 if __name__ == "__main__":

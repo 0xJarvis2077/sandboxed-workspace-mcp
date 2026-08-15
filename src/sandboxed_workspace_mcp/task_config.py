@@ -20,7 +20,16 @@ _IMAGE_DIGEST = re.compile(
 )
 _MEMORY = re.compile(r"[1-9][0-9]*(?:[kKmMgG](?:[bB])?)?\Z")
 _CPUS = re.compile(r"[0-9]+(?:\.[0-9]{1,3})?\Z")
-PYTHON_PROFILE_TOOLS = frozenset({"python_version", "run_pytest", "run_python_script"})
+EXECUTION_PROFILE_TOOLS = frozenset(
+    {
+        "python_version",
+        "run_pytest",
+        "run_python_script",
+        "run_command",
+        "start_command",
+    }
+)
+ARBITRARY_COMMAND_TOOLS = frozenset({"run_command", "start_command"})
 
 
 class TaskConfigurationError(ValueError):
@@ -56,13 +65,14 @@ class TaskDefinition:
 
 
 @dataclass(frozen=True, slots=True)
-class PythonExecutionProfile:
-    """Operator-authorized structured Python tools sharing one pinned image."""
+class ExecutionProfile:
+    """Operator-authorized execution tools sharing one pinned image."""
 
     name: str
     image: str
     tools: frozenset[str]
     workspace_access: str = "read-only"
+    allow_arbitrary_commands: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +83,7 @@ class TaskConfiguration:
     runtime: str
     limits: TaskLimits
     tasks: Mapping[str, TaskDefinition]
-    profiles: Mapping[str, PythonExecutionProfile] = field(
+    profiles: Mapping[str, ExecutionProfile] = field(
         default_factory=lambda: MappingProxyType({})
     )
 
@@ -197,7 +207,7 @@ def _validate_config(raw: Any, source: Path) -> TaskConfiguration:
     profile_values = _object(value.get("profiles", {}), "profiles")
     if not task_values and not profile_values:
         raise TaskConfigurationError(
-            "task config must define at least one task or Python profile"
+            "task config must define at least one task or execution profile"
         )
     tasks: dict[str, TaskDefinition] = {}
     for name, task_value in task_values.items():
@@ -206,13 +216,13 @@ def _validate_config(raw: Any, source: Path) -> TaskConfiguration:
                 f"invalid task name {name!r}; use 1-64 letters, digits, '_' or '-'"
             )
         tasks[name] = _validate_task(name, task_value)
-    profiles: dict[str, PythonExecutionProfile] = {}
+    profiles: dict[str, ExecutionProfile] = {}
     for name, profile_value in profile_values.items():
         if not isinstance(name, str) or _TASK_NAME.fullmatch(name) is None:
             raise TaskConfigurationError(
                 f"invalid profile name {name!r}; use 1-64 letters, digits, '_' or '-'"
             )
-        profiles[name] = _validate_python_profile(name, profile_value)
+        profiles[name] = _validate_execution_profile(name, profile_value)
     if any(task.workspace_access == "writable" for task in tasks.values()) or any(
         profile.workspace_access == "writable" for profile in profiles.values()
     ):
@@ -387,11 +397,11 @@ def _validate_task(name: str, raw: Any) -> TaskDefinition:
     )
 
 
-def _validate_python_profile(name: str, raw: Any) -> PythonExecutionProfile:
+def _validate_execution_profile(name: str, raw: Any) -> ExecutionProfile:
     value = _object(raw, f"profile {name!r}")
     _known_fields(
         value,
-        {"image", "tools", "workspace_access"},
+        {"image", "tools", "workspace_access", "allow_arbitrary_commands"},
         f"profile {name!r}",
     )
     _required_fields(value, {"image", "tools"}, f"profile {name!r}")
@@ -406,13 +416,13 @@ def _validate_python_profile(name: str, raw: Any) -> PythonExecutionProfile:
         raise TaskConfigurationError(
             f"profile {name!r} tools must be a non-empty array"
         )
-    if len(raw_tools) > len(PYTHON_PROFILE_TOOLS):
+    if len(raw_tools) > len(EXECUTION_PROFILE_TOOLS):
         raise TaskConfigurationError(f"profile {name!r} has too many tools")
     tools: list[str] = []
     for tool in raw_tools:
-        if not isinstance(tool, str) or tool not in PYTHON_PROFILE_TOOLS:
+        if not isinstance(tool, str) or tool not in EXECUTION_PROFILE_TOOLS:
             raise TaskConfigurationError(
-                f"profile {name!r} contains an unsupported Python tool: {tool!r}"
+                f"profile {name!r} contains an unsupported execution tool: {tool!r}"
             )
         if tool in tools:
             raise TaskConfigurationError(
@@ -424,11 +434,22 @@ def _validate_python_profile(name: str, raw: Any) -> PythonExecutionProfile:
         raise TaskConfigurationError(
             f"profile {name!r} workspace_access must be 'read-only' or 'writable'"
         )
-    return PythonExecutionProfile(
+    allow_arbitrary_commands = value.get("allow_arbitrary_commands", False)
+    if type(allow_arbitrary_commands) is not bool:
+        raise TaskConfigurationError(
+            f"profile {name!r} allow_arbitrary_commands must be a boolean"
+        )
+    if ARBITRARY_COMMAND_TOOLS.intersection(tools) and not allow_arbitrary_commands:
+        raise TaskConfigurationError(
+            f"profile {name!r} must explicitly set allow_arbitrary_commands=true "
+            "to authorize run_command or start_command"
+        )
+    return ExecutionProfile(
         name=name,
         image=image,
         tools=frozenset(tools),
         workspace_access=workspace_access,
+        allow_arbitrary_commands=allow_arbitrary_commands,
     )
 
 

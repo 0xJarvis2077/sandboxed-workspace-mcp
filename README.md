@@ -1,6 +1,6 @@
 # Sandboxed Workspace MCP
 
-把一个明确指定的本地项目目录，以默认安全、契约明确且资源有界的方式暴露为 MCP 工具。服务提供文本读取与搜索、原子文本写入、目录树，以及严格白名单化的只读 Git 查询。默认配置仍不执行任何项目代码；服务操作者可以额外提供工作区外的可信 task config，授权一组只能在 Docker/Podman 隔离快照中运行的固定任务。它始终不提供真实 Shell、任意命令/参数执行或删除工具。
+把一个明确指定的本地项目目录，以默认安全、契约明确且资源有界的方式暴露为 MCP 工具。服务提供文本读取与搜索、原子文本写入、目录树，以及严格白名单化的只读 Git 查询。默认配置仍不执行任何项目代码；服务操作者可以额外提供工作区外的可信 task config，授权只能在 Docker/Podman 隔离快照中运行的固定任务或 execution profile。它不提供宿主 Shell 或删除工具；只有显式确认 `allow_arbitrary_commands=true` 的 profile 才会开放容器内通用 argv 执行。
 
 ## 安装与推荐配置
 
@@ -51,7 +51,7 @@ python -m venv .venv
 | 兼容接口 | `run_shell` | 解析封闭命令语法，从不启动 Shell |
 | 沙箱任务（仅配置后） | `list_tasks`, `run_task` | 枚举或同步运行操作者预定义的 `run` 任务 |
 | 沙箱服务（仅配置后） | `start_task`, `task_status`, `task_logs`, `stop_task` | 管理本实例启动的 `service` 任务和有界日志；不映射端口 |
-| Python profile（仅显式配置后） | `list_execution_profiles`, `python_version`, `run_pytest`, `run_python_script` | 服务端编译结构化参数，在固定镜像与一次性快照中执行；需要 `tasks.run` |
+| Execution profile（仅显式配置后） | `list_execution_profiles`, `python_version`, `run_pytest`, `run_python_script`, `run_command`, `start_command` | 在固定镜像与一次性快照中执行；通用命令还要求显式任意代码授权，执行需要 `tasks.run` |
 
 当 `--read-only` 或 `SANDBOXED_WORKSPACE_MCP_READ_ONLY=true` 时，MCP 工具发现中不会注册四个写工具；即使调用方绕过工具发现直接使用核心 `Workspace`，核心层仍会拒绝写入。
 
@@ -196,28 +196,56 @@ SANDBOXED_WORKSPACE_MCP_BLOCKED_PATHS='secrets/**,*.credential'
 
 ## 可选的容器沙箱任务
 
-task config 是服务操作者授予的执行权限，不是不可信 MCP 调用方的输入。配置必须是工作区外的绝对路径、普通且非符号链接文件；服务以安全打开和 `fstat` 校验有界 JSON，在启动时完成严格解析并冻结，运行期间不热重载。版本 1 配置可以包含原有 `tasks`、新增 `profiles` 或二者；原有仅含 `tasks` 的文件保持兼容。MCP 只能提交已定义的任务/ profile 名、本工具 schema 声明的结构化字段或本实例签发的随机 `task_id`，不能提交通用 argv、环境变量、镜像、工作目录、挂载、端口或容器 ID。
+task config 是服务操作者授予的执行权限，不是不可信 MCP 调用方的输入。配置必须是工作区外的绝对路径、普通且非符号链接文件；服务以安全打开和 `fstat` 校验有界 JSON，在启动时完成严格解析并冻结，运行期间不热重载。版本 1 配置可以包含原有 `tasks`、新增 `profiles` 或二者；原有仅含 `tasks` 和旧版仅含 Python tools 的 profile 都保持兼容。MCP 只能提交已定义的任务/profile 名、工具 schema 声明的字段或本实例签发的随机 `task_id`。只有显式授权 `run_command`/`start_command` 的 profile 才能提交受限 `program`、`args` 和 `cwd`；调用方始终不能覆盖环境变量、镜像、网络、挂载、端口、容器参数、资源限制或内部容器 ID。
 
 [通用配置模板](examples/tasks.json) 提供 `test`、`lint`、`build`、`dev` 四个任务槽位，其中镜像和 argv 都是故意不可用的明显占位符。`image` 可以是 registry 的完整 `repository@sha256:<64位digest>`，也可以是 Docker/Podman 本机已有镜像的完整 `sha256:<64位image ID>`；tag 和短 ID 都会被拒绝。复制到工作区外后，替换所需任务并删除不用的任务；仓库内模板本身会被“配置必须位于工作区外”的规则拒绝，不能直接用于生产启动。
 
-[Python profile 模板](examples/python-profiles.json) 使用相同的 runtime 和全局 `limits`，
+[Execution profile 模板](examples/execution-profiles.json) 使用相同的 runtime 和全局 `limits`，
 但不保存 caller argv。每个 profile 固定名称、完整 image digest/ID、允许的工具集合与
 `workspace_access`。只有至少一个 profile 显式允许相应工具时，服务才注册
 `list_execution_profiles` 以及对应的执行工具；发现结果只返回名称、允许工具、
 访问模式和资源上限，不返回 image、生成的 argv 或配置文件路径。未知字段、可变 tag、
 未知/重复工具和非法访问模式会使整个配置在启动时失败。
 
-Python profile 的结构化能力如下：
+Execution profile 的能力如下：
 
 - `python_version(profile)` 在同一固定容器镜像中运行 `python --version`，不会读取宿主 Python。
 - `run_pytest(...)` 只接受 `targets`、有界 `keyword`、`quiet`、0–2 的 `verbosity`、`exit_first`、`no_capture` 和 `auto|short|long` traceback。服务端生成 `python -m pytest` argv；caller 不能添加 pytest option。
 - pytest target 最多 32 个、每个最多 1024 UTF-8 字节。目录、文件及 `FILE::NODE` 的文件前缀必须真实存在于 workspace，且不能穿越、命中 blocked/ignored、经过符号链接或指向特殊文件。
 - `run_python_script(profile, path)` 只接受一个真实的 workspace `.py` 普通文件，不支持 script args、`-c` 或 caller 选择的 `-m MODULE`。
+- `run_command(profile, program, args, cwd)` 同步执行通用容器 argv，返回格式与 `run_task` 一致；`start_command` 使用同一 service manager，返回随机 `task_id`，继续通过 `task_status`、`task_logs` 和 `stop_task` 管理。
+- `program` 必须是镜像 `PATH` 中解析的 basename，不允许路径或 NUL，且最多 256 UTF-8 字节；服务不会在宿主检查它是否存在，也不会包装为 `sh -c`。
+- `args` 最多 128 项、单项 4096 字节、合计 32768 字节，逐项原样放到镜像之后；`cwd` 必须是最多 1024 字节的真实 workspace-relative POSIX 目录，不能穿越、命中 blocked/ignored、包含符号链接或反斜杠。
+
+启用通用命令必须由可信操作者明确承认“容器内任意代码执行”授权：
+
+```json
+{
+  "profiles": {
+    "coding": {
+      "image": "sha256:<完整的64位本地镜像ID>",
+      "tools": ["run_command", "start_command"],
+      "workspace_access": "read-only",
+      "allow_arbitrary_commands": true
+    }
+  }
+}
+```
+
+调用示例：
+
+```python
+run_command(profile="coding", program="ruff", args=["check", "."])
+run_command(profile="coding", program="python", args=["manage.py", "check"])
+start_command(profile="coding", program="uvicorn", args=["app:app"])
+```
+
+镜像必须预装这些程序、项目依赖和必要的 CLI；容器没有网络，不能在运行时下载依赖。`start_command` 不映射端口，因此 FastAPI/Django 服务可以为启动诊断与日志观察而运行，但宿主或外部客户端不能访问它。需要真实数据库、凭证或外部服务的 migration 不属于此 profile，应由未来单独的 stateful/integration profile 设计。
 
 `run_python_script` 授权的是“在容器内执行任意 workspace Python 代码”，不是只授权
 某几个 Python API。脚本可以在容器内部调用 `subprocess`；边界来自受控 snapshot、
 固定镜像、无网络和容器资源/权限限制，而不是 grammar 对脚本内部行为的限制。
-因此 Python/pytest 永远不会加入只读 `run_shell`，执行工具需要 OAuth `tasks.run`。
+因此 Python/pytest 和通用命令永远不会加入只读 `run_shell`，执行工具需要 OAuth `tasks.run`。通用命令授权等价于容器内任意代码执行，但不等价于宿主 Shell、SSH 或宿主代码执行。
 容器隔离降低风险但不是 VM 安全边界；主动敌对代码应使用额外隔离的专用主机或 VM。
 
 先由可信操作者在服务外准备镜像。任务本身使用 `--pull=never`，绝不会隐式下载：
@@ -276,13 +304,13 @@ docker image inspect --format '{{.Id}}' sandboxed-workspace-mcp-task:local
   --transport streamable-http
 ```
 
-每次 task 或 Python profile 执行都先从当前唯一根目录建立临时快照。核心 blocked 路径、ignored 目录、所有符号链接和特殊文件不会进入快照；文件数与总字节数有硬上限。总 timeout 从快照创建前开始计算，遍历和每个复制块都会检查 deadline/cancellation。容器只挂载该快照到固定 `/workspace`，真实根目录从不 bind mount。执行成功、失败、超时、取消、停止或服务退出后都会清理快照，修改不会同步回来。
+每次 task 或 execution profile 执行都先从当前唯一根目录建立临时快照。核心 blocked 路径、ignored 目录、所有符号链接和特殊文件不会进入快照；文件数与总字节数有硬上限。总 timeout 从快照创建前开始计算，遍历和每个复制块都会检查 deadline/cancellation。容器只挂载该快照到固定 `/workspace`，真实根目录从不 bind mount。执行成功、失败、超时、取消、停止或服务退出后都会清理快照，修改不会同步回来。
 
 每个任务的 `workspace_access` 默认为 `read-only`，此时 `/workspace` 使用只读 bind mount。确实需要生成构建产物的任务必须在工作区外配置中显式声明 `"workspace_access": "writable"`，同时显式设置 `max_workspace_file_bytes`、`max_workspace_growth_bytes` 和 `"allow_best_effort_disk_limit": true`，否则配置加载即失败。可写任务使用容器 `fsize` ulimit 限制单文件，并由宿主线程监视快照总增长，越限时停止容器并报告 `workspace_limit_exceeded`。总增长检查存在采样窗口，是降低宿主磁盘写满风险的 best-effort 防线，不是文件系统或内核级硬配额；高风险任务仍应运行在有独立磁盘配额的专用主机或 VM 上。
 
 生产后端只用参数数组调用配置指定的 Docker 或 Podman，不使用 Shell，也不回退到宿主机运行 Python、Node、Go、pytest 或项目代码。容器使用 `--pull=never`、无网络、只读根文件系统、drop 全部 capabilities、`no-new-privileges`、非 root 用户、CPU/内存/PID 限制及隔离 tmpfs；不会继承宿主代理、凭证、SSH agent、用户 HOME 或 Docker socket。
 
-典型调试闭环：先用文件工具读取和精确修改代码，调用 `run_task("test")`，根据分离且有界的 stdout/stderr/traceback 再修改。长运行任务使用 `start_task("dev")`，再以 `task_status` 和带 cursor 的 `task_logs` 检查启动状态，最后 `stop_task`。第一版不支持端口映射，`start_task` 主要用于启动诊断和日志观察。
+典型调试闭环：操作者定义的权威流程使用固定 `run_task("test")`；Agent 自主探索使用已授权的 `run_command(...)`；高频 pytest 使用结构化 `run_pytest(...)`。长运行诊断使用 `start_task("dev")` 或 `start_command(...)`，再以 `task_status` 和带 cursor 的 `task_logs` 检查状态，最后 `stop_task`。两类 start 工具都不支持端口映射，只用于启动诊断和日志观察。
 
 ## streamable-http
 
@@ -311,7 +339,7 @@ https://<public-origin>/.well-known/oauth-protected-resource
 | `workspace.read` | `project_info`, `list_directory`, `tree`, `read_file`, `read_file_versioned`, `search_text`, all `git_*` tools, `run_shell` |
 | `workspace.write` | `create_directory`, `write_file`, `replace_text`, `append_file` |
 | `tasks.read` | `list_tasks`, `task_status`, `task_logs`, `list_execution_profiles` |
-| `tasks.run` | `run_task`, `start_task`, `stop_task`, `python_version`, `run_pytest`, `run_python_script` |
+| `tasks.run` | `run_task`, `start_task`, `stop_task`, `python_version`, `run_pytest`, `run_python_script`, `run_command`, `start_command` |
 
 先启动仍只监听本机的 MCP。下面所有尖括号内容都是部署时替换的占位符，`audience` 必须与规范化后的公开 HTTPS Origin 完全一致：
 
@@ -360,6 +388,7 @@ src/sandboxed_workspace_mcp/
   server.py        # MCP 工具注册、scope 检查和认证 challenge
   cli.py           # stdio/HTTP 启动、OAuth 配置和传输安全
   task_config.py   # 工作区外可信 JSON 的安全加载、验证与冻结
+  command_execution.py # 通用命令输入与 execution path 校验、argv/workdir 编译
   python_execution.py # 结构化 pytest/Python 输入验证与容器 argv 编译
   task_snapshot.py # blocked/ignored 感知的无跟随、有界临时快照
   task_runner.py   # 容器后端 Protocol、安全 argv 与同步执行

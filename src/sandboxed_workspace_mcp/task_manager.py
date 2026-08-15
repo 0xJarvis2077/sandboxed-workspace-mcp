@@ -8,10 +8,12 @@ import time
 from collections import deque
 from dataclasses import asdict, dataclass, field
 
+from .command_execution import CommandCompiler
 from .config import Settings
 from .python_execution import PythonCommandCompiler
 from .task_config import (
-    PythonExecutionProfile,
+    ARBITRARY_COMMAND_TOOLS,
+    ExecutionProfile,
     TaskConfiguration,
     TaskDefinition,
 )
@@ -181,13 +183,23 @@ class _CombinedCancellation:
 class _LeaseBackend:
     """Atomically reject post-shutdown starts and track a returned handle."""
 
-    def __init__(self, manager: TaskManager, lease: _StartLease) -> None:
+    def __init__(
+        self,
+        manager: TaskManager,
+        lease: _StartLease,
+        cancellation: _CombinedCancellation | None = None,
+    ) -> None:
         self.manager = manager
         self.lease = lease
+        self.cancellation = cancellation
 
     def start(self, request, on_stdout, on_stderr):
         with self.manager._lock:
-            if self.manager._shutdown or self.lease.cancellation.is_set():
+            if (
+                self.manager._shutdown
+                or self.lease.cancellation.is_set()
+                or (self.cancellation is not None and self.cancellation.is_set())
+            ):
                 raise TaskManagerError("task manager is shutting down")
             handle = self.manager.backend.start(request, on_stdout, on_stderr)
             self.lease.handle = handle
@@ -208,6 +220,7 @@ class TaskManager:
         self.configuration = configuration
         self.backend = backend or CliContainerBackend(configuration.runtime)
         self.python_commands = PythonCommandCompiler(settings)
+        self.commands = CommandCompiler(settings)
         self._capacity = threading.BoundedSemaphore(
             configuration.limits.max_concurrent_tasks
         )
@@ -308,6 +321,56 @@ class TaskManager:
             cancellation_event=cancellation_event,
         )
 
+    def run_command(
+        self,
+        profile: str,
+        program: str,
+        args: list[str] | None = None,
+        cwd: str = ".",
+        *,
+        cancellation_event: threading.Event | None = None,
+    ) -> dict[str, object]:
+        """Run a bounded caller argv in an explicitly authorized profile."""
+
+        self._require_profile(profile, "run_command")
+        command = self.commands.compile(program, args, cwd)
+        return self._run_profile_command(
+            profile,
+            "run_command",
+            command.argv,
+            container_workdir=command.container_workdir,
+            cancellation_event=cancellation_event,
+        )
+
+    def start_command(
+        self,
+        profile: str,
+        program: str,
+        args: list[str] | None = None,
+        cwd: str = ".",
+        *,
+        cancellation_event: threading.Event | None = None,
+    ) -> dict[str, object]:
+        """Start a bounded caller argv through the existing service lifecycle."""
+
+        started = time.monotonic()
+        self._require_profile(profile, "start_command")
+        command = self.commands.compile(program, args, cwd)
+        task, lease = self._begin_profile_start(
+            profile,
+            "start_command",
+            command.argv,
+            mode="service",
+        )
+        return self._start_service(
+            task,
+            lease,
+            started=started,
+            container_workdir=command.container_workdir,
+            cancellation_event=cancellation_event,
+            failure_description=f"command profile {profile!r}",
+        )
+
     def run_task(
         self,
         name: str,
@@ -336,7 +399,7 @@ class TaskManager:
                 deadline=deadline,
             )
             return run_container_task(
-                _LeaseBackend(self, lease),
+                _LeaseBackend(self, lease, cancellation),
                 request,
                 cancellation,  # type: ignore[arg-type]
             ).as_dict()
@@ -353,6 +416,7 @@ class TaskManager:
         tool: str,
         argv: tuple[str, ...],
         *,
+        container_workdir: str = "/workspace",
         cancellation_event: threading.Event | None,
     ) -> dict[str, object]:
         started = time.monotonic()
@@ -370,12 +434,13 @@ class TaskManager:
                 snapshot_path=snapshot.path,
                 task=task,
                 limits=self.configuration.limits,
+                container_workdir=container_workdir,
                 initial_workspace_bytes=snapshot.total_bytes,
                 started_at=started,
                 deadline=deadline,
             )
             return run_container_task(
-                _LeaseBackend(self, lease),
+                _LeaseBackend(self, lease, cancellation),
                 request,
                 cancellation,  # type: ignore[arg-type]
             ).as_dict()
@@ -386,18 +451,43 @@ class TaskManager:
             finally:
                 self._finish_lease(lease)
 
-    def start_task(self, name: str) -> dict[str, object]:
+    def start_task(
+        self,
+        name: str,
+        *,
+        cancellation_event: threading.Event | None = None,
+    ) -> dict[str, object]:
         """Start one configured service task and retain only bounded logs/state."""
 
         started = time.monotonic()
-        deadline = started + self.configuration.limits.timeout_seconds
         task, lease = self._begin_start(name, "service")
+        return self._start_service(
+            task,
+            lease,
+            started=started,
+            cancellation_event=cancellation_event,
+            failure_description=f"service task {name!r}",
+        )
+
+    def _start_service(
+        self,
+        task: TaskDefinition,
+        lease: _StartLease,
+        *,
+        started: float,
+        cancellation_event: threading.Event | None,
+        failure_description: str,
+        container_workdir: str = "/workspace",
+    ) -> dict[str, object]:
+        deadline = started + self.configuration.limits.timeout_seconds
+        cancellation = _CombinedCancellation(lease.cancellation, cancellation_event)
         snapshot: WorkspaceSnapshot | None = None
         workspace_monitor: WorkspaceGrowthMonitor | None = None
         record: _ServiceRecord | None = None
         try:
             snapshot = self._create_snapshot(
-                deadline=deadline, cancellation_event=lease.cancellation
+                deadline=deadline,
+                cancellation_event=cancellation,  # type: ignore[arg-type]
             )
             task_id = secrets.token_urlsafe(24)
             logs = TaskLogBuffer(self.configuration.limits.max_output_bytes)
@@ -406,11 +496,12 @@ class TaskManager:
                 snapshot_path=snapshot.path,
                 task=task,
                 limits=self.configuration.limits,
+                container_workdir=container_workdir,
                 initial_workspace_bytes=snapshot.total_bytes,
                 started_at=started,
                 deadline=deadline,
             )
-            handle = _LeaseBackend(self, lease).start(
+            handle = _LeaseBackend(self, lease, cancellation).start(
                 request, logs.append_stdout, logs.append_stderr
             )
             workspace_monitor = WorkspaceGrowthMonitor(request, handle)
@@ -459,7 +550,7 @@ class TaskManager:
             if not isinstance(exc, Exception):
                 raise
             raise TaskManagerError(
-                f"failed to start service task {name!r}: {exc}"
+                f"failed to start {failure_description}: {exc}"
             ) from exc
 
     def task_status(self, task_id: str) -> dict[str, object]:
@@ -556,7 +647,7 @@ class TaskManager:
             self._starting[lease.token] = lease
             return task, lease
 
-    def _require_profile(self, name: str, tool: str) -> PythonExecutionProfile:
+    def _require_profile(self, name: str, tool: str) -> ExecutionProfile:
         if not isinstance(name, str):
             raise TaskManagerError("profile name must be a string")
         with self._lock:
@@ -569,10 +660,19 @@ class TaskManager:
                 raise TaskManagerError(
                     f"execution profile {name!r} does not authorize {tool}"
                 )
+            if tool in ARBITRARY_COMMAND_TOOLS and not profile.allow_arbitrary_commands:
+                raise TaskManagerError(
+                    f"execution profile {name!r} does not authorize arbitrary commands"
+                )
             return profile
 
     def _begin_profile_start(
-        self, name: str, tool: str, argv: tuple[str, ...]
+        self,
+        name: str,
+        tool: str,
+        argv: tuple[str, ...],
+        *,
+        mode: str = "run",
     ) -> tuple[TaskDefinition, _StartLease]:
         with self._lock:
             profile = self._require_profile(name, tool)
@@ -583,7 +683,7 @@ class TaskManager:
             return (
                 TaskDefinition(
                     name=f"{name}-{tool}",
-                    mode="run",
+                    mode=mode,
                     image=profile.image,
                     argv=argv,
                     workspace_access=profile.workspace_access,

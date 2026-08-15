@@ -159,6 +159,49 @@ class TaskConfigurationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             configuration.profiles["other"] = profile  # type: ignore[index]
 
+    def test_generic_command_profile_requires_explicit_arbitrary_code_grant(
+        self,
+    ) -> None:
+        value = self._valid()
+        value["profiles"] = {
+            "coding": {
+                "image": "sha256:" + "c" * 64,
+                "tools": ["run_command", "start_command"],
+                "workspace_access": "read-only",
+                "allow_arbitrary_commands": True,
+            }
+        }
+        configuration = load_task_config(
+            self._write(value), workspace_root=self.workspace
+        )
+
+        profile = configuration.profiles["coding"]
+        self.assertEqual(profile.tools, {"run_command", "start_command"})
+        self.assertTrue(profile.allow_arbitrary_commands)
+        with self.assertRaises(TypeError):
+            configuration.profiles["other"] = profile  # type: ignore[index]
+
+        for grant in (None, False, "true", 1):
+            with self.subTest(grant=grant):
+                invalid = json.loads(json.dumps(value))
+                profile_value = invalid["profiles"]["coding"]
+                if grant is None:
+                    profile_value.pop("allow_arbitrary_commands")
+                else:
+                    profile_value["allow_arbitrary_commands"] = grant
+                with self.assertRaisesRegex(
+                    TaskConfigurationError,
+                    "allow_arbitrary_commands",
+                ):
+                    load_task_config(
+                        self._write(invalid), workspace_root=self.workspace
+                    )
+
+        duplicate = json.loads(json.dumps(value))
+        duplicate["profiles"]["coding"]["tools"].append("run_command")
+        with self.assertRaisesRegex(TaskConfigurationError, "duplicate tool"):
+            load_task_config(self._write(duplicate), workspace_root=self.workspace)
+
     def test_profile_only_configuration_and_invalid_profiles(self) -> None:
         base = {
             "version": 1,
@@ -183,7 +226,7 @@ class TaskConfigurationTests(unittest.TestCase):
 
         mutations = (
             ("image", "python:3.13", "sha256 digest"),
-            ("tools", ["run_command"], "unsupported Python tool"),
+            ("tools", ["host_shell"], "unsupported execution tool"),
             ("workspace_access", "host", "workspace_access"),
             ("env", {"TOKEN": "secret"}, "unknown field"),
         )
