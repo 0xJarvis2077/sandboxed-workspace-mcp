@@ -23,6 +23,7 @@ from .safe_regex import SafeRegex
 
 TRUNCATION_MARKER = "\n\n... OUTPUT TRUNCATED ..."
 _SEARCH_CHUNK_BYTES = 64 * 1024
+_PATH_LOCK_STRIPE_COUNT = 64
 
 
 class WorkspaceError(ValueError):
@@ -109,8 +110,9 @@ class Workspace:
         self._search_capacity = threading.BoundedSemaphore(
             settings.max_concurrent_searches
         )
-        self._path_locks: dict[str, threading.Lock] = {}
-        self._path_locks_guard = threading.Lock()
+        self._path_lock_stripes = tuple(
+            threading.Lock() for _ in range(_PATH_LOCK_STRIPE_COUNT)
+        )
 
     def is_inside(self, path: Path) -> bool:
         """Return whether a resolved path remains inside the workspace."""
@@ -1128,8 +1130,7 @@ class Workspace:
     @contextmanager
     def _lock_for_path(self, path: Path) -> Iterator[None]:
         key = os.path.normcase(str(path))
-        with self._path_locks_guard:
-            lock = self._path_locks.setdefault(key, threading.Lock())
+        lock = self._path_lock_stripes[hash(key) % len(self._path_lock_stripes)]
         with lock:
             yield
 

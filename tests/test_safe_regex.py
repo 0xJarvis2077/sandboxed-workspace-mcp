@@ -1,11 +1,65 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from sandboxed_workspace_mcp.safe_regex import SafeRegex, SafeRegexError
 
 
 class SafeRegexTests(unittest.TestCase):
+    def test_literal_fast_path_matches_and_respects_anchors(self) -> None:
+        cases = (
+            ("needle", "prefix needle suffix", True),
+            ("needle", "prefix missing suffix", False),
+            ("^needle", "needle suffix", True),
+            ("^needle", "prefix needle", False),
+            ("needle$", "prefix needle", True),
+            ("needle$", "needle suffix", False),
+            ("^needle$", "needle", True),
+            ("^needle$", "needle suffix", False),
+        )
+        for pattern, text, expected in cases:
+            with self.subTest(pattern=pattern, text=text):
+                matcher = SafeRegex(pattern)
+                self.assertIsNotNone(matcher._literal_pattern)
+                self.assertEqual(matcher.search(text), expected)
+
+    def test_literal_fast_path_supports_escaped_metacharacters(self) -> None:
+        matcher = SafeRegex(r"a\+b")
+
+        self.assertEqual(matcher._literal_pattern.needle, "a+b")
+        self.assertTrue(matcher.search("prefix a+b suffix"))
+        self.assertFalse(matcher.search("a++b"))
+
+    def test_literal_fast_path_supports_ascii_ignore_case(self) -> None:
+        self.assertTrue(SafeRegex("Needle", ignore_case=True).search("NEEDLE"))
+        self.assertFalse(SafeRegex("Needle", ignore_case=True).search("missing"))
+
+    def test_non_ascii_ignore_case_keeps_nfa_semantics(self) -> None:
+        matcher = SafeRegex("ß", ignore_case=True)
+
+        self.assertTrue(matcher.search("ẞ"))
+        self.assertFalse(matcher.search("SS"))
+
+    def test_general_patterns_continue_to_use_the_nfa(self) -> None:
+        matcher = SafeRegex(r"ab+c")
+
+        self.assertIsNone(matcher._literal_pattern)
+        with patch.object(matcher, "_closure", wraps=matcher._closure) as closure:
+            self.assertTrue(matcher.search("xxabbbcxx"))
+        self.assertGreater(closure.call_count, 0)
+
+    def test_literal_fast_path_checks_cancellation_before_matching(self) -> None:
+        checks = 0
+
+        def should_stop() -> bool:
+            nonlocal checks
+            checks += 1
+            return True
+
+        self.assertFalse(SafeRegex("needle").search("needle", should_stop=should_stop))
+        self.assertEqual(checks, 1)
+
     def test_supported_subset_matches_without_backtracking(self) -> None:
         cases = (
             (r"add|result", "a result value", True),

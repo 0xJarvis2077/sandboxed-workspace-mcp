@@ -562,6 +562,45 @@ class WorkspaceTests(unittest.TestCase):
         self.assertIn("conflict", str(conflicts[0]))
         self.assertIn(target.read_text(encoding="utf-8"), {"first\n", "second\n"})
 
+    def test_path_locks_use_fixed_stripes_and_serialize_same_path(self) -> None:
+        target = self.root / "shared.txt"
+        first_entered = threading.Event()
+        second_ready = threading.Event()
+        second_entered = threading.Event()
+        release_first = threading.Event()
+
+        def first_writer() -> None:
+            with self.workspace._lock_for_path(target):
+                first_entered.set()
+                release_first.wait(timeout=2)
+
+        def second_writer() -> None:
+            second_ready.set()
+            with self.workspace._lock_for_path(target):
+                second_entered.set()
+
+        first = threading.Thread(target=first_writer)
+        second = threading.Thread(target=second_writer)
+        first.start()
+        self.assertTrue(first_entered.wait(timeout=2))
+        second.start()
+        try:
+            self.assertTrue(second_ready.wait(timeout=2))
+            self.assertFalse(second_entered.is_set())
+        finally:
+            release_first.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertTrue(second_entered.is_set())
+
+        for index in range(1024):
+            with self.workspace._lock_for_path(self.root / f"unique-{index}"):
+                pass
+        self.assertEqual(len(self.workspace._path_lock_stripes), 64)
+
     def test_existing_writes_require_a_valid_version_token(self) -> None:
         target = self.root / "existing.txt"
         target.write_text("original\n", encoding="utf-8")
