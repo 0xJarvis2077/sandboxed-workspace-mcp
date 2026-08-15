@@ -1,0 +1,19 @@
+FROM python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
+
+ENV PYTHONPATH=/workspace/src \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes git \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install \
+        "setuptools==80.9.0" \
+        "mcp>=2.0.0,<3" \
+        "PyJWT[crypto]>=2.10,<3" \
+        "build>=1.2,<2" \
+        "coverage[toml]>=7.6,<8" \
+        "pytest>=8.3,<10" \
+        "ruff>=0.9,<1"
+
+WORKDIR /workspace

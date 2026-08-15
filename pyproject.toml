@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sandboxed-workspace-mcp"
+dynamic = ["version"]
+description = "A capability-bounded MCP server for safe workspace editing and isolated code execution"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = [
+  "mcp>=2.0.0,<3",
+  "PyJWT[crypto]>=2.10,<3",
+]
+keywords = ["mcp", "workspace", "sandbox", "containers", "coding-agent"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2,<2",
+  "coverage[toml]>=7.6,<8",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+sandboxed-workspace-mcp = "sandboxed_workspace_mcp.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/0xJarvis2077/sandboxed-workspace-mcp"
+Repository = "https://github.com/0xJarvis2077/sandboxed-workspace-mcp"
+Issues = "https://github.com/0xJarvis2077/sandboxed-workspace-mcp/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = {attr = "sandboxed_workspace_mcp.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["sandboxed_workspace_mcp*"]
+
+[tool.setuptools.package-data]
+sandboxed_workspace_mcp = ["py.typed"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]
+
+[tool.coverage.run]
+branch = true
+source = ["sandboxed_workspace_mcp"]
+
+[tool.coverage.report]
+fail_under = 85
+precision = 1
+show_missing = true
+skip_covered = true

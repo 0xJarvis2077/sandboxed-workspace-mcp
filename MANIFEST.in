@@ -1,0 +1,6 @@
+include LICENSE
+include SECURITY.md
+include server.py
+recursive-include examples *.json
+include examples/Dockerfile.task
+recursive-include scripts *.py

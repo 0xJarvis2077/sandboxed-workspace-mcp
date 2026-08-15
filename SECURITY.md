@@ -1,0 +1,77 @@
+# Security policy and boundary
+
+## Supported boundary
+
+The server confines its filesystem capabilities to one canonical workspace root per process. It validates traversal and symlink targets, enforces a core blocked-path policy, rejects non-regular files, bounds file/output/directory scanning, performs atomic text replacement, and exposes only a closed set of read-only Git queries. The compatibility `run_shell` parser never starts a shell or arbitrary command.
+
+The server is not a container, operating-system sandbox, malware scanner, or multi-user authorization layer. A vulnerability in Python, the MCP SDK, Git, or the host process can exceed this application boundary. Run the process as an OS account that already has only the permissions it needs.
+
+By default the server does not execute project code. Optional task execution is disabled unless the operator supplies a trusted task configuration outside the workspace. That configuration is an explicit execution grant and cannot be read or modified through workspace tools.
+
+## Blocked and ignored paths
+
+Blocked paths are a security policy enforced in the core workspace layer for explicit and discovered paths, including absolute paths inside the root and symlink aliases. Default rules protect `.git`, `.env` variants, common private-key names, and private-key container extensions. Additional validated root-relative patterns can only extend the defaults.
+
+`.env.example`, `.env.sample`, and `.env.template` are intentionally readable through direct workspace file tools. Other `.env.*` names remain blocked. Git status/diff use conservative exclusion pathspecs and may omit even those safe example names.
+
+Ignored directory names only optimize tree/search traversal. They do not prevent explicit access and are not a security boundary. A sensitive path must be blocked even if it is also ignored. There is no user-configurable allow override in this version.
+
+## File opening and writing
+
+Text operations share one safe-open contract. The implementation checks the opened descriptor with `fstat`, rejects FIFO/socket/device/other special-file types, and checks size from that descriptor. POSIX additionally opens through directory descriptors with `O_NOFOLLOW` and uses `O_NONBLOCK`; Windows uses a canonical in-root path, non-inheritable binary descriptor where available, and post-open `fstat` verification.
+
+Atomic writes create a private temporary file in the destination directory, flush and `fsync` it, then use `os.replace`; failures clean the temporary file and do not intentionally alter the original. Updating an existing file requires the SHA-256 returned by `read_file_versioned`. Per-path locks serialize in-process writers, and the opened descriptor identity and digest are checked again immediately before replacement. A stale or missing token produces an explicit conflict instead of silently overwriting a normal concurrent edit. This is optimistic concurrency control, not an atomic compare-and-swap primitive against a hostile local OS account.
+
+Existing POSIX permission bits are copied. Atomic replacement creates a new inode/file object, so the original owner, ACLs, extended attributes, alternate data streams, security labels, hard-link identity, and platform-specific metadata are not guaranteed to survive. The replacement is normally owned by the service account and may inherit destination-directory ACLs. Use read-only mode when these metadata are authoritative, or restore them in a trusted outer workflow.
+
+## Git contract
+
+Git commands are fixed by the service; user arguments never enter the process command without explicit whitelist validation. Hooks, pager, prompts, optional locks, fsmonitor, untracked cache, global/system configuration, external diff and textconv are disabled. Status, diff, show, and tracked-file listing receive blocked-path exclusion pathspecs where they can return multiple paths. `git diff --no-index` and arbitrary pathspec injection are not accepted.
+
+Caller-selected Git file paths are resolved through the workspace and blocked policy, then encoded by the server as literal pathspecs. Leading `-`, leading `:`, and Git pathspec magic therefore cannot change argument interpretation. This validation also applies to paths that no longer exist in the current checkout. `git show` accepts only `HEAD` or a 7–40 character hexadecimal ID and appends a server-owned commit peel, so a blob ID cannot be used as a commit. Revision/path forms such as `HEAD:.env`, ranges, ancestry operators, reflog syntax, and standalone `:path` are rejected. A full `git show COMMIT` applies blocked exclusions to its historical diff, preventing an otherwise-valid revision from exposing blocked file content. Commit messages and other returned metadata are not secret-scanned.
+
+Non-zero exit status, process startup failure, missing executable, timeout, and output overflow are errors. Diagnostic stdout/stderr is retained only within the configured output bound. Git itself remains part of the trusted computing base, and commit metadata returned by `git_log` is not treated as secret-scanned content.
+
+## Network exposure
+
+`stdio` is the unauthenticated local compatibility transport. Streamable HTTP binds to `127.0.0.1` by default and keeps MCP SDK Host/Origin DNS-rebinding checks. Non-loopback binding requires `--allow-network`, wildcard binding requires explicit allowed hosts, and either a public HTTPS `MCP_PUBLIC_HOST` or a non-loopback bind makes OAuth mandatory by default. `--allow-unauthenticated-http` is a CLI-only, default-off development escape hatch that emits a prominent stderr warning.
+
+The server is an OAuth 2.1 resource server, not an authorization server. It relies on an external OAuth/OIDC provider and accepts only signed JWT access tokens with an allowed asymmetric algorithm and valid `kid`, signature, issuer, canonical public resource/audience, `exp`, `nbf`, and per-tool scope. Issuer, discovery, and JWKS URLs are HTTPS-only; metadata/JWKS reads have bounded size and timeout, JWKS is cached, and an unknown `kid` causes one refresh. The validated SDK access context deliberately drops the original bearer token. Neither credentials, Client Secrets, nor access tokens belong in configuration, logs, errors, tool results, or snapshots.
+
+The public RFC 9728 metadata endpoint and Bearer challenges allow ChatGPT to discover the authorization server. Tool `securitySchemes`, HTTP `WWW-Authenticate`, MCP `_meta["mcp/www_authenticate"]`, and server-side scope enforcement use the same mapping. Host/Origin checks are an independent DNS-rebinding defense and do not replace OAuth. `--allow-network` likewise adds no TLS, authentication, rate limiting, or tenant isolation.
+
+For the recommended ngrok topology, the server remains on loopback while ngrok supplies the public TLS endpoint. `MCP_PUBLIC_HOST` is the canonical external HTTPS Origin and must equal the configured OAuth audience exactly; a local loopback URL is never the public audience. The external provider and ChatGPT client registration remain part of the trusted deployment boundary, including provider discovery, PKCE S256, client registration/CIMD or DCR, redirect URI, resource indicators, and token claim configuration.
+
+## Optional task-execution boundary
+
+Configured tasks treat workspace code as untrusted. Before every execution, the server copies only allowed regular files from the instance's single root into a private, bounded temporary snapshot. It reuses the core blocked policy, omits ignored dependency/cache/build directories, never follows symlinks, safely rejects special files, and validates opened file descriptors. The real workspace is never mounted into the container and snapshot changes are never written back.
+
+The production backend invokes only the configured Docker or Podman CLI with an argument array. It never uses a shell and never falls back to host execution. Images must use either a full registry `repository@sha256` digest or a full local `sha256` image ID; mutable tags and short IDs are rejected. MCP callers choose only a frozen task/profile name, structured fields declared by a Python execution tool, or a random service ID issued by the current process. They cannot supply command strings, arbitrary argv, environment, images, working directories, mounts, network mode, ports, or container identifiers.
+
+Python execution profiles are disabled unless the trusted out-of-workspace config explicitly defines them. Each profile fixes its image, allowed tool set, workspace access, and the shared resource/snapshot limits. Discovery omits image, argv, and source path. `run_pytest` compiles bounded targets and options into a server-owned argv; every target path or `FILE::NODE` prefix is checked for root confinement, traversal, blocked/ignored components, symlinks, existence, and regular-file/directory type. `run_python_script` accepts one regular `.py` file and no caller arguments; `python -c`, caller-selected modules, and general command execution remain unavailable.
+
+Authorizing `run_python_script` authorizes arbitrary workspace Python code inside the container, not a subset of Python APIs. That code can create child processes inside the container. Its boundary is the disposable filtered snapshot and hardened container, not the input grammar. Python and pytest are never added to the compatibility `run_shell`, and their MCP tools require `tasks.run`.
+
+Task containers have no network, a read-only root filesystem, all capabilities dropped, `no-new-privileges`, a numeric non-root user, memory/CPU/PID limits, private tmpfs locations, closed stdin, bounded stdout/stderr, and an overall timeout that includes snapshot creation. The runtime uses `--pull=never`; image acquisition is a separate trusted operator action. Host proxy variables, credentials, SSH agent, user HOME, and the Docker socket are not passed or mounted. Service shutdown atomically rejects new starts, cancels snapshot-stage starts, and stops only handles tracked by this server instance; it never enumerates or targets unrelated containers.
+
+Task workspace mounts are read-only by default. A trusted out-of-workspace configuration must explicitly opt a task into writable mode and explicitly accept both per-file and aggregate-growth limits. Writable tasks receive a container `fsize` ulimit and a joined host-side monitor that stops the task on observed aggregate growth. Aggregate scanning is intentionally best effort: it has a sampling/race window and is not a kernel-enforced filesystem quota. Use an independently quota-limited filesystem, host, or VM for actively hostile or high-output builds.
+
+Container isolation reduces risk but is not a virtual-machine security boundary. Docker/Podman, the pinned task image, container CLI, host kernel, filesystem, and the account running the service are part of the trusted computing base. Kernel or runtime vulnerabilities, resource-accounting gaps, and same-user host interference can cross this boundary. Use least privilege and a dedicated host or VM when executing actively hostile code.
+
+The first task version intentionally has no port mapping, host networking, privileged mode, extra mounts, Docker socket mounting, caller environment, caller argv, configuration reload, or snapshot write-back. `start_task` exists for startup diagnostics and bounded traceback/log inspection, not for publishing a development server.
+
+## Remaining risks
+
+- A malicious local process with write access to the workspace can race directory renames or link/reparse-point replacement. POSIX descriptor-relative opens reduce this window for reads but do not make the whole application an OS sandbox; Windows reparse-point handling has a larger residual race surface.
+- Atomic destination replacement remains path-based and can race a mutually untrusted local writer. Do not share a writable workspace with untrusted accounts or processes.
+- Local processes running as the same OS identity can generally inspect or interfere with the service and its files outside this application policy.
+- Search has independent entry, actual-byte, wall-clock, output, and concurrency limits, but CPU cost still depends on text contents and filesystem behavior. Directory listing/tree and Git have their own bounds.
+- Blocked globs are path-name policy, not content classification. Secrets stored under unblocked names are not automatically detected.
+- A compromised Python runtime, MCP SDK, Git executable, filesystem, or host kernel can bypass the application boundary.
+- A malicious writable task can consume disk between best-effort monitor samples, and sparse files or filesystem-specific allocation behavior can differ from logical-byte accounting. Snapshot input and captured output are bounded, but container isolation, hard storage quotas, and host free-space accounting remain operator responsibilities.
+
+Use separate MCP instances for separate workspace roots. Do not widen one process into a dynamic multi-root authority.
+
+## Reporting
+
+Do not include secrets, private repository content, or working exploits against third-party systems in a report. Include the smallest local reproduction using a temporary directory, the affected version, observed impact, expected behavior, operating system, Python version, and relevant configuration limits.

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "runtime": "docker",
+  "limits": {
+    "timeout_seconds": 120,
+    "max_output_bytes": 200000,
+    "max_snapshot_files": 20000,
+    "max_snapshot_bytes": 268435456,
+    "memory": "1g",
+    "cpus": "2",
+    "pids": 128,
+    "max_concurrent_tasks": 1
+  },
+  "profiles": {
+    "python-debug": {
+      "image": "REPLACE_WITH_REPOSITORY_DIGEST_OR_FULL_LOCAL_SHA256_IMAGE_ID",
+      "tools": ["python_version", "run_pytest", "run_python_script"],
+      "workspace_access": "read-only"
+    }
+  }
+}
