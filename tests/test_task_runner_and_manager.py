@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -192,7 +193,25 @@ class ContainerRunnerTests(unittest.TestCase):
             argv = build_container_argv("/usr/bin/docker", request)
 
         rendered = " ".join(argv)
+        container_env = [
+            argv[index + 1] for index, item in enumerate(argv) if item == "--env"
+        ]
         self.assertEqual(argv[0:2], ["/usr/bin/docker", "run"])
+        self.assertEqual(
+            container_env,
+            [
+                "HOME=/tmp/home",
+                "TMPDIR=/tmp",
+                "XDG_CACHE_HOME=/tmp/cache",
+                "RUFF_CACHE_DIR=/tmp/cache/ruff",
+                "MYPY_CACHE_DIR=/tmp/cache/mypy",
+                "COVERAGE_FILE=/tmp/.coverage",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "PIP_NO_CACHE_DIR=1",
+                "npm_config_cache=/tmp/npm-cache",
+                "CI=1",
+            ],
+        )
         for expected in (
             "--pull=never",
             "--network=none",
@@ -213,6 +232,8 @@ class ContainerRunnerTests(unittest.TestCase):
             self.assertIn(expected, rendered)
         self.assertNotIn("shell", argv)
         self.assertNotIn("-c", argv[: argv.index(PINNED_IMAGE)])
+        self.assertNotIn("PYTHONPYCACHEPREFIX", rendered)
+        self.assertNotIn("PYTEST_ADDOPTS", rendered)
         self.assertEqual(argv[-3:], ["python", "-m", "unittest"])
 
     def test_command_workdir_and_argv_cannot_become_runtime_flags(self) -> None:
@@ -352,6 +373,86 @@ class ContainerRunnerTests(unittest.TestCase):
         self.assertEqual(
             stop.call_args.args[0][-1], "sandboxed-workspace-mcp-test-token"
         )
+
+    def test_cli_backend_streams_flushed_pipe_output_before_eof(self) -> None:
+        child_script = (
+            "import sys\n"
+            "sys.stdout.buffer.write(b'booted\\n')\n"
+            "sys.stdout.buffer.flush()\n"
+            "sys.stderr.buffer.write(b'booted\\n')\n"
+            "sys.stderr.buffer.flush()\n"
+            "sys.stdin.buffer.read(1)\n"
+        )
+        real_popen = subprocess.Popen
+        process: subprocess.Popen[bytes] | None = None
+        handle = None
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        stdout_received = threading.Event()
+        stderr_received = threading.Event()
+
+        def launch_pipe_process(*args, **kwargs):
+            nonlocal process
+            process = real_popen(
+                [sys.executable, "-c", child_script],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                close_fds=True,
+            )
+            return process
+
+        def on_stdout(data: bytes) -> None:
+            stdout_chunks.append(data)
+            stdout_received.set()
+
+        def on_stderr(data: bytes) -> None:
+            stderr_chunks.append(data)
+            stderr_received.set()
+
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                request = ContainerRequest(
+                    "sandboxed-workspace-mcp-live-logs",
+                    Path(directory),
+                    TaskDefinition("dev", "service", PINNED_IMAGE, ("python",)),
+                    TaskLimits(),
+                )
+                with (
+                    patch(
+                        "sandboxed_workspace_mcp.task_runner.shutil.which",
+                        return_value="/usr/bin/docker",
+                    ),
+                    patch(
+                        "sandboxed_workspace_mcp.task_runner.subprocess.Popen",
+                        side_effect=launch_pipe_process,
+                    ),
+                ):
+                    handle = CliContainerBackend("docker").start(
+                        request, on_stdout, on_stderr
+                    )
+
+                self.assertTrue(stdout_received.wait(timeout=2))
+                self.assertTrue(stderr_received.wait(timeout=2))
+                self.assertEqual(b"".join(stdout_chunks), b"booted\n")
+                self.assertEqual(b"".join(stderr_chunks), b"booted\n")
+                assert process is not None
+                self.assertIsNone(process.poll(), "pipe writers must still be open")
+        finally:
+            if process is not None and process.stdin is not None:
+                process.stdin.close()
+            if handle is not None:
+                try:
+                    handle.wait(timeout=2)
+                except TimeoutError:
+                    assert process is not None
+                    process.kill()
+                    process.wait(timeout=2)
+                finally:
+                    handle.close()
+            elif process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=2)
 
     def test_cli_backend_start_error_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -532,6 +633,8 @@ class TaskManagerTests(unittest.TestCase):
                 "python",
                 "-m",
                 "pytest",
+                "-o",
+                "cache_dir=/tmp/cache/pytest",
                 "-vv",
                 "-x",
                 "-s",
@@ -544,7 +647,17 @@ class TaskManagerTests(unittest.TestCase):
         )
         self.assertEqual(
             backend.requests[2].task.argv,
-            ("python", "-m", "pytest", "-q", "--tb=long", "--", "tests"),
+            (
+                "python",
+                "-m",
+                "pytest",
+                "-o",
+                "cache_dir=/tmp/cache/pytest",
+                "-q",
+                "--tb=long",
+                "--",
+                "tests",
+            ),
         )
         self.assertEqual(backend.requests[3].task.argv, ("python", "--", "debug.py"))
         self.assertTrue(
