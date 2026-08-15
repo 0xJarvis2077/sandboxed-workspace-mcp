@@ -6,7 +6,10 @@ import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath, PureWindowsPath
 
+TRASH_DIRECTORY_NAME = ".sandboxed_workspace_mcp_trash"
+
 DEFAULT_BLOCKED_PATTERNS = (
+    TRASH_DIRECTORY_NAME,
     ".git",
     ".env",
     ".env.*",

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .access_policy import (
     DEFAULT_BLOCKED_PATTERNS,
+    TRASH_DIRECTORY_NAME,
     PolicyConfigurationError,
     validate_blocked_pattern,
 )
@@ -25,6 +26,7 @@ DEFAULT_IGNORED_DIRS = frozenset(
         "build",
         "dist",
         "node_modules",
+        TRASH_DIRECTORY_NAME,
         "venv",
     }
 )
@@ -49,6 +51,10 @@ class Settings:
     max_concurrent_searches: int = 1
     git_timeout: float = 30.0
     allow_writes: bool = True
+    allow_trash: bool = False
+    allow_trash_purge: bool = False
+    max_trash_items: int = 200
+    max_trash_bytes: int = 256 * 1024 * 1024
     ignored_dirs: frozenset[str] = DEFAULT_IGNORED_DIRS
     blocked_patterns: tuple[str, ...] = DEFAULT_BLOCKED_PATTERNS
 
@@ -85,6 +91,26 @@ class Settings:
             )
         if self.git_timeout <= 0:
             raise ConfigurationError("git_timeout must be greater than zero")
+        if type(self.allow_trash) is not bool:
+            raise ConfigurationError("allow_trash must be a boolean")
+        if self.allow_trash and not self.allow_writes:
+            raise ConfigurationError("allow_trash requires allow_writes=True")
+        if type(self.allow_trash_purge) is not bool:
+            raise ConfigurationError("allow_trash_purge must be a boolean")
+        if self.allow_trash_purge and not self.allow_trash:
+            raise ConfigurationError("allow_trash_purge requires allow_trash=True")
+        if self.allow_trash_purge and not self.allow_writes:
+            raise ConfigurationError("allow_trash_purge requires allow_writes=True")
+        for name, value in (
+            ("max_trash_items", self.max_trash_items),
+            ("max_trash_bytes", self.max_trash_bytes),
+        ):
+            if type(value) is not int or value <= 0:
+                raise ConfigurationError(f"{name} must be greater than zero")
+        if self.max_trash_items > 10_000:
+            raise ConfigurationError("max_trash_items must be at most 10000")
+        if self.max_trash_bytes > 4 * 1024 * 1024 * 1024:
+            raise ConfigurationError("max_trash_bytes must be at most 4294967296")
 
         ignored_dirs = frozenset(self.ignored_dirs)
         if any(not name or "/" in name or "\\" in name for name in ignored_dirs):
@@ -122,6 +148,10 @@ class Settings:
         max_concurrent_searches: int = 1,
         git_timeout: float = 30.0,
         allow_writes: bool = True,
+        allow_trash: bool = False,
+        allow_trash_purge: bool = False,
+        max_trash_items: int = 200,
+        max_trash_bytes: int = 256 * 1024 * 1024,
         blocked_patterns: Iterable[str] | None = None,
     ) -> Settings:
         """Construct settings from a path-like value and optional directory names."""
@@ -138,6 +168,10 @@ class Settings:
             max_concurrent_searches=max_concurrent_searches,
             git_timeout=git_timeout,
             allow_writes=allow_writes,
+            allow_trash=allow_trash,
+            allow_trash_purge=allow_trash_purge,
+            max_trash_items=max_trash_items,
+            max_trash_bytes=max_trash_bytes,
             ignored_dirs=(
                 DEFAULT_IGNORED_DIRS
                 if ignored_dirs is None

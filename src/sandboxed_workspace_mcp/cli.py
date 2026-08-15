@@ -83,6 +83,22 @@ def build_parser(
         help="disable every mutating tool",
     )
     parser.add_argument(
+        "--allow-trash",
+        action=argparse.BooleanOptionalAction,
+        default=_parser_environment_bool(
+            parser, env, "SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH", False
+        ),
+        help="enable the restricted, recoverable file recycle bin",
+    )
+    parser.add_argument(
+        "--allow-trash-purge",
+        action=argparse.BooleanOptionalAction,
+        default=_parser_environment_bool(
+            parser, env, "SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH_PURGE", False
+        ),
+        help="enable irreversible, single-item recycle-bin purge",
+    )
+    parser.add_argument(
         "--allow-network",
         action="store_true",
         default=_parser_environment_bool(
@@ -208,6 +224,21 @@ def build_parser(
         metavar="SECONDS",
     )
     parser.add_argument(
+        "--max-trash-items",
+        type=int,
+        default=env.get("SANDBOXED_WORKSPACE_MCP_MAX_TRASH_ITEMS", "200"),
+        help="maximum number of files retained in the recycle bin",
+    )
+    parser.add_argument(
+        "--max-trash-bytes",
+        type=int,
+        default=env.get(
+            "SANDBOXED_WORKSPACE_MCP_MAX_TRASH_BYTES", str(256 * 1024 * 1024)
+        ),
+        metavar="BYTES",
+        help="maximum total payload bytes retained in the recycle bin",
+    )
+    parser.add_argument(
         "--ignore-dir",
         action="append",
         default=_environment_list(env, "SANDBOXED_WORKSPACE_MCP_IGNORED_DIRS"),
@@ -287,6 +318,10 @@ def parse_runtime(
             max_concurrent_searches=args.max_concurrent_searches,
             git_timeout=args.git_timeout,
             allow_writes=not args.read_only,
+            allow_trash=args.allow_trash,
+            allow_trash_purge=args.allow_trash_purge,
+            max_trash_items=args.max_trash_items,
+            max_trash_bytes=args.max_trash_bytes,
             ignored_dirs=DEFAULT_IGNORED_DIRS.union(args.ignore_dir),
             blocked_patterns=args.block_path,
         )
@@ -345,6 +380,10 @@ def parse_runtime(
         required_scopes = {"workspace.read"}
         if settings.allow_writes:
             required_scopes.add("workspace.write")
+        if settings.allow_trash:
+            required_scopes.add("workspace.delete")
+        if settings.allow_trash_purge:
+            required_scopes.add("workspace.purge")
         if task_configuration is not None:
             required_scopes.update({"tasks.read", "tasks.run"})
         missing_scopes = sorted(required_scopes.difference(oauth.scopes))

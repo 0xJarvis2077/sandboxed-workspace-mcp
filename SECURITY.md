@@ -2,7 +2,7 @@
 
 ## Supported boundary
 
-The server confines its filesystem capabilities to one canonical workspace root per process. It validates traversal and symlink targets, enforces a core blocked-path policy, rejects non-regular files, bounds file/output/directory scanning, performs atomic text replacement, and exposes only a closed set of read-only Git queries. The compatibility `run_shell` parser never starts a shell or arbitrary command.
+The server confines its filesystem capabilities to one canonical workspace root per process. It validates traversal and symlink targets, enforces a core blocked-path policy, rejects non-regular files, bounds file/output/directory scanning, performs atomic text replacement, and exposes only a closed set of read-only Git queries. An optional recycle bin is disabled by default; permanent deletion is a separately enabled, SHA-checked single-item operation. The compatibility `run_shell` parser never starts a shell or arbitrary command.
 
 The server is not a container, operating-system sandbox, malware scanner, or multi-user authorization layer. A vulnerability in Python, the MCP SDK, Git, or the host process can exceed this application boundary. Run the process as an OS account that already has only the permissions it needs.
 
@@ -15,6 +15,16 @@ Blocked paths are a security policy enforced in the core workspace layer for exp
 `.env.example`, `.env.sample`, and `.env.template` are intentionally readable through direct workspace file tools. Other `.env.*` names remain blocked. Git status/diff use conservative exclusion pathspecs and may omit even those safe example names.
 
 Ignored directory names only optimize tree/search traversal. They do not prevent explicit access and are not a security boundary. A sensitive path must be blocked even if it is also ignored. There is no user-configurable allow override in this version.
+
+## Recoverable file trash
+
+The recycle bin is enabled only by `--allow-trash` (or its environment variable) and requires writable mode. It registers four tools: single regular-file `trash_file`, bounded metadata-only `list_trashed_files`, `restore_trashed_file` to the recorded original path, and `restore_trashed_file_to` to an existing-parent, empty, policy-approved workspace path. The alternate restore requires both `workspace.delete` and `workspace.write`; the other trash tools require `workspace.delete`. There is no directory removal, recursive or batch operation, overwrite, or automatic eviction. `--allow-trash-purge` separately enables single-item `purge_trashed_file`, which requires `workspace.delete` and `workspace.purge`, always verifies the current SHA, and cannot be undone. `workspace.delete` and `workspace.purge` are not in the default OAuth scope set.
+
+Trash data lives under the reserved, blocked `.sandboxed_workspace_mcp_trash` directory. The directory is created lazily, uses a versioned format marker, and is omitted from direct reads, scans, Git output, and disposable task snapshots even when trash is disabled. Metadata and payloads are bounded, schema-checked, and opened without following symlinks. POSIX storage uses private `0700` directories and `0600` files.
+
+Trash operations serialize on a recycle-bin lock followed by the existing workspace path lock. A version token is checked before the source is moved, and the source is revalidated immediately before the same-filesystem move. Staging entries are coordinated on the next operation: complete staging transactions can be committed, metadata-only entries whose original still matches can be discarded, and uncertain states are retained with bounded diagnostics. Restore persists a bounded `restore-intent.json` containing the actual destination before linking the payload, so recovery can distinguish an incomplete restore from a committed target even after a crash. It verifies the payload digest and size, revalidates the current workspace policy and real parent, creates the destination without overwrite, and removes the item only after the payload is safely restored. Purge first verifies metadata, payload type/size/content, expected SHA, and the absence of an ambiguous restore intent, then atomically moves the item to the private `purging` transaction directory. Items moved there no longer count toward quota; recovery deletes only known regular transaction files. No failure path intentionally deletes the only recoverable payload before purge commit, and purge cannot bypass SHA validation.
+
+All trash failures use stable structured codes such as `TRASH_ITEM_NOT_FOUND`, `TRASH_DESTINATION_EXISTS`, `TRASH_VERSION_CONFLICT`, and `TRASH_QUOTA_EXCEEDED`; clients must branch on the code rather than parse human-readable messages. A restored or never-created valid ID returns `TRASH_ITEM_NOT_FOUND` because the service keeps no tombstones.
 
 ## File opening and writing
 
