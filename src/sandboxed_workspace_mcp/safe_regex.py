@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -18,28 +19,57 @@ class SafeRegexError(ValueError):
 @dataclass(frozen=True, slots=True)
 class _CharacterSet:
     literals: frozenset[str]
-    ranges: tuple[tuple[str, str], ...]
+    ranges: tuple[tuple[int, int], ...]
+    range_starts: tuple[int, ...]
     negated: bool
 
-    def matches(self, character: str, *, ignore_case: bool) -> bool:
-        candidate = _fold_character(character) if ignore_case else character
-        literals = (
-            {_fold_character(item) for item in self.literals}
-            if ignore_case
-            else self.literals
+    @classmethod
+    def compile(
+        cls,
+        literals: set[str],
+        ranges: list[tuple[str, str]],
+        negated: bool,
+        *,
+        ignore_case: bool,
+    ) -> _CharacterSet:
+        normalized_literals = frozenset(
+            character.casefold() if ignore_case else character for character in literals
         )
-        ranges = (
-            tuple(
-                (_fold_character(start), _fold_character(end))
-                for start, end in self.ranges
-            )
-            if ignore_case
-            else self.ranges
+        normalized_ranges: list[tuple[int, int]] = []
+        for start, end in ranges:
+            if ignore_case:
+                start = start.casefold()
+                end = end.casefold()
+            if len(start) != 1 or len(end) != 1:
+                continue
+            start_codepoint = ord(start)
+            end_codepoint = ord(end)
+            if start_codepoint <= end_codepoint:
+                normalized_ranges.append((start_codepoint, end_codepoint))
+
+        normalized_ranges.sort()
+        merged_ranges: list[tuple[int, int]] = []
+        for start, end in normalized_ranges:
+            if merged_ranges and start <= merged_ranges[-1][1] + 1:
+                previous_start, previous_end = merged_ranges[-1]
+                merged_ranges[-1] = (previous_start, max(previous_end, end))
+            else:
+                merged_ranges.append((start, end))
+
+        compiled_ranges = tuple(merged_ranges)
+        return cls(
+            normalized_literals,
+            compiled_ranges,
+            tuple(start for start, _ in compiled_ranges),
+            negated,
         )
-        matched = candidate in literals or any(
-            len(candidate) == len(start) == len(end) == 1 and start <= candidate <= end
-            for start, end in ranges
-        )
+
+    def matches(self, character: str) -> bool:
+        matched = character in self.literals
+        if not matched and len(character) == 1 and self.range_starts:
+            codepoint = ord(character)
+            range_index = bisect_right(self.range_starts, codepoint) - 1
+            matched = range_index >= 0 and codepoint <= self.ranges[range_index][1]
         return not matched if self.negated else matched
 
 
@@ -58,8 +88,9 @@ class _Fragment:
 
 
 class _Parser:
-    def __init__(self, pattern: str) -> None:
+    def __init__(self, pattern: str, *, ignore_case: bool = False) -> None:
         self.pattern = pattern
+        self.ignore_case = ignore_case
         self.index = 0
 
     def parse(self) -> tuple[Any, ...]:
@@ -173,7 +204,9 @@ class _Parser:
                 ranges.append((start, end))
             else:
                 literals.add(start)
-        return _CharacterSet(frozenset(literals), tuple(ranges), negated)
+        return _CharacterSet.compile(
+            literals, ranges, negated, ignore_case=self.ignore_case
+        )
 
     def _escape(self, *, in_class: bool) -> str:
         if self.index >= len(self.pattern):
@@ -211,7 +244,7 @@ class SafeRegex:
         self.pattern = pattern
         self.ignore_case = ignore_case
         self._states: list[_State] = []
-        fragment = self._build(_Parser(pattern).parse())
+        fragment = self._build(_Parser(pattern, ignore_case=ignore_case).parse())
         match = self._add(_State("match"))
         self._patch(fragment.outs, match)
         self._start = fragment.start
@@ -230,29 +263,21 @@ class SafeRegex:
             if position == len(text):
                 break
             character = text[position]
+            candidate = character.casefold() if self.ignore_case else character
             following: set[int] = {self._start}
             for index in active:
                 state = self._states[index]
-                if state.kind == "literal" and self._literal_matches(
-                    state.value, character
-                ):
+                if state.kind == "literal" and state.value == candidate:
                     assert state.out is not None
                     following.add(state.out)
                 elif state.kind == "any":
                     assert state.out is not None
                     following.add(state.out)
-                elif state.kind == "class" and state.value.matches(
-                    character, ignore_case=self.ignore_case
-                ):
+                elif state.kind == "class" and state.value.matches(candidate):
                     assert state.out is not None
                     following.add(state.out)
             active = self._closure(following, position=position + 1, length=len(text))
         return False
-
-    def _literal_matches(self, expected: str, actual: str) -> bool:
-        if not self.ignore_case:
-            return expected == actual
-        return expected.casefold() == actual.casefold()
 
     def _closure(self, initial: set[int], *, position: int, length: int) -> set[int]:
         active: set[int] = set()
@@ -284,7 +309,11 @@ class SafeRegex:
 
     def _build(self, node: tuple[Any, ...]) -> _Fragment:
         kind = node[0]
-        if kind in {"literal", "class"}:
+        if kind == "literal":
+            value = node[1].casefold() if self.ignore_case else node[1]
+            index = self._add(_State(kind, value=value))
+            return _Fragment(index, ((index, "out"),))
+        if kind == "class":
             index = self._add(_State(kind, value=node[1]))
             return _Fragment(index, ((index, "out"),))
         if kind in {"any", "start", "end", "empty"}:
@@ -330,7 +359,3 @@ class SafeRegex:
     def _patch(self, outs: tuple[tuple[int, str], ...], target: int) -> None:
         for index, attribute in outs:
             setattr(self._states[index], attribute, target)
-
-
-def _fold_character(character: str) -> str:
-    return character.casefold()
