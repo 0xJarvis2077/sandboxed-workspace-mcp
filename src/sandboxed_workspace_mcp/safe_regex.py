@@ -87,6 +87,28 @@ class _Fragment:
     outs: tuple[tuple[int, str], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _LiteralPattern:
+    needle: str
+    anchored_start: bool
+    anchored_end: bool
+
+
+def _extract_literal_pattern(node: tuple[Any, ...]) -> _LiteralPattern | None:
+    nodes = list(node[1:]) if node[0] == "concat" else [node]
+    anchored_start = bool(nodes and nodes[0][0] == "start")
+    if anchored_start:
+        nodes.pop(0)
+    anchored_end = bool(nodes and nodes[-1][0] == "end")
+    if anchored_end:
+        nodes.pop()
+    if any(child[0] != "literal" for child in nodes):
+        return None
+    return _LiteralPattern(
+        "".join(child[1] for child in nodes), anchored_start, anchored_end
+    )
+
+
 class _Parser:
     def __init__(self, pattern: str, *, ignore_case: bool = False) -> None:
         self.pattern = pattern
@@ -244,7 +266,9 @@ class SafeRegex:
         self.pattern = pattern
         self.ignore_case = ignore_case
         self._states: list[_State] = []
-        fragment = self._build(_Parser(pattern, ignore_case=ignore_case).parse())
+        self._ast = _Parser(pattern, ignore_case=ignore_case).parse()
+        self._literal_pattern = _extract_literal_pattern(self._ast)
+        fragment = self._build(self._ast)
         match = self._add(_State("match"))
         self._patch(fragment.outs, match)
         self._start = fragment.start
@@ -253,6 +277,26 @@ class SafeRegex:
         self, text: str, *, should_stop: Callable[[], bool] | None = None
     ) -> bool:
         """Return whether the pattern matches anywhere in one logical line."""
+
+        literal_pattern = self._literal_pattern
+        if literal_pattern is not None and (
+            not self.ignore_case
+            or (literal_pattern.needle.isascii() and text.isascii())
+        ):
+            if should_stop is not None and should_stop():
+                return False
+            needle = literal_pattern.needle
+            haystack = text
+            if self.ignore_case:
+                needle = needle.lower()
+                haystack = haystack.lower()
+            if literal_pattern.anchored_start and literal_pattern.anchored_end:
+                return haystack == needle
+            if literal_pattern.anchored_start:
+                return haystack.startswith(needle)
+            if literal_pattern.anchored_end:
+                return haystack.endswith(needle)
+            return needle in haystack
 
         active = self._closure({self._start}, position=0, length=len(text))
         for position in range(len(text) + 1):

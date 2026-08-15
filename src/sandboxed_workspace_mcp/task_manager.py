@@ -47,6 +47,8 @@ class TaskLogBuffer:
     """A thread-safe byte-bounded ring with absolute cursors."""
 
     def __init__(self, capacity: int) -> None:
+        if type(capacity) is not int or capacity <= 0:
+            raise ValueError("log capacity must be a positive integer")
         self.capacity = capacity
         self._chunks: deque[_LogChunk] = deque()
         self._base_cursor = 0

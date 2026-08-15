@@ -29,6 +29,8 @@ from sandboxed_workspace_mcp.task_runner import (
     CliContainerBackend,
     ContainerRequest,
     TaskExecutionError,
+    WorkspaceGrowthMonitor,
+    _next_workspace_scan_delay,
     build_container_argv,
     run_container_task,
 )
@@ -315,6 +317,26 @@ class ContainerRunnerTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(results[0].status, "workspace_limit_exceeded")
         self.assertTrue(backend.handles[0].stopped)
+
+    def test_workspace_growth_monitor_delay_targets_a_bounded_duty_cycle(self) -> None:
+        self.assertEqual(_next_workspace_scan_delay(0.01, 0.0), 0.25)
+        self.assertAlmostEqual(_next_workspace_scan_delay(0.1, 0.0), 0.9)
+        self.assertEqual(_next_workspace_scan_delay(0.5, 0.0), 2.0)
+        self.assertEqual(_next_workspace_scan_delay(10.0, 0.8), 0.1)
+
+    def test_read_only_task_does_not_start_growth_monitor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request = ContainerRequest(
+                "sandboxed-workspace-mcp-read-only",
+                Path(directory),
+                TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
+                TaskLimits(),
+            )
+            monitor = WorkspaceGrowthMonitor(request, ImmediateHandle())
+            with patch.object(monitor._thread, "start") as start:
+                monitor.start()
+
+        start.assert_not_called()
 
     def test_missing_runtime_fails_without_host_fallback(self) -> None:
         with (
@@ -1154,6 +1176,14 @@ class TaskManagerTests(unittest.TestCase):
         replacement = TaskLogBuffer(4)
         replacement.append_stdout(b"0123456789")
         self.assertEqual(replacement.read(0)["stdout"], "6789")
+
+    def test_ring_buffer_rejects_non_positive_capacity(self) -> None:
+        for capacity in (0, -1, True, 1.5):
+            with self.subTest(capacity=capacity):
+                with self.assertRaisesRegex(
+                    ValueError, "log capacity must be a positive integer"
+                ):
+                    TaskLogBuffer(capacity)  # type: ignore[arg-type]
 
     def test_server_conditionally_registers_narrow_task_schemas(self) -> None:
         default_server = create_server(self.settings)

@@ -305,19 +305,30 @@ class WorkspaceGrowthMonitor:
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            started = time.monotonic()
             try:
-                if self._limit_exceeded():
+                usage = self._measure_usage()
+                if usage.exceeded:
                     self.exceeded.set()
                     self.handle.stop()
                     return
             except OSError:
                 # Aggregate accounting is explicitly best effort. A later pass may
                 # observe entries that were concurrently renamed or removed.
-                pass
-            self._stop.wait(0.05)
+                pressure = 0.0
+            else:
+                pressure = usage.pressure
+            if self._stop.is_set():
+                return
+            elapsed = time.monotonic() - started
+            self._stop.wait(_next_workspace_scan_delay(elapsed, pressure))
 
     def _limit_exceeded(self) -> bool:
+        return self._measure_usage().exceeded
+
+    def _measure_usage(self) -> _WorkspaceUsage:
         total = 0
+        largest_file = 0
         pending = [self.request.snapshot_path]
         while pending and not self._stop.is_set():
             directory = pending.pop()
@@ -331,18 +342,56 @@ class WorkspaceGrowthMonitor:
                     if entry.is_dir(follow_symlinks=False):
                         pending.append(Path(entry.path))
                     elif entry.is_file(follow_symlinks=False):
-                        if (
-                            metadata.st_size
-                            > self.request.limits.max_workspace_file_bytes
-                        ):
-                            return True
+                        largest_file = max(largest_file, metadata.st_size)
                         total += metadata.st_size
-                        if (
-                            total - self.request.initial_workspace_bytes
-                            > self.request.limits.max_workspace_growth_bytes
-                        ):
-                            return True
-        return False
+                        pressure = _workspace_pressure(
+                            largest_file,
+                            total,
+                            self.request.initial_workspace_bytes,
+                            self.request.limits.max_workspace_file_bytes,
+                            self.request.limits.max_workspace_growth_bytes,
+                        )
+                        if pressure > 1.0:
+                            return _WorkspaceUsage(True, pressure)
+        if self._stop.is_set():
+            return _WorkspaceUsage(False, 0.0)
+        return _WorkspaceUsage(
+            False,
+            _workspace_pressure(
+                largest_file,
+                total,
+                self.request.initial_workspace_bytes,
+                self.request.limits.max_workspace_file_bytes,
+                self.request.limits.max_workspace_growth_bytes,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkspaceUsage:
+    exceeded: bool
+    pressure: float
+
+
+def _workspace_pressure(
+    largest_file: int,
+    total: int,
+    initial_workspace_bytes: int,
+    max_workspace_file_bytes: int,
+    max_workspace_growth_bytes: int,
+) -> float:
+    file_pressure = largest_file / max_workspace_file_bytes
+    growth = max(0, total - initial_workspace_bytes)
+    growth_pressure = growth / max_workspace_growth_bytes
+    return max(file_pressure, growth_pressure)
+
+
+def _next_workspace_scan_delay(scan_duration: float, pressure: float) -> float:
+    """Return the delay that targets low scan duty cycle near safe limits."""
+
+    if pressure >= 0.8:
+        return 0.1
+    return min(2.0, max(0.25, scan_duration * 9))
 
 
 @dataclass(frozen=True, slots=True)
