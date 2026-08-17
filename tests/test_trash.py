@@ -10,7 +10,6 @@ import unittest
 from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
-from typing import TypedDict
 from unittest.mock import patch
 
 from sandboxed_workspace_mcp.access_policy import TRASH_DIRECTORY_NAME
@@ -29,13 +28,6 @@ from sandboxed_workspace_mcp.trash import (
     TrashManager,
 )
 from sandboxed_workspace_mcp.workspace import Workspace, WorkspaceError
-
-
-class _TrashItem(TypedDict, total=False):
-    trash_id: str
-    sha256: str
-    original_path: str
-    payload_name: str
 
 
 class TrashManagerTests(unittest.TestCase):
@@ -77,6 +69,13 @@ class TrashManagerTests(unittest.TestCase):
         value = payload[key]
         assert isinstance(value, list)
         assert all(isinstance(item, dict) for item in value)
+        return value
+
+    @staticmethod
+    def _str_items(payload: dict[str, object], key: str) -> list[str]:
+        value = payload[key]
+        assert isinstance(value, list)
+        assert all(isinstance(item, str) for item in value)
         return value
 
     def test_trash_is_lazy_versioned_and_restorable(self) -> None:
@@ -233,7 +232,9 @@ class TrashManagerTests(unittest.TestCase):
         self.assertEqual(stale.exception.code, TRASH_VERSION_CONFLICT)
         self.assertEqual(trash.list_trashed_files()["total"], 1)
 
-        result = trash.purge_trashed_file(item["trash_id"], item["sha256"])
+        result = trash.purge_trashed_file(
+            self._str_field(item, "trash_id"), self._str_field(item, "sha256")
+        )
         self.assertTrue(result["purged"])
         self.assertFalse(result["cleanup_pending"])
         self.assertEqual(trash.list_trashed_files()["total"], 0)
@@ -252,23 +253,37 @@ class TrashManagerTests(unittest.TestCase):
         target = self.root / "corrupt.txt"
         target.write_bytes(b"payload")
         item = self.trash.trash_file(
-            "corrupt.txt", self.workspace.read_file_versioned("corrupt.txt")["sha256"]
+            "corrupt.txt", self._version_sha(self.workspace, "corrupt.txt")
         )
-        item_dir = self.root / TRASH_DIRECTORY_NAME / "items" / item["trash_id"]
+        item_dir = (
+            self.root
+            / TRASH_DIRECTORY_NAME
+            / "items"
+            / self._str_field(item, "trash_id")
+        )
         (item_dir / "payload").unlink()
 
         with self.assertRaises(TrashError) as missing_payload:
-            self.trash.restore_trashed_file(item["trash_id"], item["sha256"])
+            self.trash.restore_trashed_file(
+                self._str_field(item, "trash_id"), self._str_field(item, "sha256")
+            )
         self.assertEqual(missing_payload.exception.code, "TRASH_ITEM_CORRUPT")
 
         target.write_bytes(b"payload")
         item = self.trash.trash_file(
-            "corrupt.txt", self.workspace.read_file_versioned("corrupt.txt")["sha256"]
+            "corrupt.txt", self._version_sha(self.workspace, "corrupt.txt")
         )
-        item_dir = self.root / TRASH_DIRECTORY_NAME / "items" / item["trash_id"]
+        item_dir = (
+            self.root
+            / TRASH_DIRECTORY_NAME
+            / "items"
+            / self._str_field(item, "trash_id")
+        )
         (item_dir / "metadata.json").write_bytes(b"not json")
         with self.assertRaises(TrashError) as bad_metadata:
-            self.trash.restore_trashed_file(item["trash_id"], item["sha256"])
+            self.trash.restore_trashed_file(
+                self._str_field(item, "trash_id"), self._str_field(item, "sha256")
+            )
         self.assertEqual(bad_metadata.exception.code, "TRASH_ITEM_CORRUPT")
 
     def test_restore_intent_recovery_handles_commit_boundaries(self) -> None:
@@ -283,17 +298,19 @@ class TrashManagerTests(unittest.TestCase):
         def add_item(name: str) -> dict[str, object]:
             target = self.root / name
             target.write_bytes(name.encode())
-            return trash.trash_file(name, workspace.read_file_versioned(name)["sha256"])
+            return trash.trash_file(name, self._version_sha(workspace, name))
 
         def write_intent(item: dict[str, object], destination: str) -> Path:
-            item_dir = self.root / TRASH_DIRECTORY_NAME / "items" / item["trash_id"]
+            trash_id = self._str_field(item, "trash_id")
+            sha256 = self._str_field(item, "sha256")
+            item_dir = self.root / TRASH_DIRECTORY_NAME / "items" / trash_id
             (item_dir / "restore-intent.json").write_text(
                 json.dumps(
                     {
                         "version": 1,
-                        "trash_id": item["trash_id"],
+                        "trash_id": trash_id,
                         "destination_path": destination,
-                        "sha256": item["sha256"],
+                        "sha256": sha256,
                     }
                 ),
                 encoding="utf-8",
@@ -313,7 +330,7 @@ class TrashManagerTests(unittest.TestCase):
                 self.root
                 / TRASH_DIRECTORY_NAME
                 / "items"
-                / pending["trash_id"]
+                / self._str_field(pending, "trash_id")
                 / "restore-intent.json"
             ).exists()
         )
@@ -336,12 +353,10 @@ class TrashManagerTests(unittest.TestCase):
         data = b"finalized restore"
         target.write_bytes(data)
         item = self.trash.trash_file(
-            "finalize.txt", self.workspace.read_file_versioned("finalize.txt")["sha256"]
+            "finalize.txt", self._version_sha(self.workspace, "finalize.txt")
         )
-        trash_id = item["trash_id"]
-        sha256 = item["sha256"]
-        self.assertIsInstance(trash_id, str)
-        self.assertIsInstance(sha256, str)
+        trash_id = self._str_field(item, "trash_id")
+        sha256 = self._str_field(item, "sha256")
 
         recovered = self.root / "recovered"
         recovered.mkdir()
@@ -372,12 +387,10 @@ class TrashManagerTests(unittest.TestCase):
         target = self.root / "schema.txt"
         target.write_bytes(b"schema payload")
         item = self.trash.trash_file(
-            "schema.txt", self.workspace.read_file_versioned("schema.txt")["sha256"]
+            "schema.txt", self._version_sha(self.workspace, "schema.txt")
         )
-        trash_id = item["trash_id"]
-        sha256 = item["sha256"]
-        self.assertIsInstance(trash_id, str)
-        self.assertIsInstance(sha256, str)
+        trash_id = self._str_field(item, "trash_id")
+        sha256 = self._str_field(item, "sha256")
         item_dir = self.root / TRASH_DIRECTORY_NAME / "items" / trash_id
         (item_dir / "restore-intent.json").write_text(
             json.dumps(
@@ -394,7 +407,10 @@ class TrashManagerTests(unittest.TestCase):
         listed = self.trash.list_trashed_files()
 
         self.assertEqual(listed["total"], 0)
-        self.assertIn("restore intent recovery is pending", listed["diagnostics"])
+        self.assertIn(
+            "restore intent recovery is pending",
+            self._str_items(listed, "diagnostics"),
+        )
         self.assertTrue((item_dir / "payload").exists())
         self.assertTrue((item_dir / "restore-intent.json").exists())
 
@@ -402,12 +418,10 @@ class TrashManagerTests(unittest.TestCase):
         target = self.root / "checksum.txt"
         target.write_bytes(b"expected")
         item = self.trash.trash_file(
-            "checksum.txt", self.workspace.read_file_versioned("checksum.txt")["sha256"]
+            "checksum.txt", self._version_sha(self.workspace, "checksum.txt")
         )
-        trash_id = item["trash_id"]
-        sha256 = item["sha256"]
-        self.assertIsInstance(trash_id, str)
-        self.assertIsInstance(sha256, str)
+        trash_id = self._str_field(item, "trash_id")
+        sha256 = self._str_field(item, "sha256")
 
         recovered = self.root / "recovered"
         recovered.mkdir()
@@ -429,7 +443,8 @@ class TrashManagerTests(unittest.TestCase):
 
         self.assertEqual(listed["total"], 1)
         self.assertIn(
-            "restore intent payload checksum is invalid", listed["diagnostics"]
+            "restore intent payload checksum is invalid",
+            self._str_items(listed, "diagnostics"),
         )
         self.assertFalse((recovered / "checksum.txt").exists())
         self.assertEqual((item_dir / "payload").read_bytes(), b"tampered")
@@ -510,10 +525,9 @@ class TrashManagerTests(unittest.TestCase):
                 data = b"payload"
                 source.write_bytes(data)
                 item = trash.trash_file(
-                    "source.txt", workspace.read_file_versioned("source.txt")["sha256"]
+                    "source.txt", self._version_sha(workspace, "source.txt")
                 )
-                trash_id = item["trash_id"]
-                self.assertIsInstance(trash_id, str)
+                trash_id = self._str_field(item, "trash_id")
                 trash_root = root / TRASH_DIRECTORY_NAME
                 formal = trash_root / "items" / trash_id
                 staging = trash_root / "staging" / trash_id
@@ -535,7 +549,8 @@ class TrashManagerTests(unittest.TestCase):
                     self.assertFalse(staging.exists())
                 elif case == "conflict":
                     self.assertIn(
-                        "staging item conflicts with formal item", listed["diagnostics"]
+                        "staging item conflicts with formal item",
+                        self._str_items(listed, "diagnostics"),
                     )
                     self.assertTrue(staging.is_dir())
                 elif case == "original-restored":
@@ -544,7 +559,10 @@ class TrashManagerTests(unittest.TestCase):
                     self.assertEqual(source.read_bytes(), data)
                 else:
                     self.assertEqual(listed["total"], 0)
-                    self.assertIn("incomplete staging item", listed["diagnostics"])
+                    self.assertIn(
+                        "incomplete staging item",
+                        self._str_items(listed, "diagnostics"),
+                    )
                     self.assertTrue(staging.is_dir())
 
     def test_formal_recovery_preserves_unverifiable_states(self) -> None:
@@ -558,10 +576,9 @@ class TrashManagerTests(unittest.TestCase):
                 source = root / "source.txt"
                 source.write_bytes(b"payload")
                 item = trash.trash_file(
-                    "source.txt", workspace.read_file_versioned("source.txt")["sha256"]
+                    "source.txt", self._version_sha(workspace, "source.txt")
                 )
-                trash_id = item["trash_id"]
-                self.assertIsInstance(trash_id, str)
+                trash_id = self._str_field(item, "trash_id")
                 item_dir = root / TRASH_DIRECTORY_NAME / "items" / trash_id
 
                 if case == "missing-metadata":
@@ -579,17 +596,16 @@ class TrashManagerTests(unittest.TestCase):
                     "missing-payload": "formal item is missing its payload",
                     "checksum-mismatch": "formal item payload checksum is invalid",
                 }[case]
-                self.assertIn(expected, listed["diagnostics"])
+                self.assertIn(expected, self._str_items(listed, "diagnostics"))
                 self.assertTrue(item_dir.exists())
 
     def test_metadata_schema_validation_rejects_corrupt_fields(self) -> None:
         source = self.root / "metadata.txt"
         source.write_bytes(b"payload")
         item = self.trash.trash_file(
-            "metadata.txt", self.workspace.read_file_versioned("metadata.txt")["sha256"]
+            "metadata.txt", self._version_sha(self.workspace, "metadata.txt")
         )
-        trash_id = item["trash_id"]
-        self.assertIsInstance(trash_id, str)
+        trash_id = self._str_field(item, "trash_id")
         metadata_path = (
             self.root / TRASH_DIRECTORY_NAME / "items" / trash_id / "metadata.json"
         )
@@ -649,7 +665,7 @@ class TrashManagerTests(unittest.TestCase):
         target.write_bytes(b"payload")
         item = self.trash.trash_file(
             "pending-purge.txt",
-            self.workspace.read_file_versioned("pending-purge.txt")["sha256"],
+            self._version_sha(self.workspace, "pending-purge.txt"),
         )
         settings = Settings.create(
             self.root,
@@ -660,7 +676,9 @@ class TrashManagerTests(unittest.TestCase):
         )
         trash = TrashManager(Workspace(settings))
         with patch.object(trash, "_cleanup_purging_item", return_value=True):
-            result = trash.purge_trashed_file(item["trash_id"], item["sha256"])
+            result = trash.purge_trashed_file(
+                self._str_field(item, "trash_id"), self._str_field(item, "sha256")
+            )
         self.assertTrue(result["cleanup_pending"])
         self.assertEqual(trash.list_trashed_files()["total"], 0)
 
@@ -669,14 +687,14 @@ class TrashManagerTests(unittest.TestCase):
         second = self.root / "second.txt"
         first.write_bytes(b"1234567890")
         second.write_bytes(b"abcdefghij")
-        first_sha = self.workspace.read_file_versioned("first.txt")["sha256"]
-        second_sha = self.workspace.read_file_versioned("second.txt")["sha256"]
+        first_sha = self._version_sha(self.workspace, "first.txt")
+        second_sha = self._version_sha(self.workspace, "second.txt")
         self.trash.trash_file("first.txt", first_sha)
         self.trash.trash_file("second.txt", second_sha)
 
         third = self.root / "third.txt"
         third.write_bytes(b"x")
-        third_sha = self.workspace.read_file_versioned("third.txt")["sha256"]
+        third_sha = self._version_sha(self.workspace, "third.txt")
         with self.assertRaisesRegex(TrashError, "limit"):
             self.trash.trash_file("third.txt", third_sha)
         self.assertTrue(third.exists())
@@ -685,7 +703,7 @@ class TrashManagerTests(unittest.TestCase):
     def test_malformed_entries_are_bounded_diagnostics(self) -> None:
         target = self.root / "safe.txt"
         target.write_text("safe", encoding="utf-8")
-        sha = self.workspace.read_file_versioned("safe.txt")["sha256"]
+        sha = self._version_sha(self.workspace, "safe.txt")
         self.trash.trash_file("safe.txt", sha)
         trash_root = self.root / TRASH_DIRECTORY_NAME
         bad_item = trash_root / "items" / ("a" * 32)
@@ -694,27 +712,28 @@ class TrashManagerTests(unittest.TestCase):
 
         listed = self.trash.list_trashed_files(limit=1)
         self.assertEqual(listed["total"], 1)
-        self.assertIn("diagnostics", listed)
-        self.assertLessEqual(len(listed["diagnostics"]), 21)
+        diagnostics = self._str_items(listed, "diagnostics")
+        self.assertLessEqual(len(diagnostics), 21)
 
     def test_recovery_commits_complete_staging_and_cleans_completed_restore(
         self,
     ) -> None:
         target = self.root / "staged.txt"
         target.write_bytes(b"staged payload")
-        sha = self.workspace.read_file_versioned("staged.txt")["sha256"]
+        sha = self._version_sha(self.workspace, "staged.txt")
         item = self.trash.trash_file("staged.txt", sha)
+        trash_id = self._str_field(item, "trash_id")
         trash_root = self.root / TRASH_DIRECTORY_NAME
-        formal_item = trash_root / "items" / item["trash_id"]
-        staging_item = trash_root / "staging" / item["trash_id"]
+        formal_item = trash_root / "items" / trash_id
+        staging_item = trash_root / "staging" / trash_id
         os.replace(formal_item, staging_item)
 
         listed = self.trash.list_trashed_files()
         self.assertEqual(listed["total"], 1)
-        self.assertTrue((trash_root / "items" / item["trash_id"]).is_dir())
+        self.assertTrue((trash_root / "items" / trash_id).is_dir())
 
         target.write_bytes(b"staged payload")
-        payload = trash_root / "items" / item["trash_id"] / "payload"
+        payload = trash_root / "items" / trash_id / "payload"
         payload.unlink()
         self.assertEqual(self.trash.list_trashed_files()["total"], 0)
         self.assertEqual(target.read_bytes(), b"staged payload")
@@ -722,7 +741,7 @@ class TrashManagerTests(unittest.TestCase):
     def test_reserved_directory_is_not_visible_to_workspace(self) -> None:
         target = self.root / "hidden.txt"
         target.write_text("secret", encoding="utf-8")
-        sha = self.workspace.read_file_versioned("hidden.txt")["sha256"]
+        sha = self._version_sha(self.workspace, "hidden.txt")
         self.trash.trash_file("hidden.txt", sha)
 
         self.assertNotIn(TRASH_DIRECTORY_NAME, self.workspace.list_directory())
@@ -758,17 +777,26 @@ class TrashConfigurationAndServerTests(unittest.TestCase):
                     allow_trash_purge=True,
                 )
 
-            for values, message in (
-                ({"max_trash_items": 0}, "max_trash_items"),
-                ({"max_trash_bytes": 0}, "max_trash_bytes"),
-                ({"max_trash_items": 10_001}, "max_trash_items"),
-                ({"max_trash_bytes": 4 * 1024 * 1024 * 1024 + 1}, "max_trash_bytes"),
+            with (
+                self.subTest(max_trash_items=0),
+                self.assertRaisesRegex(ConfigurationError, "max_trash_items"),
             ):
-                with (
-                    self.subTest(values=values),
-                    self.assertRaisesRegex(ConfigurationError, message),
-                ):
-                    Settings.create(root, **values)
+                Settings.create(root, max_trash_items=0)
+            with (
+                self.subTest(max_trash_bytes=0),
+                self.assertRaisesRegex(ConfigurationError, "max_trash_bytes"),
+            ):
+                Settings.create(root, max_trash_bytes=0)
+            with (
+                self.subTest(max_trash_items=10_001),
+                self.assertRaisesRegex(ConfigurationError, "max_trash_items"),
+            ):
+                Settings.create(root, max_trash_items=10_001)
+            with (
+                self.subTest(max_trash_bytes="too-large"),
+                self.assertRaisesRegex(ConfigurationError, "max_trash_bytes"),
+            ):
+                Settings.create(root, max_trash_bytes=4 * 1024 * 1024 * 1024 + 1)
 
     def test_cli_flags_and_environment_configure_trash(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -899,12 +927,18 @@ class TrashConfigurationAndServerTests(unittest.TestCase):
             server = create_server(Settings.create(root, allow_trash=True))
             tools = {tool.name: tool for tool in self._list_tools(server)}
 
-        server_description = server.description.lower()
+        server_description_value = server.description
+        self.assertIsInstance(server_description_value, str)
+        assert isinstance(server_description_value, str)
+        server_description = server_description_value.lower()
         self.assertIn("recycle-bin trash", server_description)
         self.assertIn("recovery", server_description)
         self.assertIn("alternate-path restore", server_description)
 
-        description = tools["restore_trashed_file_to"].description.lower()
+        description_value = tools["restore_trashed_file_to"].description
+        self.assertIsInstance(description_value, str)
+        assert isinstance(description_value, str)
+        description = description_value.lower()
         first_sentence = description.splitlines()[0]
         self.assertIn("restore or recover", first_sentence)
         self.assertIn("trashed recycle-bin file", first_sentence)
