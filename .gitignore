@@ -8,5 +8,6 @@ __pycache__/
 build/
 dist/
 runtime-config/
+/skills/
 *.egg-info/
 *.py[cod]
