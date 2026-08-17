@@ -70,7 +70,7 @@ The compatibility entrypoint remains available:
 | Writes | `create_directory`, `write_file`, `replace_text`, `append_file` | Atomic writes; disabled in read-only mode |
 | Recycle bin (optional) | `trash_file`, `list_trashed_files`, `restore_trashed_file`, `restore_trashed_file_to` | Disabled by default; bounded single-file trash and non-overwriting restore |
 | Permanent purge (optional) | `purge_trashed_file` | Registered only with separate purge enablement; SHA-checked and irreversible |
-| Read-only Git | `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_rev_parse`, `git_ls_files`, `git_read_file_at_revision` | Fixed-argument, bounded Git queries and historical file reads |
+| Read-only Git | `git_status`, `git_diff`, `workspace_diff`, `git_log`, `git_show`, `git_branch`, `git_rev_parse`, `git_ls_files`, `git_read_file_at_revision` | Fixed-argument, bounded Git queries, workspace diff aggregation, and historical file reads |
 | Git writes (optional) | `git_init`, `git_create_baseline` | Configured-root `main` initialization and one server-owned first baseline; disabled by default |
 | Compatibility commands | `run_shell` | Closed read-only grammar; never starts a shell |
 | Fixed tasks | `list_tasks`, `run_task` | Operator-defined synchronous tasks |
@@ -80,6 +80,15 @@ The compatibility entrypoint remains available:
 Without a task config, the task manager, container backend, and dynamic execution tools are not created or registered.
 
 `run_shell` accepts only `pwd`, `ls`, `cat`, `head`, `tail`, `tree`, `grep`, bounded `rg`, `find`, `wc`, `sed`, and fixed Git queries. Pipes, redirects, command substitution, environment expansion, and unlisted arguments are rejected.
+
+Git review has two read-only views:
+
+```python
+git_diff(path="src")  # native tracked Git diff
+workspace_diff(path="src")  # tracked final state + safe untracked text
+```
+
+`workspace_diff` does not stage files or modify the repository. Ignored, blocked, binary, oversized, and otherwise unsafe files never have their contents emitted. Output and scanning are bounded; partition large reviews with `path`.
 
 ### Use a controlled Git baseline
 
@@ -166,8 +175,9 @@ The fixed container environment places common caches in `/tmp`, within a 64 MiB 
 | mypy | `/tmp/cache/mypy` |
 | coverage | `/tmp/.coverage` |
 | npm | `/tmp/npm-cache` |
+| Python explicit bytecode | `/tmp/cache/python` |
 
-Python bytecode and pip cache are disabled. Explicit build and report artifacts such as `build/`, `dist/`, and `htmlcov/` are not redirected automatically; use tool arguments to place them under `/tmp` in a read-only profile, or use a constrained writable task/profile when workspace output is required.
+Normal Python import bytecode writes are disabled; explicit bytecode compilation such as `python -m compileall` is redirected to `/tmp/cache/python`. All paths share the 64 MiB `/tmp` tmpfs; modes such as `compileall -b` that explicitly request adjacent `.pyc` output are not supported for a read-only workspace. Explicit build and report artifacts such as `build/`, `dist/`, and `htmlcov/` are not redirected automatically; use tool arguments to place them under `/tmp` in a read-only profile, or use a constrained writable task/profile when workspace output is required.
 
 ## Configuration and deployment
 

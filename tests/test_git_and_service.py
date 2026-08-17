@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import shutil
 import subprocess
 import tempfile
@@ -256,7 +257,12 @@ class GitAndServiceTests(unittest.TestCase):
     def test_non_git_directory_reports_nonzero_exit_as_git_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             reader = GitReader(Settings.create(directory))
-            for operation in (reader.status, reader.diff, reader.log):
+            for operation in (
+                reader.status,
+                reader.diff,
+                reader.log,
+                reader.workspace_diff,
+            ):
                 with (
                     self.subTest(operation=operation),
                     self.assertRaisesRegex(GitError, "exit code"),
@@ -309,6 +315,221 @@ class GitAndServiceTests(unittest.TestCase):
         self.assertNotIn("SECRET", diff)
         self.assertIn("visible.txt", status)
         self.assertIn("-before", diff)
+
+    def test_scoped_git_paths_keep_blocked_descendant_exclusions(self) -> None:
+        nested = self.root / "nested"
+        nested.mkdir()
+        (nested / ".env").write_text("NESTED_SECRET=before\n", encoding="utf-8")
+        (nested / "private.pem").write_text(
+            "-----BEGIN PRIVATE KEY-----\nbefore\n", encoding="utf-8"
+        )
+        (nested / "visible.txt").write_text("visible before\n", encoding="utf-8")
+        self._git("add", "--", "nested")
+        self._git("commit", "-qm", "nested policy fixture")
+
+        (nested / ".env").write_text("NESTED_SECRET=after\n", encoding="utf-8")
+        (nested / "private.pem").write_text(
+            "-----BEGIN PRIVATE KEY-----\nafter\n", encoding="utf-8"
+        )
+        (nested / "visible.txt").write_text("visible after\n", encoding="utf-8")
+
+        diff = self.git.diff(path="nested")
+        shown = self.git.show("HEAD", path="nested")
+        for output in (diff, shown):
+            self.assertNotIn(".env", output)
+            self.assertNotIn("private.pem", output)
+            self.assertNotIn("NESTED_SECRET", output)
+            self.assertNotIn("BEGIN PRIVATE KEY", output)
+        self.assertIn("visible.txt", diff)
+        self.assertIn("visible after", diff)
+        self.assertIn("visible.txt", shown)
+        self.assertIn("visible before", shown)
+
+        with self.assertRaisesRegex(ValueError, "blocked"):
+            self.git.diff(path="nested/.env")
+        with self.assertRaisesRegex(ValueError, "blocked"):
+            self.git.show("HEAD", path="nested/private.pem")
+
+        server = create_server(self.settings)
+
+        async def exercise_native_tools() -> None:
+            native_diff = await server.call_tool("git_diff", {"path": "nested"})
+            native_show = await server.call_tool(
+                "git_show", {"commit": "HEAD", "path": "nested"}
+            )
+            self.assertFalse(native_diff.is_error)
+            self.assertFalse(native_show.is_error)
+            self.assertIn("visible after", native_diff.content[0].text)
+            self.assertIn("visible before", native_show.content[0].text)
+            self.assertNotIn("NESTED_SECRET", native_diff.content[0].text)
+            self.assertNotIn("NESTED_SECRET", native_show.content[0].text)
+
+        asyncio.run(exercise_native_tools())
+
+    def test_workspace_diff_combines_final_tracked_and_untracked_state(self) -> None:
+        for name, content in {
+            "staged.txt": "staged initial\n",
+            "mixed.txt": "mixed initial\n",
+            "deleted.txt": "delete me\n",
+        }.items():
+            (self.root / name).write_text(content, encoding="utf-8")
+        self._git("add", "--", "staged.txt", "mixed.txt", "deleted.txt")
+        self._git("commit", "-qm", "workspace diff fixture")
+
+        (self.root / "staged.txt").write_text("staged final\n", encoding="utf-8")
+        (self.root / "mixed.txt").write_text("mixed staged\n", encoding="utf-8")
+        self._git("add", "--", "staged.txt", "mixed.txt")
+        (self.root / "mixed.txt").write_text("mixed working final\n", encoding="utf-8")
+        (self.root / "deleted.txt").unlink()
+        (self.root / "new.txt").write_text("untracked text\n", encoding="utf-8")
+
+        status_before = subprocess.run(
+            [shutil.which("git") or "git", "status", "--porcelain=v1", "-z"],
+            cwd=self.root,
+            check=True,
+            capture_output=True,
+        ).stdout
+        index_before = (self.root / ".git" / "index").read_bytes()
+
+        output = self.git.workspace_diff()
+
+        self.assertIn("Tracked changes (HEAD vs working tree):", output)
+        self.assertIn("staged.txt", output)
+        self.assertIn("+staged final", output)
+        self.assertIn("+mixed working final", output)
+        self.assertIn("deleted.txt", output)
+        self.assertIn("Untracked changes:", output)
+        self.assertIn("new.txt", output)
+        self.assertIn("+untracked text", output)
+        self.assertNotIn("+mixed staged", output)
+        self.assertNotIn("untracked text", self.git.diff())
+        self.assertEqual(
+            status_before,
+            subprocess.run(
+                [shutil.which("git") or "git", "status", "--porcelain=v1", "-z"],
+                cwd=self.root,
+                check=True,
+                capture_output=True,
+            ).stdout,
+        )
+        self.assertEqual(index_before, (self.root / ".git" / "index").read_bytes())
+
+    def test_workspace_diff_untracked_paths_are_sorted_and_git_ignored(self) -> None:
+        review = self.root / "review"
+        review.mkdir()
+        (review / "b.txt").write_text("b\n", encoding="utf-8")
+        (review / "a file.txt").write_text("a\n", encoding="utf-8")
+        (review / ".env").write_text("REVIEW_SECRET=hidden\n", encoding="utf-8")
+        (review / "nested").mkdir()
+        (review / "nested" / ".env").write_text(
+            "NESTED_REVIEW_SECRET=hidden\n", encoding="utf-8"
+        )
+        (review / "private.pem").write_text("PRIVATE_REVIEW_KEY\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text("review/ignored.txt\n", encoding="utf-8")
+        (review / "ignored.txt").write_text("ignored content\n", encoding="utf-8")
+        exclude = self.root / ".git" / "info" / "exclude"
+        with exclude.open("a", encoding="utf-8") as handle:
+            handle.write("review/info-ignored.txt\n")
+        (review / "info-ignored.txt").write_text(
+            "info ignored content\n", encoding="utf-8"
+        )
+
+        output = self.git.workspace_diff(path="review")
+
+        self.assertLess(output.index("a file.txt"), output.index("b.txt"))
+        self.assertIn("+a\n", output)
+        self.assertIn("+b\n", output)
+        for hidden in (
+            ".env",
+            "REVIEW_SECRET",
+            "NESTED_REVIEW_SECRET",
+            "private.pem",
+            "PRIVATE_REVIEW_KEY",
+            "ignored.txt",
+            "info-ignored.txt",
+            "ignored content",
+            "info ignored content",
+        ):
+            self.assertNotIn(hidden, output)
+
+    @unittest.skipIf(os.name != "posix", "symlink and FIFO fixtures are POSIX-only")
+    def test_workspace_diff_omits_symlink_special_binary_and_oversized_files(
+        self,
+    ) -> None:
+        (self.root / "link.txt").symlink_to(self.root / "tracked.txt")
+        os.mkfifo(self.root / "special.pipe")
+        (self.root / "binary.bin").write_bytes(b"\x00x")
+        (self.root / "invalid.txt").write_bytes(b"\xffx")
+        (self.root / "large.txt").write_text("oversized-secret\n", encoding="utf-8")
+        settings = Settings.create(self.root, max_file_size=4, max_output_size=10_000)
+
+        output = GitReader(settings).workspace_diff()
+
+        self.assertIn("symlink", output)
+        self.assertIn("binary", output)
+        self.assertIn("oversized", output)
+        self.assertNotIn("special.pipe", output)
+        for secret in ("oversized-secret",):
+            self.assertNotIn(secret, output)
+
+    def test_workspace_diff_has_safe_new_file_headers_and_a_strict_output_budget(
+        self,
+    ) -> None:
+        (self.root / "-dash.txt").write_text("dash\n", encoding="utf-8")
+        (self.root / ":colon.txt").write_text("colon", encoding="utf-8")
+        newline_name = self.root / "line\nname.txt"
+        newline_name.write_text("newline name\n", encoding="utf-8")
+        output = self.git.workspace_diff()
+        self.assertIn('b/"-dash.txt"', output)
+        self.assertIn('b/":colon.txt"', output)
+        self.assertIn("line\\nname.txt", output)
+        self.assertIn("No newline at end of file", output)
+
+        large = self.root / "large-untracked.txt"
+        large.write_text("line\n" * 200, encoding="utf-8")
+        bounded = GitReader(
+            Settings.create(self.root, max_output_size=350)
+        ).workspace_diff()
+        self.assertLessEqual(len(bounded.encode("utf-8")), 350)
+        self.assertIn("truncated", bounded)
+
+        (self.root / "x").write_text("x\n", encoding="utf-8")
+        tiny = GitReader(Settings.create(self.root, max_output_size=45)).workspace_diff(
+            path="x"
+        )
+        self.assertLessEqual(len(tiny.encode("utf-8")), 45)
+
+    def test_workspace_diff_reports_scan_budget_omissions(self) -> None:
+        for name in ("one.txt", "two.txt"):
+            (self.root / name).write_text(name, encoding="utf-8")
+
+        output = GitReader(
+            Settings.create(self.root, max_scan_entries=1)
+        ).workspace_diff()
+
+        self.assertIn("scan limit", output)
+
+    def test_workspace_diff_supports_unborn_heads_and_empty_results(self) -> None:
+        self.assertEqual(self.git.workspace_diff(), "(no output)")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(
+                [shutil.which("git") or "git", "init", "-q"],
+                cwd=root,
+                check=True,
+            )
+            (root / "staged.txt").write_text("staged unborn\n", encoding="utf-8")
+            subprocess.run(
+                [shutil.which("git") or "git", "add", "--", "staged.txt"],
+                cwd=root,
+                check=True,
+            )
+            (root / "new.txt").write_text("new unborn\n", encoding="utf-8")
+            output = GitReader(Settings.create(root)).workspace_diff()
+
+        self.assertIn("relative to empty HEAD", output)
+        self.assertIn("staged unborn", output)
+        self.assertIn("new unborn", output)
 
     def test_expanded_git_grammar_and_literal_paths(self) -> None:
         dash = self.root / "-dash.txt"
@@ -404,11 +625,17 @@ class GitAndServiceTests(unittest.TestCase):
             set(by_name["git_diff"].input_schema["properties"]),
             {"staged", "path"},
         )
+        self.assertEqual(
+            set(by_name["workspace_diff"].input_schema["properties"]),
+            {"path"},
+        )
+        self.assertFalse(by_name["workspace_diff"].input_schema["additionalProperties"])
 
         async def exercise() -> None:
             calls = (
                 ("git_status", {"style": "porcelain"}, "tracked.txt"),
                 ("git_diff", {"path": "tracked.txt"}, "after"),
+                ("workspace_diff", {}, "Tracked changes"),
                 ("git_log", {"count": 1, "oneline": True}, "initial"),
                 ("git_show", {"commit": "HEAD"}, "initial"),
                 ("git_branch", {"show_current": True}, ""),
@@ -423,6 +650,8 @@ class GitAndServiceTests(unittest.TestCase):
                         self.assertIn(expected, result.content[0].text)
             with self.assertRaisesRegex(ValueError, "unexpected argument"):
                 await server.call_tool("git_show", {"commit": "HEAD", "raw": True})
+            with self.assertRaisesRegex(ValueError, "unexpected argument"):
+                await server.call_tool("workspace_diff", {"raw": True})
 
         asyncio.run(exercise())
 

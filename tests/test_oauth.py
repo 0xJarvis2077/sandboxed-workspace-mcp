@@ -325,6 +325,10 @@ class OAuthServerTests(unittest.TestCase):
             [{"type": "oauth2", "scopes": ["workspace.read"]}],
         )
         self.assertEqual(
+            by_name["workspace_diff"].meta["securitySchemes"],
+            [{"type": "oauth2", "scopes": ["workspace.read"]}],
+        )
+        self.assertEqual(
             by_name["write_file"].meta["securitySchemes"],
             [{"type": "oauth2", "scopes": ["workspace.write"]}],
         )

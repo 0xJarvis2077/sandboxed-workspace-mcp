@@ -362,6 +362,13 @@ class Workspace:
         selected = lines[first - 1 :] if end_line <= 0 else lines[first - 1 : end_line]
         return self.truncate("".join(selected))
 
+    def read_file_bytes(self, path: str) -> bytes:
+        """Read bounded bytes from one policy-approved, non-symlinked file."""
+
+        target = self.safe_regular_file_path(path)
+        data, _ = self._read_bytes_and_state(target)
+        return data
+
     def read_file_versioned(
         self, path: str, start_line: int = 1, end_line: int = 0
     ) -> dict[str, object]:

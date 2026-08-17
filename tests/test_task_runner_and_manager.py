@@ -209,6 +209,7 @@ class ContainerRunnerTests(unittest.TestCase):
                 "MYPY_CACHE_DIR=/tmp/cache/mypy",
                 "COVERAGE_FILE=/tmp/.coverage",
                 "PYTHONDONTWRITEBYTECODE=1",
+                "PYTHONPYCACHEPREFIX=/tmp/cache/python",
                 "PIP_NO_CACHE_DIR=1",
                 "npm_config_cache=/tmp/npm-cache",
                 "CI=1",
@@ -229,12 +230,12 @@ class ContainerRunnerTests(unittest.TestCase):
             "HOME=/tmp/home",
             "TMPDIR=/tmp",
             "PYTHONDONTWRITEBYTECODE=1",
+            "PYTHONPYCACHEPREFIX=/tmp/cache/python",
             "CI=1",
         ):
             self.assertIn(expected, rendered)
         self.assertNotIn("shell", argv)
         self.assertNotIn("-c", argv[: argv.index(PINNED_IMAGE)])
-        self.assertNotIn("PYTHONPYCACHEPREFIX", rendered)
         self.assertNotIn("PYTEST_ADDOPTS", rendered)
         self.assertEqual(argv[-3:], ["python", "-m", "unittest"])
 

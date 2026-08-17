@@ -70,7 +70,7 @@ python -m venv .venv
 | 写入 | `create_directory`, `write_file`, `replace_text`, `append_file` | 原子写入；需要非只读模式 |
 | 回收站（可选） | `trash_file`, `list_trashed_files`, `restore_trashed_file`, `restore_trashed_file_to` | 默认不注册；受限单文件回收和不覆盖恢复 |
 | 永久清理（可选） | `purge_trashed_file` | 仅单独开启 purge 时注册；必须 SHA 校验，不可恢复 |
-| Git 只读 | `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_rev_parse`, `git_ls_files`, `git_read_file_at_revision` | 固定参数、有界的 Git 查询和 HEAD 历史文件读取 |
+| Git 只读 | `git_status`, `git_diff`, `workspace_diff`, `git_log`, `git_show`, `git_branch`, `git_rev_parse`, `git_ls_files`, `git_read_file_at_revision` | 固定参数、有界的 Git 查询、工作区聚合 diff 和 HEAD 历史文件读取 |
 | Git 写入（可选） | `git_init`, `git_create_baseline` | 仅配置 root、main 分支和服务器固定首次基线；默认不注册 |
 | 兼容命令 | `run_shell` | 只解析封闭的只读语法，从不启动 Shell |
 | 固定任务 | `list_tasks`, `run_task` | 操作者预定义的同步任务 |
@@ -80,6 +80,15 @@ python -m venv .venv
 没有提供 task config 时，任务管理器、容器后端和动态执行工具都不会创建或注册。
 
 `run_shell` 只接受 `pwd`、`ls`、`cat`、`head`、`tail`、`tree`、`grep`、受限 `rg`、`find`、`wc`、`sed` 以及固定 Git 查询。管道、重定向、命令替换、环境变量展开和未列出的参数都会被拒绝。
+
+Git review 可使用两个只读视图：
+
+```python
+git_diff(path="src")  # 原生 tracked Git diff
+workspace_diff(path="src")  # tracked final state + safe untracked text
+```
+
+`workspace_diff` 不会 stage 文件或修改仓库；ignored、blocked、binary、oversized 和其他不安全文件不会输出内容。输出与扫描都受全局预算限制，大型审查应按 `path` 分区调用。
 
 ### 使用受控 Git 基线
 
@@ -166,8 +175,9 @@ stop_task(started["task_id"])
 | mypy | `/tmp/cache/mypy` |
 | coverage | `/tmp/.coverage` |
 | npm | `/tmp/npm-cache` |
+| Python explicit bytecode | `/tmp/cache/python` |
 
-同时禁用 Python bytecode 和 pip cache。`build/`、`dist/`、`htmlcov/` 等显式构建或报告产物不会自动重定向；只读 profile 应通过工具参数写入 `/tmp`，需要写 workspace 时使用受限的 writable task/profile。
+普通 Python import 的 bytecode 写入被禁用；`python -m compileall` 等显式 bytecode compilation 重定向到 `/tmp/cache/python`。所有路径共享 64 MiB `/tmp` tmpfs；`compileall -b` 等要求把 `.pyc` 写到源文件旁的模式不适用于只读 workspace。`build/`、`dist/`、`htmlcov/` 等显式构建或报告产物不会自动重定向；只读 profile 应通过工具参数写入 `/tmp`，需要写 workspace 时使用受限的 writable task/profile。
 
 ## 配置和部署
 

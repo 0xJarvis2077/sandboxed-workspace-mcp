@@ -6,6 +6,7 @@ import http.client
 import io
 import json
 import os
+import runpy
 import socket
 import subprocess
 import sys
@@ -25,6 +26,86 @@ from sandboxed_workspace_mcp.server import create_server
 
 
 class CliTests(unittest.TestCase):
+    def test_invalid_http_parameters_and_allowed_hosts_are_rejected(self) -> None:
+        invalid_arguments = (
+            ["--port", "0"],
+            ["--host", "bad host"],
+            ["--path", "mcp"],
+            ["--path", "/mcp?token=secret"],
+            ["--allowed-host", "https://mcp.example.test"],
+            ["--allowed-host", "mcp.example.test:8443"],
+        )
+        for arguments in invalid_arguments:
+            with (
+                self.subTest(arguments=arguments),
+                tempfile.TemporaryDirectory() as root,
+            ):
+                with (
+                    contextlib.redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit),
+                ):
+                    parse_runtime(["--root", root, *arguments], {})
+
+        with tempfile.TemporaryDirectory() as root:
+            runtime = parse_runtime(["--root", root, "--allowed-host", "[::1]"], {})
+        self.assertEqual(runtime.allowed_hosts, ("::1",))
+
+    def test_oauth_scopes_must_cover_all_enabled_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as base:
+            base_path = Path(base)
+            root = base_path / "workspace"
+            root.mkdir()
+            task_config = base_path / "tasks.json"
+            task_config.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "runtime": "docker",
+                        "tasks": {
+                            "test": {
+                                "mode": "run",
+                                "image": "example.invalid/test@sha256:" + "a" * 64,
+                                "argv": ["python", "-m", "unittest"],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            environment = {
+                "SANDBOXED_WORKSPACE_MCP_OAUTH_ISSUER": "https://idp.example.test",
+                "SANDBOXED_WORKSPACE_MCP_OAUTH_AUDIENCE": "https://mcp.example.test",
+                "MCP_PUBLIC_HOST": "https://mcp.example.test",
+            }
+            arguments = [
+                "--root",
+                str(root),
+                "--transport",
+                "streamable-http",
+                "--allow-network",
+                "--oauth",
+                "--allow-git-writes",
+                "--allow-trash",
+                "--allow-trash-purge",
+                "--task-config",
+                str(task_config),
+            ]
+            with (
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                parse_runtime(arguments, environment)
+
+    def test_module_entrypoint_exits_with_cli_result(self) -> None:
+        with patch("sandboxed_workspace_mcp.cli.main", return_value=0) as cli_main:
+            with self.assertRaises(SystemExit) as raised:
+                runpy.run_module(
+                    "sandboxed_workspace_mcp.__main__", run_name="__main__"
+                )
+
+        self.assertEqual(raised.exception.code, 0)
+        cli_main.assert_called_once_with()
+
     def test_environment_config_and_read_only_mode(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             runtime = parse_runtime(
@@ -379,6 +460,7 @@ class ServerTests(unittest.TestCase):
                 "git_rev_parse",
                 "git_show",
                 "git_status",
+                "workspace_diff",
                 "list_directory",
                 "project_info",
                 "read_file",
@@ -403,6 +485,7 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(
             {
                 "git_diff",
+                "workspace_diff",
                 "git_branch",
                 "git_log",
                 "git_ls_files",

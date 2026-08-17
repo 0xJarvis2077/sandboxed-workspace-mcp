@@ -78,6 +78,7 @@ _STRICT_TOOL_ARGUMENTS = {
     "git_read_file_at_revision": frozenset({"path", "commit"}),
     "git_status": frozenset({"style"}),
     "git_diff": frozenset({"staged", "path"}),
+    "workspace_diff": frozenset({"path"}),
     "git_log": frozenset({"count", "oneline"}),
     "git_show": frozenset({"commit", "path"}),
     "git_branch": frozenset({"show_current"}),
@@ -123,6 +124,7 @@ _TOOL_SCOPES: dict[str, frozenset[str]] = {
     "search_text": frozenset({"workspace.read"}),
     "git_status": frozenset({"workspace.read"}),
     "git_diff": frozenset({"workspace.read"}),
+    "workspace_diff": frozenset({"workspace.read"}),
     "git_log": frozenset({"workspace.read"}),
     "git_show": frozenset({"workspace.read"}),
     "git_branch": frozenset({"workspace.read"}),
@@ -541,6 +543,12 @@ def create_server(
         """Show a bounded Git diff with external drivers and textconv disabled."""
 
         return computer.git.diff(staged=staged, path=path)
+
+    @server.tool(annotations=READ_ONLY)
+    def workspace_diff(path: str | None = None) -> str:
+        """Show final tracked changes and safe untracked text files."""
+
+        return computer.git.workspace_diff(path=path)
 
     @server.tool(annotations=READ_ONLY)
     def git_log(count: int = 10, oneline: bool = False) -> str:
