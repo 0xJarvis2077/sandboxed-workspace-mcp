@@ -17,61 +17,27 @@ from mcp.server.auth.middleware.bearer_auth import (
     RequireAuthMiddleware,
 )
 from mcp.server.auth.provider import TokenVerifier
-from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from mcp.types import CallToolResult, TextContent
 from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from . import __version__
+from . import __version__, tool_contracts
 from .config import Settings
 from .oauth import JWTTokenVerifier, OAuthSettings
 from .service import SandboxedWorkspace
 from .task_manager import TaskManager
 from .trash import TrashError
 
-READ_ONLY = ToolAnnotations(
-    readOnlyHint=True,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=False,
-)
-MUTATING = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=True,
-    idempotentHint=False,
-    openWorldHint=False,
-)
-TASK_EXECUTION = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=False,
-    openWorldHint=False,
-)
-TRASH_MUTATING = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=True,
-    idempotentHint=False,
-    openWorldHint=False,
-)
-TRASH_RESTORE = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=False,
-    openWorldHint=False,
-)
-GIT_INIT = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=False,
-)
-GIT_BASELINE = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=False,
-    openWorldHint=False,
-)
+READ_ONLY = tool_contracts.READ_ONLY_LOCAL
+MUTATING = tool_contracts.DESTRUCTIVE_MUTATION
+TASK_EXECUTION = tool_contracts.DISPOSABLE_EXECUTION
+TRASH_MUTATING = tool_contracts.DESTRUCTIVE_MUTATION
+TRASH_RESTORE = tool_contracts.DESTRUCTIVE_MUTATION
+GIT_INIT = tool_contracts.ADDITIVE_IDEMPOTENT
+GIT_BASELINE = tool_contracts.ADDITIVE_MUTATION
+
 _STRICT_TOOL_ARGUMENTS = {
     "git_init": frozenset(),
     "git_create_baseline": frozenset(),
@@ -220,6 +186,10 @@ class SandboxedWorkspaceMCPServer(MCPServer[None]):
     async def list_tools(self):
         tools = await super().list_tools()
         for tool in tools:
+            contract = tool_contracts.get_tool_contract(tool.name)
+            tool.description = contract.description
+            tool.annotations = contract.annotations
+            tool.output_schema = contract.output_schema
             if tool.name in _STRICT_TOOL_ARGUMENTS:
                 tool.input_schema["additionalProperties"] = False
             if self.oauth is not None:
@@ -254,9 +224,12 @@ class SandboxedWorkspaceMCPServer(MCPServer[None]):
                 if not required_scopes.issubset(access_token.scopes):
                     return self._auth_error(required_scopes, "insufficient_scope")
         try:
-            return await super().call_tool(name, arguments, context)
+            result = await super().call_tool(name, arguments, context)
         except TrashError as exc:
-            return _trash_error_result(exc)
+            result = _trash_error_result(exc)
+        if isinstance(result, CallToolResult):
+            return tool_contracts.adapt_tool_call_result(name, arguments, result)
+        return result
 
     def _auth_error(self, scopes: frozenset[str], error: str) -> CallToolResult:
         assert self.oauth is not None

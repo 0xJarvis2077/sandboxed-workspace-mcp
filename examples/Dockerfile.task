@@ -18,6 +18,11 @@ RUN apt-get update \
         "mypy>=1.13,<2" \
         "ruff>=0.9,<1"
 
-RUN python -c "import coverage, mypy, pytest, pytest_cov, shutil; assert shutil.which('ruff')"
+RUN python -c "import coverage, mypy, pytest, pytest_cov, shutil; assert shutil.which('ruff')" \
+    && python --version \
+    && python -m pytest --version \
+    && python -m coverage --version \
+    && python -m mypy --version \
+    && ruff --version
 
 WORKDIR /workspace

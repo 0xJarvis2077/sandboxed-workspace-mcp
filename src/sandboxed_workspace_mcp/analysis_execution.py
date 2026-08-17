@@ -18,16 +18,17 @@ pytest_args = sys.argv[1:]
 if pytest_args[:1] == ["--"]:
     pytest_args = pytest_args[1:]
 
-cov = coverage.Coverage(
-    branch=BRANCH,
-    data_file="/tmp/.coverage",
-    source=["."],
-)
-test_exit_code = 1
+coverage_options = {"data_file": "/tmp/.coverage"}
+if BRANCH:
+    coverage_options["branch"] = True
+cov = coverage.Coverage(**coverage_options)
+pytest_exit_code = 1
+final_exit_code = 1
 coverage_error = None
 try:
     cov.start()
-    test_exit_code = int(pytest.main(pytest_args))
+    pytest_exit_code = int(pytest.main(pytest_args))
+    final_exit_code = pytest_exit_code
 finally:
     try:
         cov.stop()
@@ -49,13 +50,16 @@ if coverage_error is None:
             "covered": covered,
             "missing": max(0, statements - covered),
         }
-        if BRANCH:
+        if cov.get_data().has_arcs():
             branches = int(totals.get("num_branches", 0))
             covered_branches = int(totals.get("covered_branches", 0))
             branch_percent = float(
                 totals.get(
-                    "percent_covered_branches",
-                    100.0 * covered_branches / branches if branches else 100.0,
+                    "percent_branches_covered",
+                    totals.get(
+                        "percent_covered_branches",
+                        100.0 * covered_branches / branches if branches else 100.0,
+                    ),
                 )
             )
             summary["branches"] = {
@@ -63,22 +67,27 @@ if coverage_error is None:
                 "covered": covered_branches,
                 "missing": max(0, branches - covered_branches),
             }
-        if FAIL_UNDER is not None and summary["percent"] < FAIL_UNDER:
-            test_exit_code = test_exit_code or 1
+        fail_under_failed = (
+            FAIL_UNDER is not None and summary["percent"] < FAIL_UNDER
+        )
+        if fail_under_failed:
+            if final_exit_code == 0:
+                final_exit_code = 1
             summary["fail_under_failed"] = True
     except BaseException:
         coverage_error = "coverage report unavailable"
 
 if coverage_error is not None:
-    test_exit_code = test_exit_code or 1
+    if final_exit_code == 0:
+        final_exit_code = 1
 payload = {
-    "tests_exit_code": test_exit_code,
+    "tests_exit_code": pytest_exit_code,
     "coverage": summary,
 }
 if coverage_error is not None:
     payload["error"] = coverage_error
 print(MARKER + json.dumps(payload, separators=(",", ":")), flush=True)
-raise SystemExit(test_exit_code)
+raise SystemExit(final_exit_code)
 """
 
 

@@ -79,6 +79,14 @@ python -m venv .venv
 
 没有提供 task config 时，任务管理器、容器后端和动态执行工具都不会创建或注册。
 
+## Structured Tool Results
+
+所有实际注册的公开工具都声明稳定的 `outputSchema`，正常调用同时提供 machine-readable `structuredContent` 和原有的人类可读 `content` fallback。Agent 应优先依赖结构化字段，而不是解析展示文本；这些 result schema 属于公开 MCP contract。例如 `read_file_versioned` 会直接暴露 `content`、`sha256`、`size` 等字段，后续写入应使用其中的 `sha256` 作为版本令牌；`run_pytest` 失败时可直接读取 `failures[]`、`frames[]` 和经过脱敏的 `locals[]`。
+
+## Tool Annotations
+
+每个公开工具都显式声明 `readOnlyHint`、`destructiveHint`、`idempotentHint` 和 `openWorldHint`，用于帮助 MCP client/agent 理解工具行为。它们只是行为提示，不是授权或安全机制；实际安全仍由 workspace policy、SHA/version checks、回收站事务、OAuth scopes、execution profiles 和 sandbox 强制执行。
+
 `run_shell` 只接受 `pwd`、`ls`、`cat`、`head`、`tail`、`tree`、`grep`、受限 `rg`、`find`、`wc`、`sed` 以及固定 Git 查询。管道、重定向、命令替换、环境变量展开和未列出的参数都会被拒绝。
 
 Git review 可使用两个只读视图：
@@ -162,7 +170,7 @@ stop_task(started["task_id"])
 - `run_pytest`：服务端验证 target、生成 pytest argv，并返回有界 failure/frame/local 信息。
 - `run_ruff`：固定 Ruff check argv，返回 JSON diagnostics；`fix=true` 仅允许 writable profile。
 - `run_mypy`：固定 mypy argv，`strict=true` 只增加 `--strict`。
-- `run_pytest_coverage`：在一次 execution 内完成 pytest 与 coverage，数据只写入 `/tmp`，不产生 workspace `.coverage`。
+- `run_pytest_coverage`：在一次 execution 内完成 pytest 与 coverage，数据只写入 `/tmp`，不产生 workspace `.coverage`；默认尊重项目自己的 coverage `source`/`branch` 配置，`branch=true` 可显式启用分支覆盖率。
 - `run_python_script`：只接受一个真实的 workspace `.py` 文件。
 - `run_command`/`start_command`：只有同时声明 `allow_arbitrary_commands: true` 才能使用；这代表容器内任意代码执行授权。
 

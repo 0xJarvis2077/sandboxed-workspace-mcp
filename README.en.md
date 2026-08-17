@@ -79,6 +79,14 @@ The compatibility entrypoint remains available:
 
 Without a task config, the task manager, container backend, and dynamic execution tools are not created or registered.
 
+## Structured Tool Results
+
+Every actually registered public tool declares a stable `outputSchema`. Normal calls provide machine-readable `structuredContent` while preserving the existing human-readable `content` fallback. Agents should depend on structured fields instead of parsing display text; these result schemas are part of the public MCP contract. For example, `read_file_versioned` exposes `content`, `sha256`, and `size` directly, and later mutations should use that `sha256` as the version token. Failed `run_pytest` calls expose `failures[]`, `frames[]`, and redacted `locals[]` directly.
+
+## Tool Annotations
+
+Every public tool explicitly declares `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` so MCP clients and agents can reason about behavior. These values are hints, not authorization or security enforcement. The actual security boundary remains the workspace policy, SHA/version checks, recycle-bin transactions, OAuth scopes, execution profiles, and sandbox.
+
 `run_shell` accepts only `pwd`, `ls`, `cat`, `head`, `tail`, `tree`, `grep`, bounded `rg`, `find`, `wc`, `sed`, and fixed Git queries. Pipes, redirects, command substitution, environment expansion, and unlisted arguments are rejected.
 
 Git review has two read-only views:
@@ -162,7 +170,7 @@ Copy [examples/execution-profiles.json](examples/execution-profiles.json) outsid
 - `run_pytest`: validates targets, compiles pytest argv, and collects bounded failure/frame/local information.
 - `run_ruff`: runs a fixed Ruff check and returns JSON diagnostics; `fix=true` requires a writable profile.
 - `run_mypy`: runs fixed mypy arguments; `strict=true` only adds `--strict`.
-- `run_pytest_coverage`: runs pytest and coverage in one execution; data stays under `/tmp` and does not create workspace `.coverage`.
+- `run_pytest_coverage`: runs pytest and coverage in one execution; data stays under `/tmp` and does not create workspace `.coverage`. By default it respects the project's coverage `source`/`branch` configuration, while `branch=true` explicitly enables branch coverage.
 - `run_python_script`: accepts one real workspace `.py` file.
 - `run_command`/`start_command`: require `allow_arbitrary_commands: true`; this grants arbitrary code execution inside the container.
 

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+from sandboxed_workspace_mcp.analysis_execution import coverage_harness
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.diagnostics import (
     adapt_coverage_result,
@@ -68,6 +72,174 @@ class ExecutionCompilerTests(unittest.TestCase):
         for value in (-1, 101, True, "85"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.compiler.pytest_coverage(fail_under=value)  # type: ignore[arg-type]
+
+
+@unittest.skipUnless(
+    importlib.util.find_spec("pytest") is not None,
+    "pytest is required for coverage harness integration tests",
+)
+class CoverageHarnessTests(unittest.TestCase):
+    def test_pytest_and_fail_under_exit_codes_are_separate(self) -> None:
+        cases = (
+            ("passing tests and passing gate", False, False, 0, 0),
+            ("passing tests and failing gate", True, False, 0, 1),
+            ("failing tests and passing gate", False, True, 1, 0),
+            ("failing tests and failing gate", True, True, 1, 1),
+        )
+        for (
+            name,
+            has_uncovered_code,
+            tests_fail,
+            expected_tests,
+            expected_gate,
+        ) in cases:
+            with self.subTest(case=name):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self._write_project(
+                        root,
+                        has_uncovered_code=has_uncovered_code,
+                        tests_fail=tests_fail,
+                    )
+                    return_code, payload = self._run_harness(root, fail_under=80)
+
+                self.assertEqual(payload["tests_exit_code"], expected_tests)
+                coverage = payload["coverage"]
+                self.assertIsInstance(coverage, dict)
+                self.assertEqual(
+                    coverage.get("fail_under_failed", False), bool(expected_gate)
+                )
+                self.assertEqual(
+                    return_code == 0, not expected_tests and not expected_gate
+                )
+
+    def test_project_source_configuration_is_not_overridden(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_project(root, has_uncovered_code=False, tests_fail=False)
+            (root / "tests" / "not_business_code.py").write_text(
+                "def never_called() -> str:\n    return 'uncovered'\n",
+                encoding="utf-8",
+            )
+            return_code, payload = self._run_harness(root)
+
+            self.assertEqual(return_code, 0)
+            self.assertEqual(payload["tests_exit_code"], 0)
+            self.assertEqual(payload["coverage"]["percent"], 100.0)
+            self.assertEqual(payload["coverage"]["missing"], 0)
+            self._assert_workspace_is_free_of_coverage_artifacts(root)
+
+    def test_project_branch_configuration_is_honored_when_api_branch_is_false(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_branch_project(root, branch_in_config=True)
+            return_code, payload = self._run_harness(root, branch=False)
+
+            self.assertEqual(return_code, 0)
+            branches = payload["coverage"].get("branches")
+            self.assertIsInstance(branches, dict)
+            self.assertGreater(branches["missing"], 0)
+
+    def test_api_branch_true_enables_branch_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_branch_project(root, branch_in_config=False)
+            return_code, payload = self._run_harness(root, branch=True)
+
+            self.assertEqual(return_code, 0)
+            branches = payload["coverage"].get("branches")
+            self.assertIsInstance(branches, dict)
+            self.assertGreater(branches["missing"], 0)
+
+    @staticmethod
+    def _write_project(
+        root: Path, *, has_uncovered_code: bool, tests_fail: bool
+    ) -> None:
+        (root / "src").mkdir()
+        (root / "tests").mkdir()
+        source = "def covered() -> int:\n    return 1\n"
+        if has_uncovered_code:
+            source += "\ndef uncovered() -> int:\n    return 2\n"
+        (root / "src" / "pkg.py").write_text(source, encoding="utf-8")
+        test_source = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, str(Path(__file__).parents[1] / 'src'))\n"
+            "from pkg import covered\n\n"
+            "def test_covered() -> None:\n"
+            "    assert covered() == 1\n"
+        )
+        if tests_fail:
+            test_source += "    assert False\n"
+        (root / "tests" / "test_pkg.py").write_text(test_source, encoding="utf-8")
+        (root / "pyproject.toml").write_text(
+            "[tool.coverage.run]\nsource = ['src']\n", encoding="utf-8"
+        )
+
+    @staticmethod
+    def _write_branch_project(root: Path, *, branch_in_config: bool) -> None:
+        (root / "src").mkdir()
+        (root / "tests").mkdir()
+        (root / "src" / "pkg.py").write_text(
+            "def choose(value: bool) -> int:\n"
+            "    if value:\n"
+            "        return 1\n"
+            "    return 2\n",
+            encoding="utf-8",
+        )
+        (root / "tests" / "test_pkg.py").write_text(
+            "import sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, str(Path(__file__).parents[1] / 'src'))\n"
+            "from pkg import choose\n\n"
+            "def test_choose() -> None:\n"
+            "    assert choose(True) == 1\n",
+            encoding="utf-8",
+        )
+        branch = "branch = true\n" if branch_in_config else ""
+        (root / "pyproject.toml").write_text(
+            "[tool.coverage.run]\nsource = ['src']\n" + branch,
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _run_harness(
+        root: Path, *, branch: bool = False, fail_under: float | None = None
+    ) -> tuple[int, dict[str, object]]:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                coverage_harness(branch=branch, fail_under=fail_under),
+                "--",
+                "tests",
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        marker = next(
+            (
+                line
+                for line in result.stdout.splitlines()
+                if line.startswith("SWMCP_COVERAGE:")
+            ),
+            None,
+        )
+        if marker is None:
+            raise AssertionError(
+                f"coverage marker missing; stdout={result.stdout!r}, "
+                f"stderr={result.stderr!r}"
+            )
+        return result.returncode, json.loads(marker.removeprefix("SWMCP_COVERAGE:"))
+
+    @staticmethod
+    def _assert_workspace_is_free_of_coverage_artifacts(root: Path) -> None:
+        for name in (".coverage", "coverage.json", "htmlcov"):
+            assert not (root / name).exists(), name
 
 
 class DiagnosticsTests(unittest.TestCase):
@@ -173,8 +345,9 @@ class DiagnosticsTests(unittest.TestCase):
         frame = failure["frames"][0]
         self.assertEqual(frame["path"], "src/example.py")
         self.assertEqual(frame["line"], 42)
-        self.assertEqual(frame["locals"][0]["repr"], "super-secret")
+        self.assertEqual(frame["locals"][0]["repr"], "<redacted>")
         self.assertEqual(frame["locals"][0]["redacted"], True)
+        self.assertNotIn("super-secret", repr(result))
         self.assertEqual(failure["frames"][1]["path"], "<external>")
         self.assertNotIn("/Users/host", repr(result))
         self.assertNotIn("SWMCP_FAILURES", result["stdout"])
@@ -203,6 +376,30 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(result["tests"]["exit_code"], 0)  # type: ignore[index]
         self.assertEqual(result["coverage"]["percent"], 91.4)  # type: ignore[index]
         self.assertNotIn(".coverage", repr(result))
+
+    def test_coverage_gate_failure_does_not_become_a_test_failure(self) -> None:
+        result = adapt_coverage_result(
+            {
+                "status": "failed",
+                "exit_code": 1,
+                "stdout": (
+                    "SWMCP_COVERAGE:"
+                    + json.dumps(
+                        {
+                            "tests_exit_code": 0,
+                            "coverage": {
+                                "percent": 79.0,
+                                "covered": 79,
+                                "missing": 21,
+                                "fail_under_failed": True,
+                            },
+                        }
+                    )
+                ),
+            }
+        )
+        self.assertEqual(result["tests"]["exit_code"], 0)  # type: ignore[index]
+        self.assertTrue(result["coverage"]["fail_under_failed"])  # type: ignore[index]
 
     def test_parser_rejects_host_paths_and_caps_diagnostics(self) -> None:
         with self.assertRaises(ValueError):

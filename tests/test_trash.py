@@ -492,7 +492,7 @@ class TrashConfigurationAndServerTests(unittest.TestCase):
                 <= tools.keys()
             )
             self.assertTrue(tools["trash_file"].annotations.destructive_hint)
-            self.assertFalse(tools["restore_trashed_file"].annotations.destructive_hint)
+            self.assertTrue(tools["restore_trashed_file"].annotations.destructive_hint)
 
             result = self._call(enabled, "list_trashed_files", {"limit": 1})
             self.assertFalse(result.is_error)

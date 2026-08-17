@@ -316,13 +316,19 @@ def _sanitize_locals(value: object) -> list[dict[str, object]]:
     for local in value[:MAX_LOCALS]:
         if not isinstance(local, dict):
             continue
+        redacted = bool(local.get("redacted", False))
+        rendered = (
+            "<redacted>"
+            if redacted
+            else _bounded_text(local.get("repr", ""), "local repr", 512)
+        )
         sanitized.append(
             {
                 "name": _bounded_text(local.get("name", ""), "local name", 128),
                 "type": _bounded_text(local.get("type", "object"), "local type", 128),
-                "repr": _bounded_text(local.get("repr", ""), "local repr", 512),
+                "repr": rendered,
                 "truncated": bool(local.get("truncated", False)),
-                "redacted": bool(local.get("redacted", False)),
+                "redacted": redacted,
             }
         )
     return sanitized
