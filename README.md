@@ -85,6 +85,8 @@ python -m venv .venv
 
 启用 `--allow-git-writes`（或 `SANDBOXED_WORKSPACE_MCP_ALLOW_GIT_WRITES=true`）后，服务才注册 `git_init` 和 `git_create_baseline`。它们没有调用方参数：`git_init` 只在当前配置的 workspace root 创建普通、非 bare 的 `main` 仓库，并对已存在的有效 root 仓库幂等返回；不支持 `repo_path`、子目录仓库、template、separate-git-dir、bare 或任意 Git argv。`git_create_baseline` 只能执行一次首次基线，使用固定消息和身份，不是通用 commit；blocked 文件、`.git`、回收站、ignored 目录、symlink 和特殊文件不会进入基线。
 
+首次基线还会过滤跨项目的环境噪声（例如任意深度的 `.DS_Store`、`Thumbs.db`、`Desktop.ini`、Python bytecode/cache 和 coverage 文件），并把同一组固定规则以 managed block 安装到仓库私有的 `.git/info/exclude`，因此基线后新出现的噪声也不会污染 `git_status`。这不会修改项目 `.gitignore` 或用户全局 Git ignore。该迁移边界只保证未来创建的 baseline；旧版本已经 tracked 的噪声不会自动解除跟踪，也不会被重写，需由操作者在 MCP 外明确迁移或重建 baseline。
+
 恢复历史内容时，先用 `read_file_versioned` 取得当前 SHA，再用 `git_read_file_at_revision(path, "HEAD")` 读取基线内容，最后使用现有 `write_file(overwrite=true, expected_sha256=...)` 写回。`run_shell` 仍然只读；task snapshot 仍排除 `.git`，`run_command` 即使在 writable profile 中运行也不会写回真实 workspace。Git 写入能力不属于默认 OAuth scope，HTTP 调用必须同时拥有 `workspace.git.write`。
 
 ## 常见工作流
@@ -200,7 +202,7 @@ stop_task(started["task_id"])
 ```text
 src/sandboxed_workspace_mcp/
   workspace.py          # 安全路径、文件 IO、遍历和原子写入
-  access_policy.py      # blocked glob 和 Git 排除策略
+  access_policy.py      # blocked glob、Git 排除和 baseline noise 策略
   trash.py              # 受保护回收站元数据、事务和恢复
   git_reader.py         # 有界只读 Git 适配器
   git_writer.py         # 受控初始化、首次基线和 revision blob 读取

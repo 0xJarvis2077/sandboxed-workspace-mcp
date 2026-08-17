@@ -85,6 +85,8 @@ Without a task config, the task manager, container backend, and dynamic executio
 
 Enable `--allow-git-writes` (or `SANDBOXED_WORKSPACE_MCP_ALLOW_GIT_WRITES=true`) to register `git_init` and `git_create_baseline`. They accept no caller parameters. `git_init` creates an ordinary non-bare `main` repository only at the configured workspace root and returns an idempotent result for an already-valid root repository. `repo_path`, subdirectory repositories, templates, separate Git directories, bare/shared/object-format options, and arbitrary Git argv are unsupported. `git_create_baseline` is allowed only once before the first commit, uses a fixed message and identity, and is not a general commit tool; blocked files, `.git`, the recycle bin, ignored directories, symlinks, and special files are excluded.
 
+The first baseline also filters cross-project environment noise such as `.DS_Store`, `Thumbs.db`, `Desktop.ini`, Python bytecode/cache, and coverage files at any depth. It installs the same fixed rules in a managed block in the repository-private `.git/info/exclude`, so noise created after the baseline does not pollute `git_status`. This does not modify the project `.gitignore` or the user's global Git ignore. The migration boundary applies only to future baselines: noise already tracked by an older baseline is not automatically untracked or rewritten and must be explicitly migrated or rebuilt outside MCP.
+
 To restore historical content, first call `read_file_versioned` for the current SHA, then call `git_read_file_at_revision(path, "HEAD")`, and finally use the existing `write_file(overwrite=true, expected_sha256=...)`. `run_shell` remains read-only. Task snapshots still exclude `.git`, and even a writable `run_command` profile never writes back to the real workspace. Git writes are not in the default OAuth scopes; HTTP callers must also hold `workspace.git.write`.
 
 ## Common workflows
@@ -200,7 +202,7 @@ Common settings:
 ```text
 src/sandboxed_workspace_mcp/
   workspace.py          # Safe paths, file I/O, traversal, and atomic writes
-  access_policy.py      # Blocked globs and Git exclusion policy
+  access_policy.py      # Blocked globs, Git exclusion, and baseline noise policy
   trash.py              # Protected recycle-bin metadata, transactions, and recovery
   git_reader.py         # Bounded read-only Git adapter
   git_writer.py         # Controlled init, first baseline, and revision blob reads
