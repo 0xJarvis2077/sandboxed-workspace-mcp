@@ -10,6 +10,18 @@ By default the server does not execute project code. Optional task execution is 
 
 Self-description MCP Resources expose only static operating guidance and metadata for tools that are currently registered on the public server surface. They reuse the public Tool Contract Registry and do not expose private task/profile configuration, host paths, container image details, secrets, or capabilities that are not currently registered.
 
+## Ephemeral large-result resources
+
+Large-result resources are a presentation layer over content the server has already admitted through its existing public safety boundary. Raw command output, unrestricted host filesystem content, or pre-sanitization diagnostic objects are never inserted into this cache. Source bounding remains owned by the workspace, Git, task runner, and diagnostic layers; the result resource cannot recover bytes already discarded by `max_output_bytes`, file/output limits, redaction, blocked-path filtering, or other existing policy.
+
+The cache is process-memory only and has four independent bounds: 64 entries, 8 MiB aggregate UTF-8 bytes, 1 MiB per item, and a fixed 15-minute TTL. Capacity eviction is LRU; successful reads can refresh LRU order but never extend TTL. Expired entries are removed lazily on reads and writes. No background worker, disk directory, `/tmp` payload, persistence, compression, or cache-browsing API is used. A server restart invalidates every result URI.
+
+Each cached entry is addressed by a 24-byte `secrets.token_urlsafe` identifier, providing about 192 bits of entropy, and is exposed only through the `sandboxed-workspace://result/{id}` Resource Template. Concrete result URIs are never returned by `resources/list`, added to the Tool Catalog, indexed, prefix-searched, or otherwise enumerable. The identifier is a capability and reduces discovery risk, but is not treated as a replacement for authentication where a stable authenticated identity exists.
+
+In HTTP/OAuth mode, an entry is scoped to the validated access context that created it using `subject` plus `client_id` when a subject is available, or `client_id` otherwise; the bearer token itself is not stored. A later Resource read must resolve to the same owner scope. In stdio or other non-OAuth local mode there is no stable caller identity in the current transport, so the server uses the high-entropy ephemeral capability URI without inventing a session identity. This owner check protects result-resource reuse only; it does not turn the single-workspace process into a general multi-user authorization layer.
+
+Invalid, expired, evicted, missing, or wrong-owner result IDs fail as not found. Result IDs are validated as opaque tokens and are never converted to filesystem paths. A cache miss never rereads a file, reruns a command, or reconstructs an earlier tool result because the underlying state may have changed.
+
 ## Blocked and ignored paths
 
 Blocked paths are a security policy enforced in the core workspace layer for explicit and discovered paths, including absolute paths inside the root and symlink aliases. Default rules protect `.git`, `.env` variants, common private-key names, and private-key container extensions. Additional validated root-relative patterns can only extend the defaults.

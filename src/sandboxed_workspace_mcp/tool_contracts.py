@@ -18,6 +18,8 @@ from typing import Literal
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, RootModel
 
+from .result_cache import ResultCache
+from .result_presentation import externalize_tool_payload
 from .workspace import TRUNCATION_MARKER
 
 
@@ -49,14 +51,30 @@ class DirectoryListResult(PublicResultModel):
     truncated: bool
 
 
-class TreeResult(PublicResultModel):
+class TextPresentationResult(PublicResultModel):
+    source_truncated: bool = False
+    text_available_bytes: int = 0
+    text_inline_bytes: int = 0
+    text_inline_truncated: bool = False
+    text_resource_uri: str | None = None
+
+
+class ContentPresentationResult(PublicResultModel):
+    source_truncated: bool = False
+    content_available_bytes: int = 0
+    content_inline_bytes: int = 0
+    content_inline_truncated: bool = False
+    content_resource_uri: str | None = None
+
+
+class TreeResult(TextPresentationResult):
     path: str
     max_depth: int
     text: str
     truncated: bool
 
 
-class FileContentResult(PublicResultModel):
+class FileContentResult(ContentPresentationResult):
     path: str
     content: str
     start_line: int
@@ -64,7 +82,7 @@ class FileContentResult(PublicResultModel):
     truncated: bool
 
 
-class VersionedFileResult(PublicResultModel):
+class VersionedFileResult(ContentPresentationResult):
     path: str
     content: str
     sha256: str
@@ -125,18 +143,18 @@ class GitStatusEntry(PublicResultModel):
     worktree_status: str
 
 
-class GitStatusResult(PublicResultModel):
+class GitStatusResult(TextPresentationResult):
     text: str
     clean: bool
     entries: list[GitStatusEntry]
 
 
-class GitTextResult(PublicResultModel):
+class GitTextResult(TextPresentationResult):
     text: str
     truncated: bool
 
 
-class GitRevisionFileResult(PublicResultModel):
+class GitRevisionFileResult(ContentPresentationResult):
     path: str
     commit: str
     blob: str
@@ -284,6 +302,15 @@ class CommandExecutionResult(PublicResultModel):
     stdout: str
     stderr: str
     truncated: bool
+    source_truncated: bool = False
+    stdout_available_bytes: int = 0
+    stdout_inline_bytes: int = 0
+    stdout_inline_truncated: bool = False
+    stdout_resource_uri: str | None = None
+    stderr_available_bytes: int = 0
+    stderr_inline_bytes: int = 0
+    stderr_inline_truncated: bool = False
+    stderr_resource_uri: str | None = None
     timed_out: bool
     duration_ms: int
     capability_error: str | None = None
@@ -402,6 +429,15 @@ class TaskLogsResult(PublicResultModel):
     stdout: str
     stderr: str
     truncated: bool
+    source_truncated: bool = False
+    stdout_available_bytes: int = 0
+    stdout_inline_bytes: int = 0
+    stdout_inline_truncated: bool = False
+    stdout_resource_uri: str | None = None
+    stderr_available_bytes: int = 0
+    stderr_inline_bytes: int = 0
+    stderr_inline_truncated: bool = False
+    stderr_resource_uri: str | None = None
     has_more: bool
 
 
@@ -948,6 +984,9 @@ def adapt_tool_call_result(
     name: str,
     arguments: Mapping[str, object],
     result: CallToolResult,
+    *,
+    result_cache: ResultCache | None = None,
+    owner_scope: str | None = None,
 ) -> CallToolResult:
     """Apply the registered public output contract to one completed tool call."""
 
@@ -1021,5 +1060,26 @@ def adapt_tool_call_result(
 
     contract = get_tool_contract(name)
     validated = contract.output_model.model_validate(dict(payload))
-    result.structured_content = validated.model_dump(mode="json", by_alias=True)
+    public_payload = validated.model_dump(mode="json", by_alias=True)
+    externalized = False
+    if result_cache is not None:
+        public_payload, externalized = externalize_tool_payload(
+            name,
+            public_payload,
+            result_cache,
+            owner_scope=owner_scope,
+        )
+        validated = contract.output_model.model_validate(public_payload)
+        public_payload = validated.model_dump(mode="json", by_alias=True)
+    result.structured_content = public_payload
+    if externalized:
+        result.content = [
+            TextContent(
+                type="text",
+                text=(
+                    "Large bounded text is truncated inline; complete bounded text "
+                    "is available through the result resource URI in structuredContent."
+                ),
+            )
+        ]
     return result

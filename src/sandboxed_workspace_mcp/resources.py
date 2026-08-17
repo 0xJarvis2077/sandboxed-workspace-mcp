@@ -214,6 +214,17 @@ def build_instructions(tool_names: Iterable[str]) -> str:
                 "format unrelated user changes."
             ),
             "",
+            "## Large results",
+            "",
+            (
+                "Large human-readable text may be returned as a bounded inline preview "
+                "plus an ephemeral `sandboxed-workspace://result/...` resource URI. "
+                "Follow that URI only when the complete bounded result is necessary. "
+                "The resource contains only content already admitted by the server's "
+                "existing safety and output bounds; it never exposes discarded raw "
+                "output."
+            ),
+            "",
             "## Security",
             "",
             (
@@ -293,7 +304,11 @@ def _debug_python_workflow(names: set[str]) -> str:
             f"5. Use {rendered} only for diagnostics the structured tools cannot "
             "express."
         )
-    steps.append("6. Finish with `workspace_diff` and preserve unrelated user changes.")
+    steps.append(
+        "6. If stdout/stderr is truncated inline and a result resource URI is "
+        "returned, read that URI when the complete bounded output is necessary."
+    )
+    steps.append("7. Finish with `workspace_diff` and preserve unrelated user changes.")
     steps.extend(
         [
             "",
@@ -341,7 +356,11 @@ def _review_changes_workflow(names: set[str]) -> str:
             "3. Run focused and then broader checks using the currently available "
             f"structured tools: {', '.join(f'`{name}`' for name in checks)}."
         )
-    lines.append("4. Do not revert or reformat unrelated user changes.")
+    lines.append(
+        "4. If a diff or log is truncated inline and a result resource URI is "
+        "returned, read that URI when the complete bounded result is necessary."
+    )
+    lines.append("5. Do not revert or reformat unrelated user changes.")
     return "\n".join(lines) + "\n"
 
 

@@ -83,6 +83,23 @@ Without a task config, the task manager, container backend, and dynamic executio
 
 Every actually registered public tool declares a stable `outputSchema`. Normal calls provide machine-readable `structuredContent` while preserving the existing human-readable `content` fallback. Agents should depend on structured fields instead of parsing display text; these result schemas are part of the public MCP contract. For example, `read_file_versioned` exposes `content`, `sha256`, and `size` directly, and later mutations should use that `sha256` as the version token. Failed `run_pytest` calls expose `failures[]`, `frames[]`, and redacted `locals[]` directly.
 
+## Large Results
+
+Small text results remain fully inline. Larger text that has already passed the existing workspace, Git, or execution safety boundary and source bounding keeps its original string field as a UTF-8-safe preview and adds an ephemeral `sandboxed-workspace://result/{id}` URI in `structuredContent`. An execution result may look like:
+
+```json
+{
+  "stdout": "...preview...",
+  "source_truncated": false,
+  "stdout_inline_truncated": true,
+  "stdout_resource_uri": "sandboxed-workspace://result/..."
+}
+```
+
+`source_truncated` means the upstream safety layer already discarded data beyond a budget such as `max_output_bytes`; `*_inline_truncated` only means the server shortened the already-safe bounded result for MCP context size. Where the legacy `truncated` field applies, it remains backward-compatible as the union of source and inline truncation. A Result Resource can recover only the bounded safe result still held by the server. It cannot recover raw output already discarded by a source limit and never raises an existing output limit.
+
+Result Resources live only in process memory, have a fixed 15-minute TTL, and disappear on server restart, expiration, or capacity eviction. Dynamic result URIs are never enumerated by `resources/list`; clients discover only the `sandboxed-workspace://result/{id}` template. In HTTP/OAuth mode each result is also scoped to the authenticated owner that created it. In stdio/no-OAuth mode, access relies on the high-entropy, non-enumerable ephemeral capability URI.
+
 ## Tool Annotations
 
 Every public tool explicitly declares `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` so MCP clients and agents can reason about behavior. These values are hints, not authorization or security enforcement. The actual security boundary remains the workspace policy, SHA/version checks, recycle-bin transactions, OAuth scopes, execution profiles, and sandbox.
@@ -94,6 +111,7 @@ The server self-describes its currently available capabilities and recommended w
 - `internal://instructions`: capability-aware safe operating guidance for the current server.
 - `internal://tool-catalog`: a machine-readable current Tool summary with stable tool-name ordering.
 - `internal://tool-info/{name}`: the full input/output contract and annotations for one currently registered Tool.
+- `sandboxed-workspace://result/{id}`: on-demand access to an ephemeral bounded large result in the current process; concrete URIs are not enumerable.
 - `internal://workflows/edit-file`, `debug-python`, `recover-file`, and `review-changes`: compact agent workflows.
 
 The README remains an entry-point overview. Detailed agent SOPs live in these Resources and are generated against the current public capability surface.
