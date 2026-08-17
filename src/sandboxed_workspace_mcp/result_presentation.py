@@ -165,9 +165,11 @@ def externalize_tool_payload(
             owner_scope=owner_scope,
             add_source=False,
         )
-        adapted["truncated"] = source_truncated or bool(
-            adapted.get("stdout_inline_truncated", False)
-        ) or bool(adapted.get("stderr_inline_truncated", False))
+        adapted["truncated"] = (
+            source_truncated
+            or bool(adapted.get("stdout_inline_truncated", False))
+            or bool(adapted.get("stderr_inline_truncated", False))
+        )
         return adapted, stdout_changed or stderr_changed
 
     if name == "task_logs":
@@ -189,9 +191,11 @@ def externalize_tool_payload(
             owner_scope=owner_scope,
             add_source=False,
         )
-        adapted["truncated"] = source_truncated or bool(
-            adapted.get("stdout_inline_truncated", False)
-        ) or bool(adapted.get("stderr_inline_truncated", False))
+        adapted["truncated"] = (
+            source_truncated
+            or bool(adapted.get("stdout_inline_truncated", False))
+            or bool(adapted.get("stderr_inline_truncated", False))
+        )
         return adapted, stdout_changed or stderr_changed
 
     return adapted, False
