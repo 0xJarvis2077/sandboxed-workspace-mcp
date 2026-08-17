@@ -24,6 +24,8 @@ from sandboxed_workspace_mcp.cli import _transport_security, main, parse_runtime
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.server import create_server
 
+from _mcp_assertions import require_call_tool_result, require_structured_content
+
 
 class CliTests(unittest.TestCase):
     def test_invalid_http_parameters_and_allowed_hosts_are_rejected(self) -> None:
@@ -472,9 +474,13 @@ class ServerTests(unittest.TestCase):
                 "write_file",
             },
         )
-        self.assertTrue(by_name["read_file"].annotations.read_only_hint)
-        self.assertFalse(by_name["write_file"].annotations.read_only_hint)
-        self.assertTrue(by_name["write_file"].annotations.destructive_hint)
+        read_annotations = by_name["read_file"].annotations
+        write_annotations = by_name["write_file"].annotations
+        assert read_annotations is not None
+        assert write_annotations is not None
+        self.assertTrue(read_annotations.read_only_hint)
+        self.assertFalse(write_annotations.read_only_hint)
+        self.assertTrue(write_annotations.destructive_hint)
 
     def test_read_only_server_does_not_register_mutating_tools(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -517,55 +523,67 @@ class ServerTests(unittest.TestCase):
             server = create_server(Settings.create(root))
 
             async def exercise_tools() -> None:
-                initial_calls = (
+                initial_calls: tuple[tuple[str, dict[str, str]], ...] = (
                     ("project_info", {}),
                     ("create_directory", {"path": "src"}),
                     ("write_file", {"path": "src/file.txt", "content": "one\n"}),
                 )
                 for name, arguments in initial_calls:
                     with self.subTest(tool=name):
-                        result = await server.call_tool(name, arguments)
+                        result = require_call_tool_result(
+                            await server.call_tool(name, arguments)
+                        )
                         self.assertFalse(result.is_error)
 
-                versioned = await server.call_tool(
-                    "read_file_versioned", {"path": "src/file.txt"}
+                versioned = require_call_tool_result(
+                    await server.call_tool(
+                        "read_file_versioned", {"path": "src/file.txt"}
+                    )
                 )
-                sha256 = versioned.structured_content["sha256"]
-                appended = await server.call_tool(
-                    "append_file",
-                    {
-                        "path": "src/file.txt",
-                        "content": "two\n",
-                        "expected_sha256": sha256,
-                    },
+                sha256 = require_structured_content(versioned)["sha256"]
+                appended = require_call_tool_result(
+                    await server.call_tool(
+                        "append_file",
+                        {
+                            "path": "src/file.txt",
+                            "content": "two\n",
+                            "expected_sha256": sha256,
+                        },
+                    )
                 )
                 self.assertFalse(appended.is_error)
 
-                versioned = await server.call_tool(
-                    "read_file_versioned", {"path": "src/file.txt"}
+                versioned = require_call_tool_result(
+                    await server.call_tool(
+                        "read_file_versioned", {"path": "src/file.txt"}
+                    )
                 )
-                sha256 = versioned.structured_content["sha256"]
-                replaced = await server.call_tool(
-                    "replace_text",
-                    {
-                        "path": "src/file.txt",
-                        "old_text": "one",
-                        "new_text": "first",
-                        "expected_sha256": sha256,
-                    },
+                sha256 = require_structured_content(versioned)["sha256"]
+                replaced = require_call_tool_result(
+                    await server.call_tool(
+                        "replace_text",
+                        {
+                            "path": "src/file.txt",
+                            "old_text": "one",
+                            "new_text": "first",
+                            "expected_sha256": sha256,
+                        },
+                    )
                 )
                 self.assertFalse(replaced.is_error)
 
-                final_calls = (
+                final_calls: tuple[tuple[str, dict[str, str | int]], ...] = (
                     ("read_file", {"path": "src/file.txt"}),
                     ("list_directory", {"path": "src"}),
                     ("tree", {"path": ".", "max_depth": 2}),
                     ("search_text", {"text": "first", "path": "."}),
                     ("run_shell", {"command": "pwd"}),
                 )
-                for name, arguments in final_calls:
+                for name, final_arguments in final_calls:
                     with self.subTest(tool=name):
-                        result = await server.call_tool(name, arguments)
+                        result = require_call_tool_result(
+                            await server.call_tool(name, final_arguments)
+                        )
                         self.assertFalse(result.is_error)
 
             asyncio.run(exercise_tools())

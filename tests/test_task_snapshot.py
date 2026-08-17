@@ -22,13 +22,17 @@ class TaskSnapshotTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def _builder(self, **overrides: object) -> SnapshotBuilder:
-        values = {
-            "max_snapshot_files": 100,
-            "max_snapshot_bytes": 100_000,
-        }
-        values.update(overrides)
-        return SnapshotBuilder(Settings.create(self.root), TaskLimits(**values))
+    def _builder(
+        self,
+        *,
+        max_snapshot_files: int = 100,
+        max_snapshot_bytes: int = 100_000,
+    ) -> SnapshotBuilder:
+        limits = TaskLimits(
+            max_snapshot_files=max_snapshot_files,
+            max_snapshot_bytes=max_snapshot_bytes,
+        )
+        return SnapshotBuilder(Settings.create(self.root), limits)
 
     def test_snapshot_excludes_blocked_ignored_symlink_and_special_paths(self) -> None:
         visible = self.root / "run.sh"
@@ -44,11 +48,13 @@ class TaskSnapshotTests(unittest.TestCase):
         nested = self.root / "src"
         nested.mkdir()
         (nested / "main.py").write_text("print('ok')\n", encoding="utf-8")
-        link = self.root / "source-link"
+        link_path = self.root / "source-link"
         try:
-            link.symlink_to(nested / "main.py")
+            link_path.symlink_to(nested / "main.py")
         except (OSError, NotImplementedError):
-            link = None
+            link: Path | None = None
+        else:
+            link = link_path
 
         snapshot = self._builder().create()
         snapshot_parent = snapshot.path.parent
@@ -171,11 +177,13 @@ class TaskSnapshotTests(unittest.TestCase):
         (self.root / "node_modules" / "ignored.txt").write_text(
             "ignored", encoding="utf-8"
         )
-        link = self.root / "link"
+        link_path = self.root / "link"
         try:
-            link.symlink_to(self.root / "visible" / "file.txt")
+            link_path.symlink_to(self.root / "visible" / "file.txt")
         except (OSError, NotImplementedError):
-            link = None
+            link: Path | None = None
+        else:
+            link = link_path
 
         builder = self._builder()
         with tempfile.TemporaryDirectory() as directory:

@@ -11,6 +11,7 @@ from types import MappingProxyType
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.server.mcpserver.exceptions import ResourceNotFoundError
+from mcp.types import TextResourceContents
 
 from sandboxed_workspace_mcp import resources
 from sandboxed_workspace_mcp.config import Settings
@@ -23,6 +24,13 @@ from sandboxed_workspace_mcp.task_config import (
 )
 from sandboxed_workspace_mcp.task_manager import TaskManager
 from sandboxed_workspace_mcp.tool_contracts import TOOL_CONTRACTS
+
+from _mcp_assertions import (
+    require_call_tool_result,
+    require_resource_contents,
+    require_structured_content,
+    require_text_content,
+)
 
 
 class _UnusedBackend:
@@ -331,11 +339,18 @@ class SelfDescriptionResourceTests(unittest.TestCase):
             server = create_server(Settings.create(root))
 
             async def exercise() -> None:
-                instructions = await server.read_resource("internal://instructions")
-                catalog = await server.read_resource("internal://tool-catalog")
-                tool_info = await server.read_resource(
-                    "internal://tool-info/read_file_versioned"
+                instructions = require_resource_contents(
+                    await server.read_resource("internal://instructions")
                 )
+                catalog = require_resource_contents(
+                    await server.read_resource("internal://tool-catalog")
+                )
+                tool_info = require_resource_contents(
+                    await server.read_resource("internal://tool-info/read_file_versioned")
+                )
+                self.assertTrue(instructions)
+                self.assertTrue(catalog)
+                self.assertTrue(tool_info)
                 self.assertEqual(instructions[0].mime_type, resources.MARKDOWN_MIME)
                 self.assertEqual(catalog[0].mime_type, resources.JSON_MIME)
                 self.assertEqual(tool_info[0].mime_type, resources.JSON_MIME)
@@ -350,8 +365,10 @@ class SelfDescriptionResourceTests(unittest.TestCase):
             server = create_server(Settings.create(root, allow_writes=False))
 
             async def exercise() -> None:
-                result = await server.call_tool("read_file", {"path": "large.txt"})
-                structured = result.structured_content
+                result = require_call_tool_result(
+                    await server.call_tool("read_file", {"path": "large.txt"})
+                )
+                structured = require_structured_content(result)
                 self.assertTrue(structured["content_inline_truncated"])
                 self.assertFalse(structured["source_truncated"])
                 self.assertTrue(structured["truncated"])
@@ -360,9 +377,15 @@ class SelfDescriptionResourceTests(unittest.TestCase):
                 self.assertLessEqual(
                     len(structured["content"].encode("utf-8")), 24 * 1024
                 )
-                self.assertNotEqual(result.content[0].text, full_text)
+                self.assertTrue(result.content)
+                self.assertNotEqual(
+                    require_text_content(result.content[0]).text, full_text
+                )
 
-                contents = await server.read_resource(uri)
+                contents = require_resource_contents(
+                    await server.read_resource(uri)
+                )
+                self.assertTrue(contents)
                 self.assertEqual(contents[0].content, full_text)
                 self.assertEqual(contents[0].mime_type, RESULT_TEXT_MIME)
 
@@ -390,9 +413,13 @@ class SelfDescriptionResourceTests(unittest.TestCase):
             )
 
             async def exercise() -> None:
-                result = await server.call_tool("read_file", {"path": "large.txt"})
-                uri = result.structured_content["content_resource_uri"]
-                before = await server.read_resource(uri)
+                result = require_call_tool_result(
+                    await server.call_tool("read_file", {"path": "large.txt"})
+                )
+                structured = require_structured_content(result)
+                uri = structured["content_resource_uri"]
+                before = require_resource_contents(await server.read_resource(uri))
+                self.assertTrue(before)
                 self.assertEqual(before[0].content, full_text)
 
                 path.write_text("replacement", encoding="utf-8")
@@ -417,13 +444,19 @@ class SelfDescriptionResourceTests(unittest.TestCase):
             )
 
             async def exercise() -> None:
-                result = await server.call_tool("read_file", {"path": "large.txt"})
-                structured = result.structured_content
+                result = require_call_tool_result(
+                    await server.call_tool("read_file", {"path": "large.txt"})
+                )
+                structured = require_structured_content(result)
                 self.assertTrue(structured["source_truncated"])
                 self.assertTrue(structured["content_inline_truncated"])
                 uri = structured["content_resource_uri"]
-                contents = await server.read_resource(uri)
+                contents = require_resource_contents(
+                    await server.read_resource(uri)
+                )
+                self.assertTrue(contents)
                 cached = contents[0].content
+                assert isinstance(cached, str)
                 self.assertNotIn(discarded, cached)
                 self.assertNotEqual(cached, full_text)
                 self.assertLessEqual(len(cached.encode("utf-8")), 30_000)
@@ -445,14 +478,21 @@ class SelfDescriptionResourceTests(unittest.TestCase):
             )
 
             async def exercise() -> None:
-                first = await server.call_tool("read_file", {"path": "one.txt"})
-                first_uri = first.structured_content["content_resource_uri"]
-                second = await server.call_tool("read_file", {"path": "two.txt"})
-                second_uri = second.structured_content["content_resource_uri"]
+                first = require_call_tool_result(
+                    await server.call_tool("read_file", {"path": "one.txt"})
+                )
+                first_uri = require_structured_content(first)["content_resource_uri"]
+                second = require_call_tool_result(
+                    await server.call_tool("read_file", {"path": "two.txt"})
+                )
+                second_uri = require_structured_content(second)["content_resource_uri"]
                 self.assertNotEqual(first_uri, second_uri)
                 with self.assertRaises(ResourceNotFoundError):
                     await server.read_resource(first_uri)
-                contents = await server.read_resource(second_uri)
+                contents = require_resource_contents(
+                    await server.read_resource(second_uri)
+                )
+                self.assertTrue(contents)
                 self.assertEqual(contents[0].content, "b" * 30_000)
 
             asyncio.run(exercise())
@@ -519,8 +559,12 @@ class SelfDescriptionResourceTests(unittest.TestCase):
                 )
                 self.assertEqual(len(catalog.contents), 1)
                 self.assertEqual(len(info.contents), 1)
-                self.assertIn('"tools"', catalog.contents[0].text)
-                self.assertIn('"read_file_versioned"', info.contents[0].text)
+                catalog_content = catalog.contents[0]
+                info_content = info.contents[0]
+                assert isinstance(catalog_content, TextResourceContents)
+                assert isinstance(info_content, TextResourceContents)
+                self.assertIn('"tools"', catalog_content.text)
+                self.assertIn('"read_file_versioned"', info_content.text)
 
             asyncio.run(exercise())
 

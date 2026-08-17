@@ -27,6 +27,8 @@ from sandboxed_workspace_mcp.task_manager import (
     TaskManager,
     TaskManagerError,
 )
+from _mcp_assertions import require_call_tool_result, require_structured_content
+
 from sandboxed_workspace_mcp.task_runner import (
     CliContainerBackend,
     ContainerRequest,
@@ -739,9 +741,16 @@ class TaskManagerTests(unittest.TestCase):
             manager.resolve_execution_profile("run_command")
         listed = manager.list_execution_profiles()
         self.assertEqual(listed["default_profile"], "coding")
-        by_name = {profile["name"]: profile for profile in listed["profiles"]}  # type: ignore[index]
-        self.assertTrue(by_name["coding"]["default"])  # type: ignore[index]
-        self.assertFalse(by_name["safe"]["default"])  # type: ignore[index]
+        profile_entries = listed["profiles"]
+        assert isinstance(profile_entries, list)
+        by_name: dict[str, dict[object, object]] = {}
+        for profile in profile_entries:
+            assert isinstance(profile, dict)
+            name = profile.get("name")
+            assert isinstance(name, str)
+            by_name[name] = profile
+        self.assertTrue(by_name["coding"]["default"])
+        self.assertFalse(by_name["safe"]["default"])
 
         ambiguous = TaskConfiguration(
             source=self.base / "ambiguous.json",
@@ -1039,11 +1048,13 @@ class TaskManagerTests(unittest.TestCase):
         (self.root / ".env.py").write_text("SECRET = 1\n", encoding="utf-8")
         outside = self.base / "outside.py"
         outside.write_text("print('outside')\n", encoding="utf-8")
-        link = self.root / "linked.py"
+        link_path = self.root / "linked.py"
         try:
-            link.symlink_to(self.root / "debug.py")
+            link_path.symlink_to(self.root / "debug.py")
         except (OSError, NotImplementedError):
-            link = None
+            link: Path | None = None
+        else:
+            link = link_path
         invalid_paths = [
             "../outside.py",
             str(outside),
@@ -1416,8 +1427,12 @@ class TaskManagerTests(unittest.TestCase):
         )
 
         async def exercise_task_tools() -> None:
-            listed = await task_server.call_tool("list_tasks", {})
-            run = await task_server.call_tool("run_task", {"name": "test"})
+            listed = require_call_tool_result(
+                await task_server.call_tool("list_tasks", {})
+            )
+            run = require_call_tool_result(
+                await task_server.call_tool("run_task", {"name": "test"})
+            )
             self.assertFalse(listed.is_error)
             self.assertFalse(run.is_error)
             with self.assertRaisesRegex(ValueError, "unexpected argument"):
@@ -1447,16 +1462,20 @@ class TaskManagerTests(unittest.TestCase):
         self.assertTrue(dynamic.issubset(by_name))
         self.assertNotIn("run_task", by_name)
         self.assertFalse(by_name["run_pytest"].input_schema["additionalProperties"])
-        self.assertTrue(by_name["python_version"].annotations.read_only_hint)
+        python_version_annotations = by_name["python_version"].annotations
+        assert python_version_annotations is not None
+        self.assertTrue(python_version_annotations.read_only_hint)
 
         async def exercise() -> None:
-            result = await profile_server.call_tool(
-                "run_pytest",
-                {
-                    "profile": "debug",
-                    "targets": ["tests/test_user.py::test_login"],
-                    "verbosity": 2,
-                },
+            result = require_call_tool_result(
+                await profile_server.call_tool(
+                    "run_pytest",
+                    {
+                        "profile": "debug",
+                        "targets": ["tests/test_user.py::test_login"],
+                        "verbosity": 2,
+                    },
+                )
             )
             self.assertFalse(result.is_error)
             with self.assertRaisesRegex(ValueError, "unexpected argument"):
@@ -1498,21 +1517,25 @@ class TaskManagerTests(unittest.TestCase):
             self.assertFalse(by_name[name].input_schema["additionalProperties"])
 
         async def exercise() -> None:
-            run = await command_server.call_tool(
-                "run_command",
-                {
-                    "profile": "debug",
-                    "program": "ruff",
-                    "args": ["check", "."],
-                },
+            run = require_call_tool_result(
+                await command_server.call_tool(
+                    "run_command",
+                    {
+                        "profile": "debug",
+                        "program": "ruff",
+                        "args": ["check", "."],
+                    },
+                )
             )
-            started = await command_server.call_tool(
-                "start_command",
-                {
-                    "profile": "debug",
-                    "program": "uvicorn",
-                    "args": ["app:app"],
-                },
+            started = require_call_tool_result(
+                await command_server.call_tool(
+                    "start_command",
+                    {
+                        "profile": "debug",
+                        "program": "uvicorn",
+                        "args": ["app:app"],
+                    },
+                )
             )
             self.assertFalse(run.is_error)
             self.assertFalse(started.is_error)
@@ -1564,8 +1587,8 @@ class TaskManagerTests(unittest.TestCase):
         self.assertIn("max_failures", by_name["run_pytest"].input_schema["properties"])
 
         async def exercise() -> None:
-            ruff = await server.call_tool("run_ruff", {})
-            mypy = await server.call_tool("run_mypy", {})
+            ruff = require_call_tool_result(await server.call_tool("run_ruff", {}))
+            mypy = require_call_tool_result(await server.call_tool("run_mypy", {}))
             self.assertFalse(ruff.is_error)
             self.assertFalse(mypy.is_error)
             with self.assertRaisesRegex(ValueError, "unexpected argument"):
@@ -1621,9 +1644,11 @@ class TaskManagerTests(unittest.TestCase):
         server = create_server(self.settings, task_manager=manager)
 
         async def exercise_pytest() -> None:
-            result = await server.call_tool("run_pytest", {})
+            result = require_call_tool_result(
+                await server.call_tool("run_pytest", {})
+            )
             self.assertFalse(result.is_error)
-            structured = result.structured_content
+            structured = require_structured_content(result)
             self.assertEqual(structured["status"], "failed")
             frame = structured["failures"][0]["frames"][0]
             self.assertEqual(frame["path"], "<external>")
@@ -1645,10 +1670,13 @@ class TaskManagerTests(unittest.TestCase):
         malformed_server = create_server(self.settings, task_manager=malformed_manager)
 
         async def exercise_ruff() -> None:
-            result = await malformed_server.call_tool("run_ruff", {})
+            result = require_call_tool_result(
+                await malformed_server.call_tool("run_ruff", {})
+            )
             self.assertFalse(result.is_error)
-            self.assertEqual(result.structured_content["diagnostics"], [])
-            self.assertIn("diagnostics_parser_error", result.structured_content)
+            structured = require_structured_content(result)
+            self.assertEqual(structured["diagnostics"], [])
+            self.assertIn("diagnostics_parser_error", structured)
 
         asyncio.run(exercise_ruff())
 
@@ -1666,14 +1694,15 @@ class TaskManagerTests(unittest.TestCase):
         )
 
         async def exercise_unavailable() -> None:
-            result = await unavailable_server.call_tool(
-                "run_python_script", {"path": "tests/test_user.py"}
+            result = require_call_tool_result(
+                await unavailable_server.call_tool(
+                    "run_python_script", {"path": "tests/test_user.py"}
+                )
             )
             self.assertFalse(result.is_error)
-            self.assertEqual(
-                result.structured_content["status"], "capability_unavailable"
-            )
-            self.assertIn("capability_error", result.structured_content)
+            structured = require_structured_content(result)
+            self.assertEqual(structured["status"], "capability_unavailable")
+            self.assertIn("capability_error", structured)
 
         asyncio.run(exercise_unavailable())
 

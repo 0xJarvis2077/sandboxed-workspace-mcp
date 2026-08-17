@@ -10,6 +10,7 @@ import unittest
 from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
+from typing import TypedDict
 from unittest.mock import patch
 
 from sandboxed_workspace_mcp.access_policy import TRASH_DIRECTORY_NAME
@@ -28,6 +29,13 @@ from sandboxed_workspace_mcp.trash import (
     TrashManager,
 )
 from sandboxed_workspace_mcp.workspace import Workspace, WorkspaceError
+
+
+class _TrashItem(TypedDict, total=False):
+    trash_id: str
+    sha256: str
+    original_path: str
+    payload_name: str
 
 
 class TrashManagerTests(unittest.TestCase):
@@ -50,14 +58,36 @@ class TrashManagerTests(unittest.TestCase):
     def _sha256(data: bytes) -> str:
         return hashlib.sha256(data).hexdigest()
 
+    @staticmethod
+    def _str_field(payload: dict[str, object], key: str) -> str:
+        value = payload[key]
+        assert isinstance(value, str)
+        return value
+
+    @classmethod
+    def _version_sha(
+        cls,
+        workspace: Workspace,
+        path: str,
+    ) -> str:
+        return cls._str_field(workspace.read_file_versioned(path), "sha256")
+
+    @staticmethod
+    def _dict_items(payload: dict[str, object], key: str) -> list[dict[str, object]]:
+        value = payload[key]
+        assert isinstance(value, list)
+        assert all(isinstance(item, dict) for item in value)
+        return value
+
     def test_trash_is_lazy_versioned_and_restorable(self) -> None:
         target = self.root / "notes.txt"
         data = b"recover me\n"
         target.write_bytes(data)
 
         self.assertFalse((self.root / TRASH_DIRECTORY_NAME).exists())
-        version = self.workspace.read_file_versioned("notes.txt")
-        result = self.trash.trash_file("notes.txt", version["sha256"])
+        result = self.trash.trash_file(
+            "notes.txt", self._version_sha(self.workspace, "notes.txt")
+        )
 
         self.assertEqual(result["original_path"], "notes.txt")
         self.assertEqual(result["sha256"], self._sha256(data))
@@ -66,11 +96,15 @@ class TrashManagerTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(trash_root.stat().st_mode), 0o700)
         listed = self.trash.list_trashed_files()
         self.assertEqual(listed["total"], 1)
-        item = listed["items"][0]
+        items = self._dict_items(listed, "items")
+        item = items[0]
         self.assertNotIn("payload", item)
         self.assertEqual(item["trash_id"], result["trash_id"])
 
-        restored = self.trash.restore_trashed_file(result["trash_id"], result["sha256"])
+        restored = self.trash.restore_trashed_file(
+            self._str_field(result, "trash_id"),
+            self._str_field(result, "sha256"),
+        )
         self.assertTrue(restored["restored"])
         self.assertEqual(target.read_bytes(), data)
         self.assertEqual(self.trash.list_trashed_files()["total"], 0)
@@ -78,7 +112,7 @@ class TrashManagerTests(unittest.TestCase):
     def test_stale_version_does_not_create_or_move_anything(self) -> None:
         target = self.root / "stale.txt"
         target.write_bytes(b"before")
-        stale = self.workspace.read_file_versioned("stale.txt")["sha256"]
+        stale = self._version_sha(self.workspace, "stale.txt")
         target.write_bytes(b"after")
 
         with self.assertRaisesRegex(WorkspaceError, "conflict"):
@@ -94,7 +128,7 @@ class TrashManagerTests(unittest.TestCase):
             link.symlink_to(target)
         except (OSError, NotImplementedError) as exc:
             self.skipTest(f"symlinks are unavailable: {exc}")
-        version = self.workspace.read_file_versioned("target.txt")["sha256"]
+        version = self._version_sha(self.workspace, "target.txt")
         with self.assertRaisesRegex(WorkspaceError, "symbolic links"):
             self.trash.trash_file("link.txt", version)
 
@@ -112,12 +146,14 @@ class TrashManagerTests(unittest.TestCase):
     def test_restore_never_overwrites_and_payload_remains(self) -> None:
         target = self.root / "collision.txt"
         target.write_bytes(b"original")
-        version = self.workspace.read_file_versioned("collision.txt")["sha256"]
+        version = self._version_sha(self.workspace, "collision.txt")
         item = self.trash.trash_file("collision.txt", version)
         target.write_bytes(b"new file")
 
         with self.assertRaisesRegex(TrashError, "already exists"):
-            self.trash.restore_trashed_file(item["trash_id"], item["sha256"])
+            self.trash.restore_trashed_file(
+                self._str_field(item, "trash_id"), self._str_field(item, "sha256")
+            )
         self.assertEqual(target.read_bytes(), b"new file")
         self.assertEqual(self.trash.list_trashed_files()["total"], 1)
 
@@ -135,13 +171,15 @@ class TrashManagerTests(unittest.TestCase):
         target = self.root / "basic.txt"
         target.write_bytes(b"old")
         item = self.trash.trash_file(
-            "basic.txt", self.workspace.read_file_versioned("basic.txt")["sha256"]
+            "basic.txt", self._version_sha(self.workspace, "basic.txt")
         )
         target.write_bytes(b"new")
         (self.root / "recovered").mkdir()
 
         result = self.trash.restore_trashed_file(
-            item["trash_id"], item["sha256"], "recovered/basic.txt"
+            self._str_field(item, "trash_id"),
+            self._str_field(item, "sha256"),
+            "recovered/basic.txt",
         )
 
         self.assertEqual(result["restored_path"], "recovered/basic.txt")
@@ -153,21 +191,25 @@ class TrashManagerTests(unittest.TestCase):
         target = self.root / "source.txt"
         target.write_bytes(b"old")
         item = self.trash.trash_file(
-            "source.txt", self.workspace.read_file_versioned("source.txt")["sha256"]
+            "source.txt", self._version_sha(self.workspace, "source.txt")
         )
         (self.root / "recovered").mkdir()
         (self.root / "recovered/existing.txt").write_bytes(b"keep")
 
         with self.assertRaises(TrashError) as existing:
             self.trash.restore_trashed_file(
-                item["trash_id"], item["sha256"], "recovered/existing.txt"
+                self._str_field(item, "trash_id"),
+                self._str_field(item, "sha256"),
+                "recovered/existing.txt",
             )
         self.assertEqual(existing.exception.code, TRASH_DESTINATION_EXISTS)
         self.assertEqual((self.root / "recovered/existing.txt").read_bytes(), b"keep")
 
         with self.assertRaises(TrashError) as invalid:
             self.trash.restore_trashed_file(
-                item["trash_id"], item["sha256"], "missing/file.txt"
+                self._str_field(item, "trash_id"),
+                self._str_field(item, "sha256"),
+                "missing/file.txt",
             )
         self.assertEqual(invalid.exception.code, TRASH_DESTINATION_INVALID)
         self.assertEqual(self.trash.list_trashed_files()["total"], 1)
@@ -185,11 +227,11 @@ class TrashManagerTests(unittest.TestCase):
         target = self.root / "purge.txt"
         target.write_bytes(b"purge me")
         item = trash.trash_file(
-            "purge.txt", workspace.read_file_versioned("purge.txt")["sha256"]
+            "purge.txt", self._version_sha(workspace, "purge.txt")
         )
 
         with self.assertRaises(TrashError) as stale:
-            trash.purge_trashed_file(item["trash_id"], "0" * 64)
+            trash.purge_trashed_file(self._str_field(item, "trash_id"), "0" * 64)
         self.assertEqual(stale.exception.code, TRASH_VERSION_CONFLICT)
         self.assertEqual(trash.list_trashed_files()["total"], 1)
 
