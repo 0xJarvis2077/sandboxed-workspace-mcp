@@ -87,6 +87,17 @@ Every actually registered public tool declares a stable `outputSchema`. Normal c
 
 Every public tool explicitly declares `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` so MCP clients and agents can reason about behavior. These values are hints, not authorization or security enforcement. The actual security boundary remains the workspace policy, SHA/version checks, recycle-bin transactions, OAuth scopes, execution profiles, and sandbox.
 
+## Built-in Resources
+
+The server self-describes its currently available capabilities and recommended workflows through MCP Resources, so agents do not need to memorize the full README or the profile taxonomy first. `internal://tool-catalog` contains only currently registered public tools and reuses the Tool Contract Registry directly. A full contract can be read on demand through `internal://tool-info/{name}`; unregistered capabilities are not exposed through self-description.
+
+- `internal://instructions`: capability-aware safe operating guidance for the current server.
+- `internal://tool-catalog`: a machine-readable current Tool summary with stable tool-name ordering.
+- `internal://tool-info/{name}`: the full input/output contract and annotations for one currently registered Tool.
+- `internal://workflows/edit-file`, `debug-python`, `recover-file`, and `review-changes`: compact agent workflows.
+
+The README remains an entry-point overview. Detailed agent SOPs live in these Resources and are generated against the current public capability surface.
+
 `run_shell` accepts only `pwd`, `ls`, `cat`, `head`, `tail`, `tree`, `grep`, bounded `rg`, `find`, `wc`, `sed`, and fixed Git queries. Pipes, redirects, command substitution, environment expansion, and unlisted arguments are rejected.
 
 Git review has two read-only views:
@@ -178,6 +189,19 @@ An execution profile is operator security/environment policy, not a tool taxonom
 
 Callers cannot override environment, image, network, mounts, ports, resource limits, or container IDs. Every execution starts from a filtered temporary snapshot; snapshot changes are never written back to the real workspace.
 
+### Building and switching the execution image
+
+`examples/Dockerfile.task` is the source for the standard execution image and preinstalls offline tools such as pytest, coverage, Ruff, and mypy. Editing the Dockerfile does not update an already running MCP service automatically; the operator must rebuild the image, obtain its immutable image ID/digest, update the execution profile configuration outside the workspace, and restart the MCP service. For example:
+
+```bash
+docker build -f examples/Dockerfile.task -t sandboxed-workspace-mcp-execution:local .
+docker image inspect sandboxed-workspace-mcp-execution:local --format '{{.Id}}'
+```
+
+Write the resulting full `sha256:...` value to the external `execution-profiles.json` `image` field, then restart the service. Use `list_execution_profiles` to inspect the profiles/capabilities currently exposed by the service, and verify the new image with `run_mypy` or `run_command` running `python -m mypy --version`. Runtime execution containers stay offline; dependencies belong in the image build stage rather than an agent-time `pip install`.
+
+CI builds this Dockerfile and runs `python -m mypy --version` inside the resulting container with `--network none`, preventing drift where the Dockerfile claims mypy support but the built execution image does not actually provide it.
+
 ## Temporary caches in read-only profiles
 
 The fixed container environment places common caches in `/tmp`, within a 64 MiB tmpfs:
@@ -232,7 +256,8 @@ src/sandboxed_workspace_mcp/
   git_reader.py         # Bounded read-only Git adapter
   git_writer.py         # Controlled init, first baseline, and revision blob reads
   service.py            # run_shell grammar and application orchestration
-  server.py             # MCP tools, scope checks, and auth challenges
+  resources.py          # Pure self-description Resource builders and workflows
+  server.py             # MCP tool/Resource registration, scopes, and auth challenges
   cli.py                # stdio/HTTP startup and OAuth configuration
   task_config.py        # Trusted task/profile JSON validation and freezing
   python_execution.py   # Structured Python/pytest/analysis argv compilation
