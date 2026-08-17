@@ -4,9 +4,42 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import PurePosixPath, PureWindowsPath
 
 TRASH_DIRECTORY_NAME = ".sandboxed_workspace_mcp_trash"
+
+DEFAULT_GIT_BASELINE_IGNORE_RULES = (
+    ".DS_Store",
+    "Thumbs.db",
+    "Desktop.ini",
+    "._*",
+    "__pycache__/",
+    "*.pyc",
+    "*.pyo",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    ".coverage",
+    ".coverage.*",
+)
+
+GIT_BASELINE_NOISE_MANAGED_BLOCK_BEGIN = (
+    "# BEGIN sandboxed-workspace-mcp baseline noise"
+)
+GIT_BASELINE_NOISE_MANAGED_BLOCK_END = "# END sandboxed-workspace-mcp baseline noise"
+GIT_BASELINE_NOISE_MANAGED_BLOCK_LINES = (
+    GIT_BASELINE_NOISE_MANAGED_BLOCK_BEGIN,
+    *DEFAULT_GIT_BASELINE_IGNORE_RULES,
+    GIT_BASELINE_NOISE_MANAGED_BLOCK_END,
+)
+
+_GIT_BASELINE_NOISE_DIRECTORIES = frozenset(
+    rule[:-1] for rule in DEFAULT_GIT_BASELINE_IGNORE_RULES if rule.endswith("/")
+)
+_GIT_BASELINE_NOISE_FILE_RULES = tuple(
+    rule for rule in DEFAULT_GIT_BASELINE_IGNORE_RULES if not rule.endswith("/")
+)
 
 DEFAULT_BLOCKED_PATTERNS = (
     TRASH_DIRECTORY_NAME,
@@ -35,6 +68,18 @@ SAFE_ENV_EXAMPLE_NAMES = frozenset(
         ".env.template",
     }
 )
+
+
+def is_git_baseline_noise(relative_path: str) -> bool:
+    """Return whether a root-relative path is generated baseline noise."""
+
+    parts = PurePosixPath(relative_path).parts
+    if not parts:
+        return False
+    if any(part in _GIT_BASELINE_NOISE_DIRECTORIES for part in parts):
+        return True
+    basename = parts[-1]
+    return any(fnmatchcase(basename, rule) for rule in _GIT_BASELINE_NOISE_FILE_RULES)
 
 
 class PolicyConfigurationError(ValueError):

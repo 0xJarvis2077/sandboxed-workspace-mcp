@@ -72,6 +72,16 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkspaceError, "end_line"):
             self.workspace.read_file("lines.txt", 3, 2)
 
+    def test_read_file_bytes_is_bounded_and_policy_checked(self) -> None:
+        (self.root / "payload.bin").write_bytes(b"\x00\xffpayload")
+        (self.root / ".env").write_bytes(b"SECRET=value")
+
+        self.assertEqual(
+            self.workspace.read_file_bytes("payload.bin"), b"\x00\xffpayload"
+        )
+        with self.assertRaisesRegex(WorkspaceError, "blocked"):
+            self.workspace.read_file_bytes(".env")
+
     def test_count_and_find_are_bounded_policy_checked_operations(self) -> None:
         (self.root / "notes.txt").write_text("one two\nthree\n", encoding="utf-8")
         (self.root / "src").mkdir()

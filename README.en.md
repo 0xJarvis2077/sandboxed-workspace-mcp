@@ -70,7 +70,7 @@ The compatibility entrypoint remains available:
 | Writes | `create_directory`, `write_file`, `replace_text`, `append_file` | Atomic writes; disabled in read-only mode |
 | Recycle bin (optional) | `trash_file`, `list_trashed_files`, `restore_trashed_file`, `restore_trashed_file_to` | Disabled by default; bounded single-file trash and non-overwriting restore |
 | Permanent purge (optional) | `purge_trashed_file` | Registered only with separate purge enablement; SHA-checked and irreversible |
-| Read-only Git | `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_rev_parse`, `git_ls_files`, `git_read_file_at_revision` | Fixed-argument, bounded Git queries and historical file reads |
+| Read-only Git | `git_status`, `git_diff`, `workspace_diff`, `git_log`, `git_show`, `git_branch`, `git_rev_parse`, `git_ls_files`, `git_read_file_at_revision` | Fixed-argument, bounded Git queries, workspace diff aggregation, and historical file reads |
 | Git writes (optional) | `git_init`, `git_create_baseline` | Configured-root `main` initialization and one server-owned first baseline; disabled by default |
 | Compatibility commands | `run_shell` | Closed read-only grammar; never starts a shell |
 | Fixed tasks | `list_tasks`, `run_task` | Operator-defined synchronous tasks |
@@ -81,9 +81,20 @@ Without a task config, the task manager, container backend, and dynamic executio
 
 `run_shell` accepts only `pwd`, `ls`, `cat`, `head`, `tail`, `tree`, `grep`, bounded `rg`, `find`, `wc`, `sed`, and fixed Git queries. Pipes, redirects, command substitution, environment expansion, and unlisted arguments are rejected.
 
+Git review has two read-only views:
+
+```python
+git_diff(path="src")  # native tracked Git diff
+workspace_diff(path="src")  # tracked final state + safe untracked text
+```
+
+`workspace_diff` does not stage files or modify the repository. Ignored, blocked, binary, oversized, and otherwise unsafe files never have their contents emitted. Output and scanning are bounded; partition large reviews with `path`.
+
 ### Use a controlled Git baseline
 
 Enable `--allow-git-writes` (or `SANDBOXED_WORKSPACE_MCP_ALLOW_GIT_WRITES=true`) to register `git_init` and `git_create_baseline`. They accept no caller parameters. `git_init` creates an ordinary non-bare `main` repository only at the configured workspace root and returns an idempotent result for an already-valid root repository. `repo_path`, subdirectory repositories, templates, separate Git directories, bare/shared/object-format options, and arbitrary Git argv are unsupported. `git_create_baseline` is allowed only once before the first commit, uses a fixed message and identity, and is not a general commit tool; blocked files, `.git`, the recycle bin, ignored directories, symlinks, and special files are excluded.
+
+The first baseline also filters cross-project environment noise such as `.DS_Store`, `Thumbs.db`, `Desktop.ini`, Python bytecode/cache, and coverage files at any depth. It installs the same fixed rules in a managed block in the repository-private `.git/info/exclude`, so noise created after the baseline does not pollute `git_status`. This does not modify the project `.gitignore` or the user's global Git ignore. The migration boundary applies only to future baselines: noise already tracked by an older baseline is not automatically untracked or rewritten and must be explicitly migrated or rebuilt outside MCP.
 
 To restore historical content, first call `read_file_versioned` for the current SHA, then call `git_read_file_at_revision(path, "HEAD")`, and finally use the existing `write_file(overwrite=true, expected_sha256=...)`. `run_shell` remains read-only. Task snapshots still exclude `.git`, and even a writable `run_command` profile never writes back to the real workspace. Git writes are not in the default OAuth scopes; HTTP callers must also hold `workspace.git.write`.
 
@@ -164,8 +175,9 @@ The fixed container environment places common caches in `/tmp`, within a 64 MiB 
 | mypy | `/tmp/cache/mypy` |
 | coverage | `/tmp/.coverage` |
 | npm | `/tmp/npm-cache` |
+| Python explicit bytecode | `/tmp/cache/python` |
 
-Python bytecode and pip cache are disabled. Explicit build and report artifacts such as `build/`, `dist/`, and `htmlcov/` are not redirected automatically; use tool arguments to place them under `/tmp` in a read-only profile, or use a constrained writable task/profile when workspace output is required.
+Normal Python import bytecode writes are disabled; explicit bytecode compilation such as `python -m compileall` is redirected to `/tmp/cache/python`. All paths share the 64 MiB `/tmp` tmpfs; modes such as `compileall -b` that explicitly request adjacent `.pyc` output are not supported for a read-only workspace. Explicit build and report artifacts such as `build/`, `dist/`, and `htmlcov/` are not redirected automatically; use tool arguments to place them under `/tmp` in a read-only profile, or use a constrained writable task/profile when workspace output is required.
 
 ## Configuration and deployment
 
@@ -200,7 +212,7 @@ Common settings:
 ```text
 src/sandboxed_workspace_mcp/
   workspace.py          # Safe paths, file I/O, traversal, and atomic writes
-  access_policy.py      # Blocked globs and Git exclusion policy
+  access_policy.py      # Blocked globs, Git exclusion, and baseline noise policy
   trash.py              # Protected recycle-bin metadata, transactions, and recovery
   git_reader.py         # Bounded read-only Git adapter
   git_writer.py         # Controlled init, first baseline, and revision blob reads

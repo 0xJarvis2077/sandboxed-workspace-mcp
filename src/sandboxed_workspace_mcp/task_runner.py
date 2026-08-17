@@ -258,6 +258,8 @@ def build_container_argv(executable: str, request: ContainerRequest) -> list[str
         "--env",
         "PYTHONDONTWRITEBYTECODE=1",
         "--env",
+        "PYTHONPYCACHEPREFIX=/tmp/cache/python",
+        "--env",
         "PIP_NO_CACHE_DIR=1",
         "--env",
         "npm_config_cache=/tmp/npm-cache",

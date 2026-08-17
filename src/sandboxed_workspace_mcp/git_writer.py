@@ -24,7 +24,13 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import BinaryIO
 
-from .access_policy import AccessPolicy
+from .access_policy import (
+    GIT_BASELINE_NOISE_MANAGED_BLOCK_BEGIN,
+    GIT_BASELINE_NOISE_MANAGED_BLOCK_END,
+    GIT_BASELINE_NOISE_MANAGED_BLOCK_LINES,
+    AccessPolicy,
+    is_git_baseline_noise,
+)
 from .config import Settings
 from .git_reader import GitError
 from .workspace import Workspace, WorkspaceError
@@ -36,6 +42,12 @@ _BASELINE_MESSAGE = "sandboxed-workspace-mcp baseline"
 _IDENTITY_NAME = "Sandboxed Workspace MCP"
 _IDENTITY_EMAIL = "sandboxed-workspace-mcp@example.invalid"
 _MAX_SMALL_OUTPUT = 64 * 1024
+_MAX_EXCLUDE_SIZE = 64 * 1024
+_EXCLUDE_BEGIN_BYTES = GIT_BASELINE_NOISE_MANAGED_BLOCK_BEGIN.encode("ascii")
+_EXCLUDE_END_BYTES = GIT_BASELINE_NOISE_MANAGED_BLOCK_END.encode("ascii")
+_EXCLUDE_BLOCK_BYTES = (
+    "\n".join(GIT_BASELINE_NOISE_MANAGED_BLOCK_LINES) + "\n"
+).encode("ascii")
 
 _LOCKS_GUARD = threading.Lock()
 _ROOT_LOCKS: dict[Path, threading.RLock] = {}
@@ -93,6 +105,25 @@ class _RepositoryInfo:
     top_level: Path
 
 
+@dataclass(frozen=True, slots=True)
+class _ExcludeSnapshot:
+    path: Path
+    exists: bool
+    data: bytes
+    signature: tuple[int, int, int, int] | None
+    mode: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ExcludeChange:
+    original: _ExcludeSnapshot
+    installed_data: bytes
+    installed_signature: tuple[int, int, int, int]
+    info: Path
+    info_signature: tuple[int, int]
+    info_created: bool
+
+
 def _root_lock(root: Path) -> threading.RLock:
     with _LOCKS_GUARD:
         return _ROOT_LOCKS.setdefault(root, threading.RLock())
@@ -146,6 +177,7 @@ class GitWriter:
                     output_limit=_MAX_SMALL_OUTPUT,
                 )
                 staged_git = worktree / ".git"
+                self._install_baseline_noise_exclude(staged_git)
                 self._validate_repository_at(worktree, staged_git, _BASELINE_BRANCH)
 
                 # Use the host's no-replace directory rename where available so a
@@ -192,6 +224,7 @@ class GitWriter:
             index_identity: tuple[int, int] | None = None
             commit_oid: str | None = None
             ref_updated = False
+            exclude_change: _ExcludeChange | None = None
             try:
                 temp_index = self._temporary_index()
                 total_bytes = 0
@@ -242,6 +275,7 @@ class GitWriter:
                 self._validate_repository(_BASELINE_BRANCH)
                 self._require_unborn_head()
                 self._require_unused_index()
+                exclude_change = self._install_baseline_noise_exclude()
                 index_identity = self._install_index_without_replacing(temp_index)
                 temp_index = None
                 try:
@@ -289,6 +323,14 @@ class GitWriter:
                         pass
                 if index_identity is not None:
                     self._remove_index(index_identity)
+                if exclude_change is not None:
+                    try:
+                        self._rollback_baseline_noise_exclude(exclude_change)
+                    except GitError as rollback_error:
+                        raise GitError(
+                            "baseline failed and Git exclude rollback also failed: "
+                            f"{rollback_error}"
+                        ) from rollback_error
                 raise
             finally:
                 if temp_index is not None:
@@ -436,6 +478,316 @@ class GitWriter:
             raise GitError("existing Git index is not a regular file")
         raise GitError("git baseline refuses to replace an existing Git index")
 
+    @staticmethod
+    def _file_signature(status: os.stat_result) -> tuple[int, int, int, int]:
+        return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+
+    def _ensure_info_directory(
+        self, git_dir: Path
+    ) -> tuple[Path, bool, tuple[int, int]]:
+        info = git_dir / "info"
+        created = False
+        try:
+            status = info.lstat()
+        except FileNotFoundError:
+            try:
+                info.mkdir(mode=stat.S_IRWXU)
+                created = True
+                status = info.lstat()
+            except FileExistsError:
+                try:
+                    status = info.lstat()
+                except OSError as exc:
+                    raise GitError(f"cannot inspect Git info directory: {exc}") from exc
+            except OSError as exc:
+                raise GitError(f"cannot create Git info directory: {exc}") from exc
+        except OSError as exc:
+            raise GitError(f"cannot inspect Git info directory: {exc}") from exc
+        if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
+            raise GitError("Git .git/info must be a real directory")
+        return info, created, (status.st_dev, status.st_ino)
+
+    def _read_exclude_snapshot(self, info: Path) -> _ExcludeSnapshot:
+        path = info / "exclude"
+        try:
+            status = path.lstat()
+        except FileNotFoundError:
+            return _ExcludeSnapshot(path, False, b"", None, 0o600)
+        except OSError as exc:
+            raise GitError(f"cannot inspect Git exclude file: {exc}") from exc
+        if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
+            raise GitError("Git .git/info/exclude must be a regular file")
+        expected_signature = self._file_signature(status)
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(path, flags)
+            opened = os.fstat(descriptor)
+            if (
+                stat.S_ISLNK(opened.st_mode)
+                or not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (status.st_dev, status.st_ino)
+            ):
+                raise GitError("Git exclude file changed while it was opened")
+            if opened.st_size > _MAX_EXCLUDE_SIZE:
+                raise GitError(
+                    "Git .git/info/exclude exceeds the permitted size "
+                    f"({_MAX_EXCLUDE_SIZE} bytes)"
+                )
+            data = bytearray()
+            while True:
+                chunk = os.read(descriptor, _MAX_EXCLUDE_SIZE + 1 - len(data))
+                if not chunk:
+                    break
+                data.extend(chunk)
+                if len(data) > _MAX_EXCLUDE_SIZE:
+                    raise GitError(
+                        "Git .git/info/exclude exceeds the permitted size "
+                        f"({_MAX_EXCLUDE_SIZE} bytes)"
+                    )
+        except GitError:
+            raise
+        except OSError as exc:
+            raise GitError(f"cannot read Git exclude file: {exc}") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise GitError("Git exclude file changed while it was read") from exc
+        if self._file_signature(current) != expected_signature:
+            raise GitError("Git exclude file changed while it was read")
+        return _ExcludeSnapshot(
+            path=path,
+            exists=True,
+            data=bytes(data),
+            signature=expected_signature,
+            mode=stat.S_IMODE(status.st_mode),
+        )
+
+    @staticmethod
+    def _managed_exclude_block_state(data: bytes) -> bool:
+        lines = data.splitlines()
+        begin_indexes = [
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(_EXCLUDE_BEGIN_BYTES)
+        ]
+        end_indexes = [
+            index
+            for index, line in enumerate(lines)
+            if line.startswith(_EXCLUDE_END_BYTES)
+        ]
+        if not begin_indexes and not end_indexes:
+            return False
+        if len(begin_indexes) != 1 or len(end_indexes) != 1:
+            raise GitError("Git exclude contains a malformed managed noise block")
+        begin, end = begin_indexes[0], end_indexes[0]
+        expected = tuple(
+            line.encode("ascii") for line in GIT_BASELINE_NOISE_MANAGED_BLOCK_LINES
+        )
+        if begin >= end or tuple(lines[begin : end + 1]) != expected:
+            raise GitError("Git exclude contains a conflicting managed noise block")
+        return True
+
+    @staticmethod
+    def _exclude_data_with_block(existing: bytes) -> bytes:
+        if not existing:
+            return _EXCLUDE_BLOCK_BYTES
+        separator = b"" if existing.endswith(b"\n") else b"\n"
+        return existing + separator + _EXCLUDE_BLOCK_BYTES
+
+    @staticmethod
+    def _unlink_owned_temp(path: Path, signature: tuple[int, int, int, int]) -> None:
+        try:
+            status = path.lstat()
+            if (status.st_dev, status.st_ino) == signature[:2]:
+                path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError:
+            return
+
+    def _create_exclude_temp(
+        self, info: Path, data: bytes, mode: int
+    ) -> tuple[Path, tuple[int, int, int, int]]:
+        descriptor, name = tempfile.mkstemp(prefix=".sandboxed_git_exclude_", dir=info)
+        path = Path(name)
+        temp_status = os.fstat(descriptor)
+        initial_signature = self._file_signature(temp_status)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(path, mode)
+            return path, self._file_signature(path.lstat())
+        except OSError as exc:
+            if descriptor >= 0:
+                os.close(descriptor)
+            self._unlink_owned_temp(path, initial_signature)
+            raise GitError(f"cannot stage Git exclude update: {exc}") from exc
+
+    def _verify_exclude_snapshot(self, expected: _ExcludeSnapshot) -> _ExcludeSnapshot:
+        current = self._read_exclude_snapshot(expected.path.parent)
+        if current.exists != expected.exists:
+            raise GitError("Git exclude file changed before it could be updated")
+        if expected.exists and (
+            current.signature != expected.signature or current.data != expected.data
+        ):
+            raise GitError("Git exclude file changed before it could be updated")
+        return current
+
+    def _write_exclude_content(
+        self,
+        info: Path,
+        expected: _ExcludeSnapshot,
+        data: bytes,
+        mode: int,
+    ) -> tuple[int, int, int, int]:
+        try:
+            temp, temp_signature = self._create_exclude_temp(info, data, mode)
+        except (
+            OSError
+        ) as exc:  # pragma: no cover - mkstemp failure is platform-specific
+            raise GitError(f"cannot stage Git exclude update: {exc}") from exc
+        keep_temp = True
+        try:
+            self._verify_exclude_snapshot(expected)
+            if expected.exists:
+                os.replace(temp, expected.path)
+            else:
+                try:
+                    os.link(temp, expected.path, follow_symlinks=False)
+                except FileExistsError as exc:
+                    raise GitError(
+                        "Git exclude file appeared before it could be created"
+                    ) from exc
+                self._unlink_owned_temp(temp, temp_signature)
+            keep_temp = False
+            installed = self._read_exclude_snapshot(info)
+            if not installed.exists or installed.data != data:
+                raise GitError("Git exclude update verification failed")
+            if installed.signature is None:  # pragma: no cover - guarded above
+                raise GitError("Git exclude update returned no file identity")
+            return installed.signature
+        except GitError:
+            raise
+        except OSError as exc:
+            raise GitError(f"cannot atomically update Git exclude: {exc}") from exc
+        finally:
+            if keep_temp:
+                self._unlink_owned_temp(temp, temp_signature)
+
+    def _remove_created_info_directory(
+        self, info: Path, signature: tuple[int, int]
+    ) -> None:
+        try:
+            status = info.lstat()
+            if (status.st_dev, status.st_ino) != signature:
+                raise GitError("Git .git/info changed during baseline rollback")
+            if any(info.iterdir()):
+                raise GitError("Git .git/info is no longer empty during rollback")
+            info.rmdir()
+        except FileNotFoundError as exc:
+            raise GitError(
+                "Git .git/info disappeared during baseline rollback"
+            ) from exc
+        except OSError as exc:
+            raise GitError(f"cannot remove created Git .git/info: {exc}") from exc
+
+    def _install_baseline_noise_exclude(
+        self, git_dir: Path | None = None
+    ) -> _ExcludeChange | None:
+        target_git_dir = self.git_dir if git_dir is None else git_dir
+        info, info_created, info_signature = self._ensure_info_directory(target_git_dir)
+        original: _ExcludeSnapshot | None = None
+        new_data: bytes | None = None
+        installed_signature: tuple[int, int, int, int] | None = None
+        try:
+            original = self._read_exclude_snapshot(info)
+            if self._managed_exclude_block_state(original.data):
+                return None
+            new_data = self._exclude_data_with_block(original.data)
+            installed_signature = self._write_exclude_content(
+                info,
+                original,
+                new_data,
+                original.mode,
+            )
+            return _ExcludeChange(
+                original=original,
+                installed_data=new_data,
+                installed_signature=installed_signature,
+                info=info,
+                info_signature=info_signature,
+                info_created=info_created,
+            )
+        except GitError:
+            if original is not None and new_data is not None:
+                try:
+                    current = self._read_exclude_snapshot(info)
+                    if current.exists and current.data == new_data:
+                        if current.signature is None:  # pragma: no cover
+                            raise GitError(
+                                "Git exclude update returned no file identity"
+                            )
+                        self._rollback_baseline_noise_exclude(
+                            _ExcludeChange(
+                                original=original,
+                                installed_data=new_data,
+                                installed_signature=current.signature,
+                                info=info,
+                                info_signature=info_signature,
+                                info_created=info_created,
+                            )
+                        )
+                        raise
+                except GitError:
+                    raise
+            if info_created:
+                self._remove_created_info_directory(info, info_signature)
+            raise
+
+    def _rollback_baseline_noise_exclude(self, change: _ExcludeChange) -> None:
+        current = self._read_exclude_snapshot(change.info)
+        if (
+            not current.exists
+            or current.signature != change.installed_signature
+            or current.data != change.installed_data
+        ):
+            raise GitError("Git exclude changed during baseline rollback")
+        if change.original.exists:
+            self._write_exclude_content(
+                change.info,
+                current,
+                change.original.data,
+                change.original.mode,
+            )
+        else:
+            self._verify_exclude_snapshot(current)
+            try:
+                status = change.original.path.lstat()
+                if self._file_signature(status) != change.installed_signature:
+                    raise GitError("Git exclude changed during baseline rollback")
+                change.original.path.unlink()
+            except FileNotFoundError as exc:
+                raise GitError(
+                    "Git exclude disappeared during baseline rollback"
+                ) from exc
+            except OSError as exc:
+                raise GitError(
+                    f"cannot remove Git exclude during rollback: {exc}"
+                ) from exc
+            if self._read_exclude_snapshot(change.info).exists:
+                raise GitError("Git exclude rollback left a file behind")
+        if change.info_created:
+            self._remove_created_info_directory(change.info, change.info_signature)
+
     def _scan_candidates(self, deadline: float) -> list[_CandidateFile]:
         max_entries = self.settings.max_scan_entries
         pending = [self.root]
@@ -465,6 +817,8 @@ class GitWriter:
                         entry_path = directory / entry.name
                         relative_path = entry_path.relative_to(self.root)
                         relative = relative_path.as_posix()
+                        if is_git_baseline_noise(relative):
+                            continue
                         if self.policy.is_blocked(relative):
                             continue
                         try:
