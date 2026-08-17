@@ -620,6 +620,116 @@ class TaskManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskManagerError, "required mode"):
             manager.start_task("test")
 
+    def test_structured_profiles_resolve_default_unique_and_ambiguous_candidates(
+        self,
+    ) -> None:
+        profiles = {
+            "safe": ExecutionProfile("safe", PINNED_IMAGE, frozenset({"run_pytest"})),
+            "coding": ExecutionProfile(
+                "coding",
+                PINNED_IMAGE,
+                frozenset({"run_pytest", "run_command"}),
+                allow_arbitrary_commands=True,
+            ),
+        }
+        configured = TaskConfiguration(
+            source=self.base / "profiles.json",
+            runtime="docker",
+            limits=TaskLimits(timeout_seconds=2, max_output_bytes=4096),
+            tasks=MappingProxyType({}),
+            profiles=MappingProxyType(profiles),
+            default_profile="coding",
+        )
+        manager = TaskManager(self.settings, configured, backend=FakeBackend())
+        self.assertEqual(manager.resolve_execution_profile("run_pytest").name, "coding")
+        self.assertEqual(
+            manager.resolve_execution_profile("run_pytest", "safe").name, "safe"
+        )
+        with self.assertRaisesRegex(TaskManagerError, "does not authorize"):
+            manager.resolve_execution_profile("run_command", "safe")
+        with self.assertRaisesRegex(TaskManagerError, "unknown execution profile"):
+            manager.resolve_execution_profile("run_pytest", "missing")
+        with self.assertRaisesRegex(TaskManagerError, "profile is required"):
+            manager.resolve_execution_profile("run_command")
+        listed = manager.list_execution_profiles()
+        self.assertEqual(listed["default_profile"], "coding")
+        by_name = {profile["name"]: profile for profile in listed["profiles"]}  # type: ignore[index]
+        self.assertTrue(by_name["coding"]["default"])  # type: ignore[index]
+        self.assertFalse(by_name["safe"]["default"])  # type: ignore[index]
+
+        ambiguous = TaskConfiguration(
+            source=self.base / "ambiguous.json",
+            runtime="docker",
+            limits=TaskLimits(timeout_seconds=2, max_output_bytes=4096),
+            tasks=MappingProxyType({}),
+            profiles=MappingProxyType(
+                {
+                    "one": ExecutionProfile(
+                        "one", PINNED_IMAGE, frozenset({"run_pytest"})
+                    ),
+                    "two": ExecutionProfile(
+                        "two", PINNED_IMAGE, frozenset({"run_pytest"})
+                    ),
+                }
+            ),
+        )
+        with self.assertRaisesRegex(TaskManagerError, "ambiguous"):
+            TaskManager(
+                self.settings, ambiguous, backend=FakeBackend()
+            ).resolve_execution_profile("run_pytest")
+
+    def test_structured_analysis_tools_compile_and_adapt_results(self) -> None:
+        (self.root / "src").mkdir()
+        tools = frozenset(
+            {
+                "run_ruff",
+                "run_mypy",
+                "run_pytest_coverage",
+            }
+        )
+        ruff_backend = FakeBackend(
+            stdout=b'[{"filename":"src/example.py","location":{"row":1,"column":1},"code":"F401","message":"unused"}]',
+            exit_code=1,
+        )
+        manager = TaskManager(
+            self.settings,
+            profile_configuration(self.base, tools=tools),
+            backend=ruff_backend,
+        )
+        ruff = manager.run_ruff(paths=["src"])
+        self.assertEqual(ruff["diagnostics"][0]["code"], "F401")  # type: ignore[index]
+        self.assertEqual(
+            ruff_backend.requests[0].task.argv,
+            ("ruff", "check", "--output-format=json", "--", "src"),
+        )
+
+        mypy_backend = FakeBackend(
+            stdout=b"src/example.py:2:4: error: bad type [assignment]\n", exit_code=1
+        )
+        mypy_manager = TaskManager(
+            self.settings,
+            profile_configuration(self.base, tools=tools),
+            backend=mypy_backend,
+        )
+        mypy = mypy_manager.run_mypy(paths=["src"], strict=True)
+        self.assertEqual(mypy["diagnostics"][0]["code"], "assignment")  # type: ignore[index]
+        self.assertIn("--strict", mypy_backend.requests[0].task.argv)
+
+        coverage_backend = FakeBackend(stdout=b"SWMCPCOVERAGE:bad\n", exit_code=0)
+        coverage_manager = TaskManager(
+            self.settings,
+            profile_configuration(self.base, tools=tools),
+            backend=coverage_backend,
+        )
+        coverage = coverage_manager.run_pytest_coverage(
+            targets=["tests"], branch=True, fail_under=80
+        )
+        self.assertIn("coverage_parser_error", coverage)
+        self.assertEqual(coverage_backend.requests[0].task.argv[0:2], ("python", "-c"))
+
+        with self.assertRaises(ValueError):
+            manager.run_ruff(paths=["../outside"])
+
     def test_structured_python_profile_compiles_only_server_generated_argv(
         self,
     ) -> None:
@@ -656,6 +766,8 @@ class TaskManagerTests(unittest.TestCase):
                 "python",
                 "-m",
                 "pytest",
+                "-p",
+                "sandboxed_workspace_mcp_debug_plugin",
                 "-o",
                 "cache_dir=/tmp/cache/pytest",
                 "-vv",
@@ -674,6 +786,8 @@ class TaskManagerTests(unittest.TestCase):
                 "python",
                 "-m",
                 "pytest",
+                "-p",
+                "sandboxed_workspace_mcp_debug_plugin",
                 "-o",
                 "cache_dir=/tmp/cache/pytest",
                 "-q",
@@ -1328,6 +1442,50 @@ class TaskManagerTests(unittest.TestCase):
 
         asyncio.run(exercise())
         self.assertEqual(len(backend.requests), 2)
+
+    def test_server_registers_structured_analysis_tools_with_optional_profiles(
+        self,
+    ) -> None:
+        backend = FakeBackend(stdout=b"[]")
+        manager = TaskManager(
+            self.settings,
+            profile_configuration(
+                self.base,
+                tools=frozenset(
+                    {
+                        "python_version",
+                        "run_pytest",
+                        "run_python_script",
+                        "run_ruff",
+                        "run_mypy",
+                        "run_pytest_coverage",
+                    }
+                ),
+            ),
+            backend=backend,
+        )
+        server = create_server(self.settings, task_manager=manager)
+        by_name = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+        for name in (
+            "run_ruff",
+            "run_mypy",
+            "run_pytest_coverage",
+        ):
+            self.assertIn(name, by_name)
+            self.assertNotIn("profile", by_name[name].input_schema.get("required", []))
+            self.assertFalse(by_name[name].input_schema["additionalProperties"])
+        self.assertIn("show_locals", by_name["run_pytest"].input_schema["properties"])
+        self.assertIn("max_failures", by_name["run_pytest"].input_schema["properties"])
+
+        async def exercise() -> None:
+            ruff = await server.call_tool("run_ruff", {})
+            mypy = await server.call_tool("run_mypy", {})
+            self.assertFalse(ruff.is_error)
+            self.assertFalse(mypy.is_error)
+            with self.assertRaisesRegex(ValueError, "unexpected argument"):
+                await server.call_tool("run_ruff", {"argv": ["--fix"]})
+
+        asyncio.run(exercise())
 
 
 if __name__ == "__main__":

@@ -6,10 +6,23 @@ import secrets
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 from .command_execution import CommandCompiler
 from .config import Settings
+from .diagnostics import (
+    adapt_coverage_result,
+    adapt_mypy_result,
+    adapt_pytest_result,
+    adapt_ruff_result,
+    capability_result,
+)
+from .pytest_debug_plugin import (
+    DEBUG_PLUGIN_FILENAME,
+    build_pytest_debug_plugin_source,
+)
 from .python_execution import PythonCommandCompiler
 from .task_config import (
     ARBITRARY_COMMAND_TOOLS,
@@ -257,21 +270,67 @@ class TaskManager:
                 "name": profile.name,
                 "tools": sorted(profile.tools),
                 "workspace_access": profile.workspace_access,
+                "default": profile.name == self.configuration.default_profile,
                 "limits": dict(limits),
             }
             for profile in self.configuration.profiles.values()
         ]
-        return {"profiles": profiles}
+        return {
+            "default_profile": self.configuration.default_profile,
+            "profiles": profiles,
+        }
+
+    def resolve_execution_profile(
+        self,
+        tool: str,
+        requested_profile: str | None = None,
+    ) -> ExecutionProfile:
+        """Resolve an explicit or deterministic structured-tool profile."""
+
+        if tool in ARBITRARY_COMMAND_TOOLS and requested_profile is None:
+            raise TaskManagerError(
+                f"profile is required for arbitrary execution tool {tool}"
+            )
+        with self._lock:
+            if self._shutdown:
+                raise TaskManagerError("task manager is shutting down")
+            if requested_profile is not None:
+                profile = self.configuration.profiles.get(requested_profile)
+                if profile is None:
+                    raise TaskManagerError(
+                        f"unknown execution profile: {requested_profile}"
+                    )
+                self._authorize_profile(profile, tool)
+                return profile
+            candidates = [
+                profile
+                for profile in self.configuration.profiles.values()
+                if tool in profile.tools
+            ]
+            if self.configuration.default_profile is not None:
+                default = self.configuration.profiles.get(
+                    self.configuration.default_profile
+                )
+                if default is not None and default in candidates:
+                    return default
+            if len(candidates) == 1:
+                return candidates[0]
+            if not candidates:
+                raise TaskManagerError(f"no execution profile authorizes {tool}")
+            names = ", ".join(sorted(profile.name for profile in candidates))
+            raise TaskManagerError(
+                f"ambiguous execution profile for {tool}; choose one of: {names}"
+            )
 
     def python_version(
         self,
-        profile: str,
+        profile: str | None = None,
         *,
         cancellation_event: threading.Event | None = None,
     ) -> dict[str, object]:
-        self._require_profile(profile, "python_version")
+        profile = self.resolve_execution_profile("python_version", profile)
         return self._run_profile_command(
-            profile,
+            profile.name,
             "python_version",
             self.python_commands.python_version(),
             cancellation_event=cancellation_event,
@@ -279,7 +338,7 @@ class TaskManager:
 
     def run_pytest(
         self,
-        profile: str,
+        profile: str | None = None,
         *,
         targets: list[str] | None = None,
         keyword: str | None = None,
@@ -288,9 +347,11 @@ class TaskManager:
         exit_first: bool = False,
         no_capture: bool = False,
         traceback: str = "auto",
+        show_locals: bool = False,
+        max_failures: int | None = None,
         cancellation_event: threading.Event | None = None,
     ) -> dict[str, object]:
-        self._require_profile(profile, "run_pytest")
+        selected = self.resolve_execution_profile("run_pytest", profile)
         argv = self.python_commands.pytest(
             targets=targets,
             keyword=keyword,
@@ -299,25 +360,94 @@ class TaskManager:
             exit_first=exit_first,
             no_capture=no_capture,
             traceback=traceback,
+            show_locals=show_locals,
+            max_failures=max_failures,
+            include_failure_plugin=True,
         )
         return self._run_profile_command(
-            profile,
+            selected.name,
             "run_pytest",
             argv,
             cancellation_event=cancellation_event,
+            result_adapter=adapt_pytest_result,
+            snapshot_initializer=lambda path: _write_debug_plugin(
+                path,
+                show_locals=show_locals,
+                output_limit=self.configuration.limits.max_output_bytes,
+            ),
+        )
+
+    def run_ruff(
+        self,
+        profile: str | None = None,
+        *,
+        paths: list[str] | None = None,
+        fix: bool = False,
+        cancellation_event: threading.Event | None = None,
+    ) -> dict[str, object]:
+        selected = self.resolve_execution_profile("run_ruff", profile)
+        if fix and selected.workspace_access != "writable":
+            raise TaskManagerError("ruff fix requires a writable execution profile")
+        return self._run_profile_command(
+            selected.name,
+            "run_ruff",
+            self.python_commands.ruff(paths=paths, fix=fix),
+            cancellation_event=cancellation_event,
+            result_adapter=adapt_ruff_result,
+        )
+
+    def run_mypy(
+        self,
+        profile: str | None = None,
+        *,
+        paths: list[str] | None = None,
+        strict: bool = False,
+        cancellation_event: threading.Event | None = None,
+    ) -> dict[str, object]:
+        selected = self.resolve_execution_profile("run_mypy", profile)
+        return self._run_profile_command(
+            selected.name,
+            "run_mypy",
+            self.python_commands.mypy(paths=paths, strict=strict),
+            cancellation_event=cancellation_event,
+            result_adapter=adapt_mypy_result,
+        )
+
+    def run_pytest_coverage(
+        self,
+        profile: str | None = None,
+        *,
+        targets: list[str] | None = None,
+        keyword: str | None = None,
+        branch: bool = False,
+        fail_under: float | None = None,
+        cancellation_event: threading.Event | None = None,
+    ) -> dict[str, object]:
+        selected = self.resolve_execution_profile("run_pytest_coverage", profile)
+        return self._run_profile_command(
+            selected.name,
+            "run_pytest_coverage",
+            self.python_commands.pytest_coverage(
+                targets=targets,
+                keyword=keyword,
+                branch=branch,
+                fail_under=fail_under,
+            ),
+            cancellation_event=cancellation_event,
+            result_adapter=adapt_coverage_result,
         )
 
     def run_python_script(
         self,
-        profile: str,
-        path: str,
+        profile: str | None = None,
+        path: str | None = None,
         *,
         cancellation_event: threading.Event | None = None,
     ) -> dict[str, object]:
-        self._require_profile(profile, "run_python_script")
+        selected = self.resolve_execution_profile("run_python_script", profile)
         argv = self.python_commands.python_script(path)
         return self._run_profile_command(
-            profile,
+            selected.name,
             "run_python_script",
             argv,
             cancellation_event=cancellation_event,
@@ -420,6 +550,8 @@ class TaskManager:
         *,
         container_workdir: str = "/workspace",
         cancellation_event: threading.Event | None,
+        result_adapter: Callable[[dict[str, object]], dict[str, object]] | None = None,
+        snapshot_initializer: Callable[[Path], None] | None = None,
     ) -> dict[str, object]:
         started = time.monotonic()
         deadline = started + self.configuration.limits.timeout_seconds
@@ -431,6 +563,8 @@ class TaskManager:
                 deadline=deadline,
                 cancellation_event=cancellation,  # type: ignore[arg-type]
             )
+            if snapshot_initializer is not None:
+                snapshot_initializer(snapshot.path)
             request = ContainerRequest(
                 container_name=self._container_name(),
                 snapshot_path=snapshot.path,
@@ -441,11 +575,15 @@ class TaskManager:
                 started_at=started,
                 deadline=deadline,
             )
-            return run_container_task(
+            result = run_container_task(
                 _LeaseBackend(self, lease, cancellation),
                 request,
                 cancellation,  # type: ignore[arg-type]
             ).as_dict()
+            result = capability_result(result)
+            if result_adapter is not None:
+                result = result_adapter(result)
+            return result
         finally:
             try:
                 if snapshot is not None:
@@ -658,15 +796,20 @@ class TaskManager:
             profile = self.configuration.profiles.get(name)
             if profile is None:
                 raise TaskManagerError(f"unknown execution profile: {name}")
-            if tool not in profile.tools:
-                raise TaskManagerError(
-                    f"execution profile {name!r} does not authorize {tool}"
-                )
-            if tool in ARBITRARY_COMMAND_TOOLS and not profile.allow_arbitrary_commands:
-                raise TaskManagerError(
-                    f"execution profile {name!r} does not authorize arbitrary commands"
-                )
+            self._authorize_profile(profile, tool)
             return profile
+
+    @staticmethod
+    def _authorize_profile(profile: ExecutionProfile, tool: str) -> None:
+        if tool not in profile.tools:
+            raise TaskManagerError(
+                f"execution profile {profile.name!r} does not authorize {tool}"
+            )
+        if tool in ARBITRARY_COMMAND_TOOLS and not profile.allow_arbitrary_commands:
+            raise TaskManagerError(
+                f"execution profile {profile.name!r} does not authorize "
+                "arbitrary commands"
+            )
 
     def _begin_profile_start(
         self,
@@ -837,3 +980,21 @@ def _decode_bounded(data: bytes, limit: int) -> str:
     if len(encoded) <= limit:
         return rendered
     return encoded[:limit].decode("utf-8", errors="ignore")
+
+
+def _write_debug_plugin(
+    snapshot_path: Path,
+    *,
+    show_locals: bool,
+    output_limit: int,
+) -> None:
+    """Materialize a server-controlled collector only inside the disposable snapshot."""
+
+    target = snapshot_path / DEBUG_PLUGIN_FILENAME
+    target.write_text(
+        build_pytest_debug_plugin_source(
+            show_locals=show_locals,
+            output_limit=output_limit,
+        ),
+        encoding="utf-8",
+    )

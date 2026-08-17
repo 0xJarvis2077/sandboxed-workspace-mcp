@@ -75,7 +75,7 @@ python -m venv .venv
 | 兼容命令 | `run_shell` | 只解析封闭的只读语法，从不启动 Shell |
 | 固定任务 | `list_tasks`, `run_task` | 操作者预定义的同步任务 |
 | 长任务 | `start_task`, `task_status`, `task_logs`, `stop_task` | 有界 stdout/stderr 和 cursor 日志 |
-| Execution profile | `list_execution_profiles`, `python_version`, `run_pytest`, `run_python_script`, `run_command`, `start_command` | 固定镜像、一次性快照中的授权执行 |
+| Execution profile | `list_execution_profiles`, `python_version`, `run_pytest`, `run_ruff`, `run_mypy`, `run_pytest_coverage`, `run_python_script`, `run_command`, `start_command` | 固定镜像、一次性快照中的授权执行与结构化诊断 |
 
 没有提供 task config 时，任务管理器、容器后端和动态执行工具都不会创建或注册。
 
@@ -112,14 +112,16 @@ workspace_diff(path="src")  # tracked final state + safe untracked text
 
 ### 运行测试或检查
 
-优先使用操作者定义的 `run_task("test")`。需要受控探索时，使用已授权的 profile：
+优先使用操作者定义的 `run_task("test")`。需要受控调试或静态检查时，structured tools 会在服务端自动解析合适的 profile，通常不需要先调用 `list_execution_profiles`：
 
 ```python
-run_pytest(profile="python-debug", targets=["tests"], quiet=True)
-run_command(profile="coding", program="ruff", args=["check", "."])
+run_pytest(targets=["tests/test_auth.py"], max_failures=3, show_locals=True)
+run_ruff(paths=["src", "tests"])
+run_mypy(paths=["src"])
+run_pytest_coverage(targets=["tests"], branch=True, fail_under=85)
 ```
 
-`run_pytest` 的 argv 由服务端生成，并自动把 pytest cache 放到 `/tmp/cache/pytest`。通用 `run_command`/`start_command` 不改写 caller argv；直接调用 pytest 时显式传入：
+`run_pytest`、`run_ruff`、`run_mypy` 和 `run_pytest_coverage` 的 argv 都由服务端生成，路径经过 workspace validator，并返回有界的结构化 diagnostics/failures。pytest failure inspection 会返回 test、exception、workspace frame 和可选的受限 locals；敏感 local 名称会脱敏。通用 `run_command`/`start_command` 不改写 caller argv；它们仍是用于项目特有探针、benchmark 和不常见 analyzer 的 escape hatch：
 
 ```python
 run_command(
@@ -157,9 +159,14 @@ stop_task(started["task_id"])
 复制 [examples/execution-profiles.json](examples/execution-profiles.json) 到工作区外。profile 固定 image、工具集合和 workspace 访问模式：
 
 - `python_version`：在容器内运行 `python --version`。
-- `run_pytest`：服务端验证 target 并生成 pytest argv。
+- `run_pytest`：服务端验证 target、生成 pytest argv，并返回有界 failure/frame/local 信息。
+- `run_ruff`：固定 Ruff check argv，返回 JSON diagnostics；`fix=true` 仅允许 writable profile。
+- `run_mypy`：固定 mypy argv，`strict=true` 只增加 `--strict`。
+- `run_pytest_coverage`：在一次 execution 内完成 pytest 与 coverage，数据只写入 `/tmp`，不产生 workspace `.coverage`。
 - `run_python_script`：只接受一个真实的 workspace `.py` 文件。
 - `run_command`/`start_command`：只有同时声明 `allow_arbitrary_commands: true` 才能使用；这代表容器内任意代码执行授权。
+
+profile 是 operator 的安全与环境策略，不是 agent 必须记住的工具分类。structured tool 未指定 profile 时优先使用顶层 `default_profile`，否则使用唯一 capability 候选；仍有多个候选时返回明确的 ambiguous profile error。`run_command` 和 `start_command` 始终要求显式 profile，并继续要求 `allow_arbitrary_commands=true`。`list_execution_profiles` 仍用于 capability discovery/operator inspection，并标记默认 profile。
 
 调用方不能覆盖环境变量、镜像、网络、挂载、端口、资源限制或容器 ID。每次执行都会先建立过滤后的临时快照；快照修改不会写回真实工作区。
 
@@ -220,7 +227,9 @@ src/sandboxed_workspace_mcp/
   server.py             # MCP 工具注册、scope 检查和认证 challenge
   cli.py                # stdio/HTTP 启动和 OAuth 配置
   task_config.py        # 工作区外 task/profile JSON 的验证与冻结
-  python_execution.py   # 结构化 Python/pytest argv 编译
+  python_execution.py   # 结构化 Python/pytest/analysis argv 编译
+  diagnostics.py        # 有界的 Ruff/mypy/pytest/coverage 结果适配
+  pytest_debug_plugin.py # 快照内注入的受控 pytest failure collector
   command_execution.py  # 通用命令 argv 和 workspace cwd 校验
   task_snapshot.py      # 过滤后的有界临时快照
   task_runner.py        # Docker/Podman argv、pipe 和同步执行
