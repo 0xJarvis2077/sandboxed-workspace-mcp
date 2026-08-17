@@ -367,17 +367,19 @@ def create_server(
 
         return computer.workspace.project_info()
 
-    @server.tool(annotations=READ_ONLY)
-    def list_directory(path: str = ".") -> str:
+    @server.tool(annotations=READ_ONLY, structured_output=True)
+    def list_directory(path: str = ".") -> dict[str, object]:
         """List entries inside a workspace directory."""
 
-        return computer.workspace.list_directory(path)
+        result = computer.workspace.list_directory_result(path)
+        return {"text": result.text, "source_truncated": result.source_truncated}
 
-    @server.tool(annotations=READ_ONLY)
-    def tree(path: str = ".", max_depth: int = 4) -> str:
+    @server.tool(annotations=READ_ONLY, structured_output=True)
+    def tree(path: str = ".", max_depth: int = 4) -> dict[str, object]:
         """Show a bounded recursive tree while skipping dependencies and caches."""
 
-        return computer.workspace.tree(path, max_depth)
+        result = computer.workspace.tree_result(path, max_depth)
+        return {"text": result.text, "source_truncated": result.source_truncated}
 
     if settings.allow_writes:
 
@@ -387,11 +389,14 @@ def create_server(
 
             return computer.workspace.create_directory(path)
 
-    @server.tool(annotations=READ_ONLY)
-    def read_file(path: str, start_line: int = 1, end_line: int = 0) -> str:
+    @server.tool(annotations=READ_ONLY, structured_output=True)
+    def read_file(
+        path: str, start_line: int = 1, end_line: int = 0
+    ) -> dict[str, object]:
         """Read a bounded UTF-8 text file or line range inside the workspace."""
 
-        return computer.workspace.read_file(path, start_line, end_line)
+        result = computer.workspace.read_file_result(path, start_line, end_line)
+        return {"text": result.text, "source_truncated": result.source_truncated}
 
     @server.tool(annotations=READ_ONLY, structured_output=True)
     def read_file_versioned(
@@ -467,19 +472,26 @@ def create_server(
                     computer.trash.purge_trashed_file, trash_id, expected_sha256
                 )
 
-    @server.tool(annotations=READ_ONLY)
-    async def search_text(text: str, path: str = ".", max_results: int = 200) -> str:
+    @server.tool(annotations=READ_ONLY, structured_output=True)
+    async def search_text(
+        text: str, path: str = ".", max_results: int = 200
+    ) -> dict[str, object]:
         """Search project text files without following directory symlinks."""
 
         cancellation = threading.Event()
         try:
-            return await asyncio.to_thread(
-                computer.workspace.search_text,
+            result = await asyncio.to_thread(
+                computer.workspace.search_text_result,
                 text,
                 path,
                 max_results,
                 cancellation_event=cancellation,
             )
+            return {
+                "text": result.text,
+                "truncated": result.truncated,
+                "stop_reason": result.stop_reason,
+            }
         except asyncio.CancelledError:
             cancellation.set()
             raise
@@ -548,29 +560,33 @@ def create_server(
 
             return computer.git_writer.create_baseline()
 
-    @server.tool(annotations=READ_ONLY)
-    def git_diff(staged: bool = False, path: str | None = None) -> str:
+    @server.tool(annotations=READ_ONLY, structured_output=True)
+    def git_diff(staged: bool = False, path: str | None = None) -> dict[str, object]:
         """Show a bounded Git diff with external drivers and textconv disabled."""
 
-        return computer.git.diff(staged=staged, path=path)
+        result = computer.git.diff_result(staged=staged, path=path)
+        return {"text": result.text, "source_truncated": result.truncated}
 
-    @server.tool(annotations=READ_ONLY)
-    def workspace_diff(path: str | None = None) -> str:
+    @server.tool(annotations=READ_ONLY, structured_output=True)
+    def workspace_diff(path: str | None = None) -> dict[str, object]:
         """Show final tracked changes and safe untracked text files."""
 
-        return computer.git.workspace_diff(path=path)
+        result = computer.git.workspace_diff_result(path=path)
+        return {"text": result.text, "source_truncated": result.truncated}
 
-    @server.tool(annotations=READ_ONLY)
-    def git_log(count: int = 10, oneline: bool = False) -> str:
+    @server.tool(annotations=READ_ONLY, structured_output=True)
+    def git_log(count: int = 10, oneline: bool = False) -> dict[str, object]:
         """Show up to 50 recent one-line commits."""
 
-        return computer.git.log(count, oneline=oneline)
+        result = computer.git.log_result(count, oneline=oneline)
+        return {"text": result.text, "source_truncated": result.truncated}
 
-    @server.tool(annotations=READ_ONLY)
-    def git_show(commit: str, path: str | None = None) -> str:
+    @server.tool(annotations=READ_ONLY, structured_output=True)
+    def git_show(commit: str, path: str | None = None) -> dict[str, object]:
         """Show one safe commit and an optional literal, policy-checked path."""
 
-        return computer.git.show(commit, path=path)
+        result = computer.git.show_result(commit, path=path)
+        return {"text": result.text, "source_truncated": result.truncated}
 
     @server.tool(annotations=READ_ONLY)
     def git_branch(show_current: bool = False) -> str:
@@ -592,11 +608,12 @@ def create_server(
 
         return computer.git.ls_files()
 
-    @server.tool(annotations=READ_ONLY)
-    def run_shell(command: str) -> str:
+    @server.tool(annotations=READ_ONLY, structured_output=True)
+    def run_shell(command: str) -> dict[str, object]:
         """Run the documented read-only command grammar, never a real shell."""
 
-        return computer.run_shell(command)
+        result = computer.run_shell_result(command)
+        return {"text": result.text, "source_truncated": result.truncated}
 
     if task_manager is not None and task_manager.configuration.tasks:
 

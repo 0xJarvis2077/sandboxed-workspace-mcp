@@ -11,6 +11,7 @@ from collections import defaultdict
 from typing import BinaryIO
 
 from .access_policy import AccessPolicy
+from .bounded_output import BoundedText, truncate_utf8_result
 from .config import Settings
 from .workspace import Workspace, WorkspaceError, truncate_utf8
 
@@ -69,10 +70,10 @@ class _BoundedDiffOutput:
         self.truncated = True
         return False
 
-    def render(self, omissions: _DiffOmissions) -> str:
+    def render_result(self, omissions: _DiffOmissions) -> BoundedText:
         text = "".join(self.parts)
         if not self.truncated:
-            return text
+            return BoundedText(text=text, truncated=False)
 
         marker = "\n... workspace_diff output truncated"
         if omissions.counts:
@@ -80,8 +81,15 @@ class _BoundedDiffOutput:
         marker += " ...\n"
         marker_size = len(marker.encode("utf-8"))
         if marker_size >= self.limit:
-            return marker.encode("utf-8")[: self.limit].decode("utf-8", errors="ignore")
-        return truncate_utf8(text, self.limit - marker_size) + marker
+            rendered = marker.encode("utf-8")[: self.limit].decode(
+                "utf-8", errors="ignore"
+            )
+        else:
+            rendered = truncate_utf8(text, self.limit - marker_size) + marker
+        return BoundedText(text=rendered, truncated=True)
+
+    def render(self, omissions: _DiffOmissions) -> str:
+        return self.render_result(omissions).text
 
 
 class GitReader:
@@ -115,7 +123,9 @@ class GitReader:
         )
         return self._run(args)
 
-    def diff(self, *, staged: bool = False, path: str | None = None) -> str:
+    def diff_result(
+        self, *, staged: bool = False, path: str | None = None
+    ) -> BoundedText:
         args = [
             "diff",
             "--no-ext-diff",
@@ -126,9 +136,12 @@ class GitReader:
         if staged:
             args.append("--cached")
         args.extend(["--", *self._pathspecs(path)])
-        return self._run(args)
+        return self._run_result(args)
 
-    def workspace_diff(self, *, path: str | None = None) -> str:
+    def diff(self, *, staged: bool = False, path: str | None = None) -> str:
+        return self.diff_result(staged=staged, path=path).text
+
+    def workspace_diff_result(self, *, path: str | None = None) -> BoundedText:
         """Show the final safe workspace state relative to the Git baseline."""
 
         pathspecs = self._pathspecs(path)
@@ -199,17 +212,23 @@ class GitReader:
             output.append("\n")
             output.append(omissions.render())
         if not changed and not omissions.counts:
-            return "(no output)"
-        return output.render(omissions) or "(no output)"
+            return BoundedText(text="(no output)", truncated=False)
+        rendered = output.render_result(omissions)
+        if rendered.text:
+            return rendered
+        return BoundedText(text="(no output)", truncated=False)
 
-    def log(self, count: int = 10, *, oneline: bool = False) -> str:
+    def workspace_diff(self, *, path: str | None = None) -> str:
+        return self.workspace_diff_result(path=path).text
+
+    def log_result(self, count: int = 10, *, oneline: bool = False) -> BoundedText:
         if type(count) is not int or not 1 <= count <= 50:
             raise GitError("git log count must be an integer between 1 and 50")
         # The stable one-line format remains the only output format. ``oneline`` is
         # an explicit compatibility selector, not a switch to a second renderer.
         if type(oneline) is not bool:
             raise GitError("git log oneline must be a boolean")
-        return self._run(
+        return self._run_result(
             [
                 "log",
                 f"-{count}",
@@ -219,7 +238,10 @@ class GitReader:
             ]
         )
 
-    def show(self, commit: str, *, path: str | None = None) -> str:
+    def log(self, count: int = 10, *, oneline: bool = False) -> str:
+        return self.log_result(count, oneline=oneline).text
+
+    def show_result(self, commit: str, *, path: str | None = None) -> BoundedText:
         if (
             not isinstance(commit, str)
             or re.fullmatch(r"(?:HEAD|[0-9a-fA-F]{7,40})", commit) is None
@@ -228,7 +250,7 @@ class GitReader:
                 "git show commit must be HEAD or a 7-40 character hexadecimal ID"
             )
         commit_object = f"{commit}^{{commit}}"
-        return self._run(
+        return self._run_result(
             [
                 "show",
                 "--no-ext-diff",
@@ -240,6 +262,9 @@ class GitReader:
                 *self._pathspecs(path),
             ]
         )
+
+    def show(self, commit: str, *, path: str | None = None) -> str:
+        return self.show_result(commit, path=path).text
 
     def branches(self, *, show_current: bool = False) -> str:
         if type(show_current) is not bool:
@@ -424,7 +449,7 @@ class GitReader:
             return "unavailable"
         return "unsafe"
 
-    def _run(self, args: list[str]) -> str:
+    def _run_result(self, args: list[str]) -> BoundedText:
         if not self.executable:
             raise GitError("git executable was not found")
 
@@ -551,7 +576,12 @@ class GitReader:
             text += ("\n" if text else "") + bytes(stderr).decode(
                 "utf-8", errors="replace"
             )
-        return truncate_utf8(text or "(no output)", self.settings.max_output_size)
+        return truncate_utf8_result(
+            text or "(no output)", self.settings.max_output_size
+        )
+
+    def _run(self, args: list[str]) -> str:
+        return self._run_result(args).text
 
     def _diagnostic(self, stdout: bytearray, stderr: bytearray) -> str:
         sections: list[str] = []

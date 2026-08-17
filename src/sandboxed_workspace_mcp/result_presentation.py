@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from .result_cache import DEFAULT_INLINE_THRESHOLD_BYTES, ResultCache, ResultCacheError
-from .workspace import TRUNCATION_MARKER
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,14 +125,13 @@ def externalize_tool_payload(
         return adapted, changed
 
     if name in {"read_file_versioned", "git_read_file_at_revision"}:
-        source_truncated = _contains_source_truncation(adapted.get("content"))
         changed = _externalize_single_text(
             adapted,
             field="content",
             prefix="content",
             cache=cache,
             owner_scope=owner_scope,
-            source_value=source_truncated,
+            source_value=bool(adapted.get("source_truncated", False)),
         )
         return adapted, changed
 
@@ -226,7 +224,3 @@ def _externalize_single_text(
             source_value = bool(payload.get(source_key, False))
         payload["source_truncated"] = bool(source_value)
     return result.inline_truncated
-
-
-def _contains_source_truncation(value: object) -> bool:
-    return isinstance(value, str) and TRUNCATION_MARKER.strip() in value
