@@ -28,6 +28,12 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from . import __version__, resources, tool_contracts
 from .config import Settings
 from .oauth import JWTTokenVerifier, OAuthSettings
+from .result_cache import (
+    RESULT_TEXT_MIME,
+    RESULT_URI_TEMPLATE,
+    ResultCache,
+    ResultCacheMiss,
+)
 from .service import SandboxedWorkspace
 from .task_manager import TaskManager
 from .trash import TrashError
@@ -179,11 +185,25 @@ class SandboxedWorkspaceMCPServer(MCPServer[None]):
         *args: Any,
         oauth: OAuthSettings | None = None,
         token_verifier: TokenVerifier | None = None,
+        result_cache: ResultCache | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.oauth = oauth
         self.oauth_token_verifier = token_verifier
+        self.result_cache = result_cache or ResultCache()
+
+    def result_owner_scope(self) -> str | None:
+        """Return a stable authenticated owner scope, or capability-only local scope."""
+
+        if self.oauth is None:
+            return None
+        access_token = get_access_token()
+        if access_token is None:
+            return None
+        if access_token.subject:
+            return f"subject:{access_token.subject}\x1fclient:{access_token.client_id}"
+        return f"client:{access_token.client_id}"
 
     async def list_tools(self):
         tools = await super().list_tools()
@@ -230,7 +250,13 @@ class SandboxedWorkspaceMCPServer(MCPServer[None]):
         except TrashError as exc:
             result = _trash_error_result(exc)
         if isinstance(result, CallToolResult):
-            return tool_contracts.adapt_tool_call_result(name, arguments, result)
+            return tool_contracts.adapt_tool_call_result(
+                name,
+                arguments,
+                result,
+                result_cache=self.result_cache,
+                owner_scope=self.result_owner_scope(),
+            )
         return result
 
     def _auth_error(self, scopes: frozenset[str], error: str) -> CallToolResult:
@@ -269,6 +295,7 @@ def create_server(
     *,
     oauth: OAuthSettings | None = None,
     token_verifier: TokenVerifier | None = None,
+    result_cache: ResultCache | None = None,
 ) -> MCPServer[None]:
     """Create an MCP server bound to one validated workspace."""
 
@@ -317,6 +344,7 @@ def create_server(
         lifespan=lifespan if task_manager is not None else None,
         oauth=oauth,
         token_verifier=token_verifier,
+        result_cache=result_cache,
     )
 
     if oauth is not None:
@@ -878,6 +906,26 @@ def create_server(
 
     async def public_tools() -> list[Tool]:
         return await server.list_tools()
+
+    @server.resource(
+        RESULT_URI_TEMPLATE,
+        name="Ephemeral Result",
+        description=(
+            "One bounded public-safe large text result from this server process."
+        ),
+        mime_type=RESULT_TEXT_MIME,
+    )
+    async def result_resource(id: str) -> str:
+        if not ResultCache.valid_result_id(id):
+            raise ResourceNotFoundError("Unknown resource")
+        try:
+            cached = server.result_cache.get(
+                id,
+                owner_scope=server.result_owner_scope(),
+            )
+        except ResultCacheMiss as exc:
+            raise ResourceNotFoundError("Unknown resource") from exc
+        return cached.content
 
     @server.resource(
         "internal://instructions",

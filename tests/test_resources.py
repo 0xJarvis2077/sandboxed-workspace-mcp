@@ -14,6 +14,7 @@ from mcp.server.mcpserver.exceptions import ResourceNotFoundError
 
 from sandboxed_workspace_mcp import resources
 from sandboxed_workspace_mcp.config import Settings
+from sandboxed_workspace_mcp.result_cache import RESULT_TEXT_MIME, ResultCache
 from sandboxed_workspace_mcp.server import create_server
 from sandboxed_workspace_mcp.task_config import (
     ExecutionProfile,
@@ -150,7 +151,10 @@ class SelfDescriptionResourceTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     {template.uri_template for template in templates},
-                    {"internal://tool-info/{name}"},
+                    {
+                        "internal://tool-info/{name}",
+                        "sandboxed-workspace://result/{id}",
+                    },
                 )
 
             asyncio.run(exercise())
@@ -338,6 +342,141 @@ class SelfDescriptionResourceTests(unittest.TestCase):
 
             asyncio.run(exercise())
 
+    def test_large_file_result_is_readable_without_dynamic_enumeration(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            full_text = "safe-line\n" * 4000
+            (workspace / "large.txt").write_text(full_text, encoding="utf-8")
+            server = create_server(Settings.create(root, allow_writes=False))
+
+            async def exercise() -> None:
+                result = await server.call_tool("read_file", {"path": "large.txt"})
+                structured = result.structured_content
+                self.assertTrue(structured["content_inline_truncated"])
+                self.assertFalse(structured["source_truncated"])
+                self.assertTrue(structured["truncated"])
+                uri = structured["content_resource_uri"]
+                self.assertIsInstance(uri, str)
+                self.assertLessEqual(
+                    len(structured["content"].encode("utf-8")), 24 * 1024
+                )
+                self.assertNotEqual(result.content[0].text, full_text)
+
+                contents = await server.read_resource(uri)
+                self.assertEqual(contents[0].content, full_text)
+                self.assertEqual(contents[0].mime_type, RESULT_TEXT_MIME)
+
+                listed = await server.list_resources()
+                self.assertNotIn(uri, {str(item.uri) for item in listed})
+
+            asyncio.run(exercise())
+
+    def test_result_resource_expires_without_regeneration(self) -> None:
+        class Clock:
+            value = 10.0
+
+            def __call__(self) -> float:
+                return self.value
+
+        clock = Clock()
+        cache = ResultCache(ttl_seconds=5, clock=clock)
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            full_text = "x" * 30_000
+            path = workspace / "large.txt"
+            path.write_text(full_text, encoding="utf-8")
+            server = create_server(
+                Settings.create(root, allow_writes=False), result_cache=cache
+            )
+
+            async def exercise() -> None:
+                result = await server.call_tool("read_file", {"path": "large.txt"})
+                uri = result.structured_content["content_resource_uri"]
+                before = await server.read_resource(uri)
+                self.assertEqual(before[0].content, full_text)
+
+                path.write_text("replacement", encoding="utf-8")
+                clock.value += 5
+                with self.assertRaises(ResourceNotFoundError):
+                    await server.read_resource(uri)
+
+            asyncio.run(exercise())
+
+    def test_source_truncation_cannot_be_recovered_from_resource(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            discarded = "DISCARDED_SECRET_VALUE"
+            full_text = "x" * 50_000 + discarded
+            (workspace / "large.txt").write_text(full_text, encoding="utf-8")
+            server = create_server(
+                Settings.create(
+                    root,
+                    allow_writes=False,
+                    max_output_size=30_000,
+                )
+            )
+
+            async def exercise() -> None:
+                result = await server.call_tool("read_file", {"path": "large.txt"})
+                structured = result.structured_content
+                self.assertTrue(structured["source_truncated"])
+                self.assertTrue(structured["content_inline_truncated"])
+                uri = structured["content_resource_uri"]
+                contents = await server.read_resource(uri)
+                cached = contents[0].content
+                self.assertNotIn(discarded, cached)
+                self.assertNotEqual(cached, full_text)
+                self.assertLessEqual(len(cached.encode("utf-8")), 30_000)
+
+            asyncio.run(exercise())
+
+    def test_evicted_result_uri_becomes_not_found(self) -> None:
+        cache = ResultCache(
+            max_entries=1,
+            max_item_bytes=100_000,
+            max_total_bytes=100_000,
+        )
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            (workspace / "one.txt").write_text("a" * 30_000, encoding="utf-8")
+            (workspace / "two.txt").write_text("b" * 30_000, encoding="utf-8")
+            server = create_server(
+                Settings.create(root, allow_writes=False), result_cache=cache
+            )
+
+            async def exercise() -> None:
+                first = await server.call_tool("read_file", {"path": "one.txt"})
+                first_uri = first.structured_content["content_resource_uri"]
+                second = await server.call_tool("read_file", {"path": "two.txt"})
+                second_uri = second.structured_content["content_resource_uri"]
+                self.assertNotEqual(first_uri, second_uri)
+                with self.assertRaises(ResourceNotFoundError):
+                    await server.read_resource(first_uri)
+                contents = await server.read_resource(second_uri)
+                self.assertEqual(contents[0].content, "b" * 30_000)
+
+            asyncio.run(exercise())
+
+    def test_invalid_result_resource_ids_fail_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            server = create_server(Settings.create(root, allow_writes=False))
+
+            async def exercise() -> None:
+                invalid_uris = (
+                    "sandboxed-workspace://result/../secret",
+                    "sandboxed-workspace://result/%2e%2e",
+                    "sandboxed-workspace://result/foo/bar",
+                    "sandboxed-workspace://result/foo%5Cbar",
+                    "sandboxed-workspace://result/" + "a" * 80,
+                    "sandboxed-workspace://result/a%E2%88%95b",
+                )
+                for uri in invalid_uris:
+                    with self.subTest(uri=uri):
+                        with self.assertRaises(ResourceNotFoundError):
+                            await server.read_resource(uri)
+
+            asyncio.run(exercise())
+
     def test_stdio_mcp_boundary_lists_and_reads_resources(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as root:
@@ -373,7 +512,10 @@ class SelfDescriptionResourceTests(unittest.TestCase):
                 }
                 self.assertEqual(
                     template_uris,
-                    {"internal://tool-info/{name}"},
+                    {
+                        "internal://tool-info/{name}",
+                        "sandboxed-workspace://result/{id}",
+                    },
                 )
                 self.assertEqual(len(catalog.contents), 1)
                 self.assertEqual(len(info.contents), 1)

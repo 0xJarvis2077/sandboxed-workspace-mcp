@@ -13,6 +13,7 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 from mcp.server.auth.provider import AccessToken
+from mcp.server.mcpserver.exceptions import ResourceNotFoundError
 
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.oauth import (
@@ -447,6 +448,50 @@ class OAuthServerTests(unittest.TestCase):
             ):
                 allowed = await server.call_tool("git_init", {})
                 self.assertFalse(allowed.is_error)
+
+        asyncio.run(exercise())
+
+    def test_ephemeral_results_are_scoped_to_authenticated_owner(self) -> None:
+        large_text = "owner-safe\n" * 4000
+        (self.root / "large.txt").write_text(large_text, encoding="utf-8")
+        server = create_server(
+            Settings.create(self.root, allow_writes=False), oauth=_oauth()
+        )
+        owner = AccessToken(
+            token="",
+            client_id="client-a",
+            subject="user-a",
+            scopes=["workspace.read"],
+        )
+        other_subject = AccessToken(
+            token="",
+            client_id="client-a",
+            subject="user-b",
+            scopes=["workspace.read"],
+        )
+        other_client = AccessToken(
+            token="",
+            client_id="client-b",
+            subject="user-a",
+            scopes=["workspace.read"],
+        )
+
+        async def exercise() -> None:
+            with patch(
+                "sandboxed_workspace_mcp.server.get_access_token", return_value=owner
+            ):
+                result = await server.call_tool("read_file", {"path": "large.txt"})
+                uri = result.structured_content["content_resource_uri"]
+                contents = await server.read_resource(uri)
+                self.assertEqual(contents[0].content, large_text)
+
+            for token in (other_subject, other_client, None):
+                with patch(
+                    "sandboxed_workspace_mcp.server.get_access_token",
+                    return_value=token,
+                ):
+                    with self.assertRaises(ResourceNotFoundError):
+                        await server.read_resource(uri)
 
         asyncio.run(exercise())
 

@@ -83,6 +83,23 @@ python -m venv .venv
 
 所有实际注册的公开工具都声明稳定的 `outputSchema`，正常调用同时提供 machine-readable `structuredContent` 和原有的人类可读 `content` fallback。Agent 应优先依赖结构化字段，而不是解析展示文本；这些 result schema 属于公开 MCP contract。例如 `read_file_versioned` 会直接暴露 `content`、`sha256`、`size` 等字段，后续写入应使用其中的 `sha256` 作为版本令牌；`run_pytest` 失败时可直接读取 `failures[]`、`frames[]` 和经过脱敏的 `locals[]`。
 
+## Large Results
+
+小型文本结果保持完整 inline。已经经过现有 workspace、Git、execution 安全边界并完成 source bounding 的较大文本，会保留原字符串字段作为 UTF-8 安全 preview，并在 `structuredContent` 中附加 ephemeral `sandboxed-workspace://result/{id}` URI。例如 execution 结果可能包含：
+
+```json
+{
+  "stdout": "...preview...",
+  "source_truncated": false,
+  "stdout_inline_truncated": true,
+  "stdout_resource_uri": "sandboxed-workspace://result/..."
+}
+```
+
+`source_truncated` 表示上游安全层已经丢弃了超出 `max_output_bytes` 等预算的数据；`*_inline_truncated` 仅表示 Server 为了 MCP 上下文大小缩短了当前已经安全、有界的结果。兼容字段 `truncated` 在适用的文本/执行结果中表示两者的并集。Resource 只能恢复 Server 当前仍持有的 bounded safe result，不能恢复此前已经被 source limit 丢弃的 raw output，也不会提高任何原有输出上限。
+
+Result Resource 仅保存在当前进程内存中，固定 TTL 为 15 分钟，Server 重启、过期或容量淘汰后 URI 会失效。URI 不会作为动态条目出现在 `resources/list`；客户端只会发现 `sandboxed-workspace://result/{id}` template。HTTP/OAuth 模式下结果还会绑定生成结果时的 authenticated owner；stdio/无 OAuth 模式依赖高熵、不可枚举的 ephemeral capability URI。
+
 ## Tool Annotations
 
 每个公开工具都显式声明 `readOnlyHint`、`destructiveHint`、`idempotentHint` 和 `openWorldHint`，用于帮助 MCP client/agent 理解工具行为。它们只是行为提示，不是授权或安全机制；实际安全仍由 workspace policy、SHA/version checks、回收站事务、OAuth scopes、execution profiles 和 sandbox 强制执行。
@@ -94,6 +111,7 @@ Server 通过 MCP Resources 自描述当前可用能力和推荐工作流，Agen
 - `internal://instructions`：当前 Server 的安全操作原则和能力感知使用指南。
 - `internal://tool-catalog`：机器可消费、按 tool name 稳定排序的当前 Tool 摘要。
 - `internal://tool-info/{name}`：一个当前已注册 Tool 的完整 input/output contract 与 annotations。
+- `sandboxed-workspace://result/{id}`：按需读取当前进程中的 ephemeral bounded large result；具体 URI 不可枚举。
 - `internal://workflows/edit-file`、`debug-python`、`recover-file`、`review-changes`：面向 Agent 的紧凑工作流。
 
 README 只提供入口概览；详细 SOP 由这些 Resources 自己承担，并随当前实际 capability surface 生成。
