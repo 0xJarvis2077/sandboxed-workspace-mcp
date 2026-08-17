@@ -50,7 +50,10 @@ class Settings:
     search_timeout_seconds: float = 10.0
     max_concurrent_searches: int = 1
     git_timeout: float = 30.0
+    max_git_baseline_files: int = 10_000
+    max_git_baseline_bytes: int = 256 * 1024 * 1024
     allow_writes: bool = True
+    allow_git_writes: bool = False
     allow_trash: bool = False
     allow_trash_purge: bool = False
     max_trash_items: int = 200
@@ -91,6 +94,24 @@ class Settings:
             )
         if self.git_timeout <= 0:
             raise ConfigurationError("git_timeout must be greater than zero")
+        for name, value in (
+            ("max_git_baseline_files", self.max_git_baseline_files),
+            ("max_git_baseline_bytes", self.max_git_baseline_bytes),
+        ):
+            if type(value) is not int or value <= 0:
+                raise ConfigurationError(f"{name} must be greater than zero")
+        if self.max_git_baseline_files > 1_000_000:
+            raise ConfigurationError("max_git_baseline_files must be at most 1000000")
+        if self.max_git_baseline_bytes > 4 * 1024 * 1024 * 1024:
+            raise ConfigurationError(
+                "max_git_baseline_bytes must be at most 4294967296"
+            )
+        if type(self.allow_writes) is not bool:
+            raise ConfigurationError("allow_writes must be a boolean")
+        if type(self.allow_git_writes) is not bool:
+            raise ConfigurationError("allow_git_writes must be a boolean")
+        if self.allow_git_writes and not self.allow_writes:
+            raise ConfigurationError("allow_git_writes requires allow_writes=True")
         if type(self.allow_trash) is not bool:
             raise ConfigurationError("allow_trash must be a boolean")
         if self.allow_trash and not self.allow_writes:
@@ -147,7 +168,10 @@ class Settings:
         search_timeout_seconds: float = 10.0,
         max_concurrent_searches: int = 1,
         git_timeout: float = 30.0,
+        max_git_baseline_files: int = 10_000,
+        max_git_baseline_bytes: int = 256 * 1024 * 1024,
         allow_writes: bool = True,
+        allow_git_writes: bool = False,
         allow_trash: bool = False,
         allow_trash_purge: bool = False,
         max_trash_items: int = 200,
@@ -167,7 +191,10 @@ class Settings:
             search_timeout_seconds=search_timeout_seconds,
             max_concurrent_searches=max_concurrent_searches,
             git_timeout=git_timeout,
+            max_git_baseline_files=max_git_baseline_files,
+            max_git_baseline_bytes=max_git_baseline_bytes,
             allow_writes=allow_writes,
+            allow_git_writes=allow_git_writes,
             allow_trash=allow_trash,
             allow_trash_purge=allow_trash_purge,
             max_trash_items=max_trash_items,

@@ -19,6 +19,7 @@ SUPPORTED_SCOPES = frozenset(
     {
         "workspace.read",
         "workspace.write",
+        "workspace.git.write",
         "workspace.delete",
         "workspace.purge",
         "tasks.read",

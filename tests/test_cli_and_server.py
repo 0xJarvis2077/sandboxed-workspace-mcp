@@ -49,6 +49,29 @@ class CliTests(unittest.TestCase):
         self.assertIn("*.token", runtime.settings.blocked_patterns)
         self.assertIn("private/**", runtime.settings.blocked_patterns)
 
+    def test_git_write_flag_and_environment_require_writable_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            runtime = parse_runtime(
+                ["--allow-git-writes"],
+                {
+                    "SANDBOXED_WORKSPACE_MCP_ROOT": root,
+                    "SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_FILES": "12",
+                    "SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_BYTES": "3456",
+                },
+            )
+            self.assertTrue(runtime.settings.allow_git_writes)
+            self.assertEqual(runtime.settings.max_git_baseline_files, 12)
+            self.assertEqual(runtime.settings.max_git_baseline_bytes, 3456)
+
+            with (
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                parse_runtime(
+                    ["--read-only", "--allow-git-writes"],
+                    {"SANDBOXED_WORKSPACE_MCP_ROOT": root},
+                )
+
     def test_root_is_required(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parse_runtime([], {})
@@ -352,6 +375,7 @@ class ServerTests(unittest.TestCase):
                 "git_branch",
                 "git_log",
                 "git_ls_files",
+                "git_read_file_at_revision",
                 "git_rev_parse",
                 "git_show",
                 "git_status",
@@ -382,6 +406,7 @@ class ServerTests(unittest.TestCase):
                 "git_branch",
                 "git_log",
                 "git_ls_files",
+                "git_read_file_at_revision",
                 "git_rev_parse",
                 "git_show",
                 "git_status",

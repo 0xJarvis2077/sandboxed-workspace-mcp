@@ -9,6 +9,7 @@ Expose one local project root as a bounded MCP server. Clients can read, search,
 - One server instance owns one `--root`. Run separate instances for unrelated projects.
 - Workspace tools are writable by default; pass `--read-only` explicitly for production or read-only use.
 - `--read-only` disables workspace write tools. Authorized tasks still run in a disposable snapshot and never write back to the real workspace.
+- Git initialization and the first baseline commit are disabled by default. `--allow-git-writes` requires writable mode and the separate `workspace.git.write` OAuth scope.
 - The recycle bin is disabled by default. `--allow-trash` also requires writes and provides single-file trash plus non-overwriting restoration to the original or a safe alternate path. Irreversible single-item purge requires the separate `--allow-trash-purge` flag.
 - Container execution is opt-in through a trusted JSON file outside the workspace. Images must be full registry digests or full local `sha256` image IDs.
 
@@ -69,7 +70,8 @@ The compatibility entrypoint remains available:
 | Writes | `create_directory`, `write_file`, `replace_text`, `append_file` | Atomic writes; disabled in read-only mode |
 | Recycle bin (optional) | `trash_file`, `list_trashed_files`, `restore_trashed_file`, `restore_trashed_file_to` | Disabled by default; bounded single-file trash and non-overwriting restore |
 | Permanent purge (optional) | `purge_trashed_file` | Registered only with separate purge enablement; SHA-checked and irreversible |
-| Git | `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_rev_parse`, `git_ls_files` | Fixed read-only Git queries |
+| Read-only Git | `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_rev_parse`, `git_ls_files`, `git_read_file_at_revision` | Fixed-argument, bounded Git queries and historical file reads |
+| Git writes (optional) | `git_init`, `git_create_baseline` | Configured-root `main` initialization and one server-owned first baseline; disabled by default |
 | Compatibility commands | `run_shell` | Closed read-only grammar; never starts a shell |
 | Fixed tasks | `list_tasks`, `run_task` | Operator-defined synchronous tasks |
 | Long-running tasks | `start_task`, `task_status`, `task_logs`, `stop_task` | Bounded stdout/stderr with cursor-based logs |
@@ -78,6 +80,12 @@ The compatibility entrypoint remains available:
 Without a task config, the task manager, container backend, and dynamic execution tools are not created or registered.
 
 `run_shell` accepts only `pwd`, `ls`, `cat`, `head`, `tail`, `tree`, `grep`, bounded `rg`, `find`, `wc`, `sed`, and fixed Git queries. Pipes, redirects, command substitution, environment expansion, and unlisted arguments are rejected.
+
+### Use a controlled Git baseline
+
+Enable `--allow-git-writes` (or `SANDBOXED_WORKSPACE_MCP_ALLOW_GIT_WRITES=true`) to register `git_init` and `git_create_baseline`. They accept no caller parameters. `git_init` creates an ordinary non-bare `main` repository only at the configured workspace root and returns an idempotent result for an already-valid root repository. `repo_path`, subdirectory repositories, templates, separate Git directories, bare/shared/object-format options, and arbitrary Git argv are unsupported. `git_create_baseline` is allowed only once before the first commit, uses a fixed message and identity, and is not a general commit tool; blocked files, `.git`, the recycle bin, ignored directories, symlinks, and special files are excluded.
+
+To restore historical content, first call `read_file_versioned` for the current SHA, then call `git_read_file_at_revision(path, "HEAD")`, and finally use the existing `write_file(overwrite=true, expected_sha256=...)`. `run_shell` remains read-only. Task snapshots still exclude `.git`, and even a writable `run_command` profile never writes back to the real workspace. Git writes are not in the default OAuth scopes; HTTP callers must also hold `workspace.git.write`.
 
 ## Common workflows
 
@@ -173,6 +181,9 @@ Common settings:
 | --- | --- |
 | `--root` / `SANDBOXED_WORKSPACE_MCP_ROOT` | The one workspace root |
 | `--read-only` / `SANDBOXED_WORKSPACE_MCP_READ_ONLY` | Disable all workspace write tools |
+| `--allow-git-writes` / `SANDBOXED_WORKSPACE_MCP_ALLOW_GIT_WRITES` | Enable controlled Git initialization and first baseline; requires writable mode and does not accept arbitrary Git arguments |
+| `--max-git-baseline-files` / `SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_FILES` | Maximum regular files in the first baseline |
+| `--max-git-baseline-bytes` / `SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_BYTES` | Maximum aggregate payload bytes in the first baseline |
 | `--allow-trash` / `SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH` | Enable the restricted recoverable single-file recycle bin |
 | `--allow-trash-purge` / `SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH_PURGE` | Enable verified, irreversible single-item purge separately |
 | `--max-trash-items` / `SANDBOXED_WORKSPACE_MCP_MAX_TRASH_ITEMS` | Maximum retained recycle-bin entries (default 200) |
@@ -192,6 +203,7 @@ src/sandboxed_workspace_mcp/
   access_policy.py      # Blocked globs and Git exclusion policy
   trash.py              # Protected recycle-bin metadata, transactions, and recovery
   git_reader.py         # Bounded read-only Git adapter
+  git_writer.py         # Controlled init, first baseline, and revision blob reads
   service.py            # run_shell grammar and application orchestration
   server.py             # MCP tools, scope checks, and auth challenges
   cli.py                # stdio/HTTP startup and OAuth configuration

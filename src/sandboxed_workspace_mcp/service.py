@@ -7,6 +7,7 @@ import shlex
 
 from .config import Settings
 from .git_reader import GitReader
+from .git_writer import GitWriter
 from .trash import TrashManager
 from .workspace import Workspace
 
@@ -18,10 +19,17 @@ class CommandError(ValueError):
 class SandboxedWorkspace:
     """Facade exposed by the MCP adapter."""
 
-    def __init__(self, settings: Settings, *, git: GitReader | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        git: GitReader | None = None,
+        git_writer: GitWriter | None = None,
+    ) -> None:
         self.settings = settings
         self.workspace = Workspace(settings)
         self.git = git or GitReader(settings)
+        self.git_writer = git_writer or GitWriter(settings)
         self.trash = TrashManager(self.workspace)
 
     def run_shell(self, command: str) -> str:

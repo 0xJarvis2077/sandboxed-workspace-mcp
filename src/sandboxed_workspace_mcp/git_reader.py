@@ -278,21 +278,25 @@ class GitReader:
         return truncate_utf8(message, self.settings.max_output_size)
 
     def _environment(self) -> dict[str, str]:
+        safe_tempdir = "/tmp" if os.name != "nt" else str(self.root)
         environment = {
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_OPTIONAL_LOCKS": "0",
             "GIT_PAGER": "cat",
             "GIT_TERMINAL_PROMPT": "0",
+            "GIT_EDITOR": os.devnull,
+            "GIT_SEQUENCE_EDITOR": os.devnull,
+            "GIT_ATTR_NOSYSTEM": "1",
             "HOME": str(self.root),
             "LANG": "C",
             "LC_ALL": "C",
             "PAGER": "cat",
-            "PATH": os.environ.get("PATH", ""),
+            "PATH": os.defpath,
+            "TMPDIR": safe_tempdir,
+            "TEMP": safe_tempdir,
+            "TMP": safe_tempdir,
         }
-        for name in ("TMPDIR", "TEMP", "TMP"):
-            if value := os.environ.get(name):
-                environment[name] = value
         if os.name == "nt":  # pragma: no cover - exercised on Windows
             environment["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
             environment["USERPROFILE"] = str(self.root)
