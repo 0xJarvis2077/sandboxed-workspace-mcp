@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -1361,7 +1362,7 @@ class TaskManagerTests(unittest.TestCase):
         self.assertTrue(dynamic.issubset(by_name))
         self.assertNotIn("run_task", by_name)
         self.assertFalse(by_name["run_pytest"].input_schema["additionalProperties"])
-        self.assertFalse(by_name["python_version"].annotations.read_only_hint)
+        self.assertTrue(by_name["python_version"].annotations.read_only_hint)
 
         async def exercise() -> None:
             result = await profile_server.call_tool(
@@ -1486,6 +1487,110 @@ class TaskManagerTests(unittest.TestCase):
                 await server.call_tool("run_ruff", {"argv": ["--fix"]})
 
         asyncio.run(exercise())
+
+    def test_server_structured_analysis_failures_remain_safe_and_schema_stable(
+        self,
+    ) -> None:
+        failure_payload = {
+            "failures": [
+                {
+                    "node_id": "tests/test_user.py::test_failure",
+                    "exception": {"type": "ValueError", "message": "bad value"},
+                    "frames": [
+                        {
+                            "path": "/Users/host/private/test_user.py",
+                            "line": 4,
+                            "function": "test_failure",
+                            "source": "assert token",
+                            "locals": [
+                                {
+                                    "name": "api_token",
+                                    "type": "str",
+                                    "repr": "raw-secret",
+                                    "redacted": True,
+                                    "truncated": False,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "failures_truncated": False,
+            "frames_truncated": False,
+            "locals_truncated": False,
+        }
+        backend = FakeBackend(
+            stdout=(
+                "trace\nSWMCP_FAILURES:" + json.dumps(failure_payload) + "\n"
+            ).encode(),
+            exit_code=1,
+        )
+        manager = TaskManager(
+            self.settings,
+            profile_configuration(
+                self.base,
+                tools=frozenset({"run_pytest"}),
+            ),
+            backend=backend,
+        )
+        server = create_server(self.settings, task_manager=manager)
+
+        async def exercise_pytest() -> None:
+            result = await server.call_tool("run_pytest", {})
+            self.assertFalse(result.is_error)
+            structured = result.structured_content
+            self.assertEqual(structured["status"], "failed")
+            frame = structured["failures"][0]["frames"][0]
+            self.assertEqual(frame["path"], "<external>")
+            self.assertEqual(frame["locals"][0]["repr"], "<redacted>")
+            self.assertNotIn("raw-secret", repr(structured))
+            self.assertNotIn("/Users/host", repr(structured))
+
+        asyncio.run(exercise_pytest())
+
+        malformed_backend = FakeBackend(stdout=b"not json", exit_code=1)
+        malformed_manager = TaskManager(
+            self.settings,
+            profile_configuration(
+                self.base,
+                tools=frozenset({"run_ruff"}),
+            ),
+            backend=malformed_backend,
+        )
+        malformed_server = create_server(self.settings, task_manager=malformed_manager)
+
+        async def exercise_ruff() -> None:
+            result = await malformed_server.call_tool("run_ruff", {})
+            self.assertFalse(result.is_error)
+            self.assertEqual(result.structured_content["diagnostics"], [])
+            self.assertIn("diagnostics_parser_error", result.structured_content)
+
+        asyncio.run(exercise_ruff())
+
+        unavailable_backend = FakeBackend(exit_code=127)
+        unavailable_manager = TaskManager(
+            self.settings,
+            profile_configuration(
+                self.base,
+                tools=frozenset({"run_python_script"}),
+            ),
+            backend=unavailable_backend,
+        )
+        unavailable_server = create_server(
+            self.settings, task_manager=unavailable_manager
+        )
+
+        async def exercise_unavailable() -> None:
+            result = await unavailable_server.call_tool(
+                "run_python_script", {"path": "tests/test_user.py"}
+            )
+            self.assertFalse(result.is_error)
+            self.assertEqual(
+                result.structured_content["status"], "capability_unavailable"
+            )
+            self.assertIn("capability_error", result.structured_content)
+
+        asyncio.run(exercise_unavailable())
 
 
 if __name__ == "__main__":

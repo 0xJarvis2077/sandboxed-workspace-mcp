@@ -345,8 +345,9 @@ class DiagnosticsTests(unittest.TestCase):
         frame = failure["frames"][0]
         self.assertEqual(frame["path"], "src/example.py")
         self.assertEqual(frame["line"], 42)
-        self.assertEqual(frame["locals"][0]["repr"], "super-secret")
+        self.assertEqual(frame["locals"][0]["repr"], "<redacted>")
         self.assertEqual(frame["locals"][0]["redacted"], True)
+        self.assertNotIn("super-secret", repr(result))
         self.assertEqual(failure["frames"][1]["path"], "<external>")
         self.assertNotIn("/Users/host", repr(result))
         self.assertNotIn("SWMCP_FAILURES", result["stdout"])
