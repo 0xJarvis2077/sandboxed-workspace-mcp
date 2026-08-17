@@ -293,7 +293,7 @@ SECURITY.md              # Security boundary, threat model, and residual risk
 ## Development and quality gates
 
 ```bash
-.venv/bin/python -m pip install -e ".[dev]" "mypy==1.20.2"
+.venv/bin/python -m pip install -e ".[dev]"
 .venv/bin/python scripts/install_hooks.py
 
 # Apply safe Ruff fixes and canonical formatting.

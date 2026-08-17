@@ -293,7 +293,7 @@ SECURITY.md              # 安全边界、威胁模型和剩余风险
 ## 开发和质量门禁
 
 ```bash
-.venv/bin/python -m pip install -e ".[dev]" "mypy==1.20.2"
+.venv/bin/python -m pip install -e ".[dev]"
 .venv/bin/python scripts/install_hooks.py
 
 # 自动修复 Ruff 可安全修复的问题并统一格式化
