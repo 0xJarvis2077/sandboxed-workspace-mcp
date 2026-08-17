@@ -87,6 +87,17 @@ python -m venv .venv
 
 每个公开工具都显式声明 `readOnlyHint`、`destructiveHint`、`idempotentHint` 和 `openWorldHint`，用于帮助 MCP client/agent 理解工具行为。它们只是行为提示，不是授权或安全机制；实际安全仍由 workspace policy、SHA/version checks、回收站事务、OAuth scopes、execution profiles 和 sandbox 强制执行。
 
+## 内置 Resources
+
+Server 通过 MCP Resources 自描述当前可用能力和推荐工作流，Agent 不需要先记住完整 README 或 profile taxonomy。`internal://tool-catalog` 只列当前实际注册的公开 Tools，并直接复用 Tool Contract Registry；完整单工具 contract 通过 `internal://tool-info/{name}` 按需读取，未注册能力不会通过 self-description 暴露。
+
+- `internal://instructions`：当前 Server 的安全操作原则和能力感知使用指南。
+- `internal://tool-catalog`：机器可消费、按 tool name 稳定排序的当前 Tool 摘要。
+- `internal://tool-info/{name}`：一个当前已注册 Tool 的完整 input/output contract 与 annotations。
+- `internal://workflows/edit-file`、`debug-python`、`recover-file`、`review-changes`：面向 Agent 的紧凑工作流。
+
+README 只提供入口概览；详细 SOP 由这些 Resources 自己承担，并随当前实际 capability surface 生成。
+
 `run_shell` 只接受 `pwd`、`ls`、`cat`、`head`、`tail`、`tree`、`grep`、受限 `rg`、`find`、`wc`、`sed` 以及固定 Git 查询。管道、重定向、命令替换、环境变量展开和未列出的参数都会被拒绝。
 
 Git review 可使用两个只读视图：
@@ -178,6 +189,19 @@ profile 是 operator 的安全与环境策略，不是 agent 必须记住的工�
 
 调用方不能覆盖环境变量、镜像、网络、挂载、端口、资源限制或容器 ID。每次执行都会先建立过滤后的临时快照；快照修改不会写回真实工作区。
 
+### 构建和切换 Execution image
+
+`examples/Dockerfile.task` 是标准 execution image 的来源，预装 pytest、coverage、Ruff、mypy 等离线执行工具。修改 Dockerfile 并不会自动更新已经运行的 MCP；operator 必须显式重建镜像、取得不可变 image ID/digest、更新工作区外的 execution profile 配置，然后重启 MCP 服务。例如：
+
+```bash
+docker build -f examples/Dockerfile.task -t sandboxed-workspace-mcp-execution:local .
+docker image inspect sandboxed-workspace-mcp-execution:local --format '{{.Id}}'
+```
+
+将输出的完整 `sha256:...` 写入外部 `execution-profiles.json` 的 `image` 字段，再重启服务。可用 `list_execution_profiles` 检查服务当前公开的 profile/capability，并用 `run_mypy` 或 `run_command` 执行 `python -m mypy --version` 验证新镜像已经生效。运行中的 execution container 保持无网络；依赖应在 image build 阶段安装，而不是在 agent 执行期间临时 `pip install`。
+
+CI 会实际构建该 Dockerfile，并在 `--network none` 的运行容器中执行 `python -m mypy --version`，防止“Dockerfile 声称支持 mypy，但发布镜像缺失”的漂移。
+
 ## 只读 profile 的临时缓存
 
 固定容器环境把常见缓存放在受 64 MiB tmpfs 限制的 `/tmp`：
@@ -232,7 +256,8 @@ src/sandboxed_workspace_mcp/
   git_reader.py         # 有界只读 Git 适配器
   git_writer.py         # 受控初始化、首次基线和 revision blob 读取
   service.py            # run_shell 语法和应用编排
-  server.py             # MCP 工具注册、scope 检查和认证 challenge
+  resources.py          # Self-description Resource 纯构建逻辑和工作流
+  server.py             # MCP 工具/Resource 注册、scope 检查和认证 challenge
   cli.py                # stdio/HTTP 启动和 OAuth 配置
   task_config.py        # 工作区外 task/profile JSON 的验证与冻结
   python_execution.py   # 结构化 Python/pytest/analysis argv 编译

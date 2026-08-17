@@ -8,6 +8,8 @@ The server is not a container, operating-system sandbox, malware scanner, or mul
 
 By default the server does not execute project code. Optional task execution is disabled unless the operator supplies a trusted task configuration outside the workspace. That configuration is an explicit execution grant and cannot be read or modified through workspace tools.
 
+Self-description MCP Resources expose only static operating guidance and metadata for tools that are currently registered on the public server surface. They reuse the public Tool Contract Registry and do not expose private task/profile configuration, host paths, container image details, secrets, or capabilities that are not currently registered.
+
 ## Blocked and ignored paths
 
 Blocked paths are a security policy enforced in the core workspace layer for explicit and discovered paths, including absolute paths inside the root and symlink aliases. Default rules protect `.git`, `.env` variants, common private-key names, and private-key container extensions. Additional validated root-relative patterns can only extend the defaults.

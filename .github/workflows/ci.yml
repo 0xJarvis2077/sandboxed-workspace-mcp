@@ -30,3 +30,18 @@ jobs:
       - run: python -m compileall -q server.py src tests
       - run: python -m build
       - run: python scripts/wheel_smoke.py dist/*.whl
+
+  execution-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: >-
+          docker build
+          --file examples/Dockerfile.task
+          --tag sandboxed-workspace-mcp-execution:ci
+          .
+      - run: >-
+          docker run --rm --network none
+          sandboxed-workspace-mcp-execution:ci
+          python -m mypy --version

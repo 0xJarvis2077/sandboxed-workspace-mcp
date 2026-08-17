@@ -11,6 +11,9 @@ class ExecutionImageCapabilityTests(unittest.TestCase):
         self.dockerfile = (
             self.project_root / "examples" / "Dockerfile.task"
         ).read_text(encoding="utf-8")
+        self.ci = (self.project_root / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
 
     def test_standard_image_smoke_check_covers_declared_analysis_capabilities(
         self,
@@ -49,6 +52,13 @@ class ExecutionImageCapabilityTests(unittest.TestCase):
         for profile_name in ("python-safe", "coding"):
             with self.subTest(profile=profile_name):
                 self.assertTrue(required.issubset(profiles[profile_name]["tools"]))
+
+    def test_ci_builds_and_offline_smoke_checks_execution_image(self) -> None:
+        self.assertIn("execution-image:", self.ci)
+        self.assertIn("docker build", self.ci)
+        self.assertIn("examples/Dockerfile.task", self.ci)
+        self.assertIn("docker run --rm --network none", self.ci)
+        self.assertIn("python -m mypy --version", self.ci)
 
 
 if __name__ == "__main__":

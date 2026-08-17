@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, Literal
 
@@ -17,13 +18,14 @@ from mcp.server.auth.middleware.bearer_auth import (
     RequireAuthMiddleware,
 )
 from mcp.server.auth.provider import TokenVerifier
-from mcp.types import CallToolResult, TextContent
+from mcp.server.mcpserver.exceptions import ResourceNotFoundError
+from mcp.types import CallToolResult, TextContent, Tool
 from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from . import __version__, tool_contracts
+from . import __version__, resources, tool_contracts
 from .config import Settings
 from .oauth import JWTTokenVerifier, OAuthSettings
 from .service import SandboxedWorkspace
@@ -873,5 +875,81 @@ def create_server(
                 """Stop one service command tracked by this server instance."""
 
                 return await asyncio.to_thread(task_manager.stop_task, task_id)
+
+    async def public_tools() -> list[Tool]:
+        return await server.list_tools()
+
+    @server.resource(
+        "internal://instructions",
+        name="Workspace Instructions",
+        description="Safe operating guidance for agents using this workspace server.",
+        mime_type=resources.MARKDOWN_MIME,
+    )
+    async def workspace_instructions() -> str:
+        tools = await public_tools()
+        return resources.build_instructions(tool.name for tool in tools)
+
+    @server.resource(
+        "internal://tool-catalog",
+        name="Tool Catalog",
+        description="Machine-readable summary of the currently public MCP tools.",
+        mime_type=resources.JSON_MIME,
+    )
+    async def tool_catalog() -> dict[str, object]:
+        return resources.build_tool_catalog(await public_tools())
+
+    workflow_metadata = {
+        "edit-file": (
+            "Edit File Workflow",
+            "Version-guarded workflow for making precise workspace edits.",
+        ),
+        "debug-python": (
+            "Debug Python Workflow",
+            "Structured workflow for investigating and verifying Python failures.",
+        ),
+        "recover-file": (
+            "Recover File Workflow",
+            "Safe recycle-bin discovery and non-overwriting file recovery workflow.",
+        ),
+        "review-changes": (
+            "Review Changes Workflow",
+            (
+                "Workflow for reviewing diffs and verification without reverting "
+                "user work."
+            ),
+        ),
+    }
+
+    def make_workflow_resource(
+        workflow_name: str,
+    ) -> Callable[[], Awaitable[str]]:
+        async def workflow_resource() -> str:
+            tools = await public_tools()
+            return resources.get_workflow(workflow_name, (tool.name for tool in tools))
+
+        return workflow_resource
+
+    for workflow_name, (resource_name, description) in workflow_metadata.items():
+        server.resource(
+            f"internal://workflows/{workflow_name}",
+            name=resource_name,
+            description=description,
+            mime_type=resources.MARKDOWN_MIME,
+        )(make_workflow_resource(workflow_name))
+
+    @server.resource(
+        resources.TOOL_INFO_URI_TEMPLATE,
+        name="Tool Information",
+        description="Full contract for one currently public MCP tool.",
+        mime_type=resources.JSON_MIME,
+    )
+    async def tool_info(name: str) -> dict[str, object]:
+        if not resources.valid_tool_name(name):
+            raise ResourceNotFoundError("Unknown resource")
+        by_name = {tool.name: tool for tool in await public_tools()}
+        tool = by_name.get(name)
+        if tool is None:
+            raise ResourceNotFoundError("Unknown resource")
+        return resources.build_tool_info(tool)
 
     return server
