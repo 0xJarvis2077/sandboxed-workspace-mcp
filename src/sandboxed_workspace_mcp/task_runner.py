@@ -337,7 +337,7 @@ class WorkspaceGrowthMonitor:
             with os.scandir(directory) as entries:
                 for entry in entries:
                     if self._stop.is_set():
-                        return False
+                        return _WorkspaceUsage(False, 0.0)
                     metadata = entry.stat(follow_symlinks=False)
                     if entry.is_symlink():
                         continue

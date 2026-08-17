@@ -1010,8 +1010,24 @@ class GitWriter:
             raise GitError("Git returned an invalid object id")
         return mode, object_type, blob_oid, stored_path
 
-    def _run_text(self, args: list[str], **kwargs: object) -> str:
-        return self._run(args, **kwargs).decode("utf-8", errors="replace")
+    def _run_text(
+        self,
+        args: list[str],
+        *,
+        cwd: Path | None = None,
+        stdin: bytes | None = None,
+        environment: dict[str, str] | None = None,
+        output_limit: int | None = None,
+        allow_failure: bool = False,
+    ) -> str:
+        return self._run(
+            args,
+            cwd=cwd,
+            stdin=stdin,
+            environment=environment,
+            output_limit=output_limit,
+            allow_failure=allow_failure,
+        ).decode("utf-8", errors="replace")
 
     def _run(
         self,

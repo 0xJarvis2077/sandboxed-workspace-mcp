@@ -927,6 +927,79 @@ class GitWriterTests(unittest.TestCase):
         with self.assertRaisesRegex(GitError, "max_file_size"):
             sized_writer.create_baseline()
 
+    def test_baseline_rejects_all_mutation_lock_locations(self) -> None:
+        lock_paths = (
+            Path("index.lock"),
+            Path("HEAD.lock"),
+            Path("refs/heads/main.lock"),
+        )
+        for relative_lock in lock_paths:
+            with (
+                self.subTest(lock=relative_lock),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                (root / "source.txt").write_text("source\n", encoding="utf-8")
+                writer = GitWriter(Settings.create(root, allow_git_writes=True))
+                writer.init()
+                lock = root / ".git" / relative_lock
+                lock.parent.mkdir(parents=True, exist_ok=True)
+                lock.touch()
+
+                with self.assertRaisesRegex(GitError, "mutation lock"):
+                    writer.create_baseline()
+
+                self.assertFalse(
+                    subprocess.run(
+                        [shutil.which("git") or "git", "rev-parse", "--verify", "HEAD"],
+                        cwd=root,
+                        capture_output=True,
+                    ).returncode
+                    == 0
+                )
+
+    def test_baseline_scan_entry_limit_and_nonregular_index_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "one.txt").write_text("one\n", encoding="utf-8")
+            (root / "two.txt").write_text("two\n", encoding="utf-8")
+            writer = GitWriter(
+                Settings.create(
+                    root,
+                    allow_git_writes=True,
+                    max_scan_entries=1,
+                )
+            )
+            writer.init()
+            with self.assertRaisesRegex(GitError, "directory-entry limit"):
+                writer.create_baseline()
+
+        for kind in ("directory", "symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "source.txt").write_text("source\n", encoding="utf-8")
+                writer = GitWriter(Settings.create(root, allow_git_writes=True))
+                writer.init()
+                index = root / ".git" / "index"
+                if kind == "directory":
+                    index.mkdir()
+                else:
+                    target = root / "index-target"
+                    target.write_text("outside", encoding="utf-8")
+                    index.symlink_to(target)
+
+                with self.assertRaisesRegex(GitError, "index is not a regular file"):
+                    writer.create_baseline()
+
+    def test_baseline_rejects_detached_unborn_head_when_main_is_required(self) -> None:
+        self._git("init", "-q", "--initial-branch=main")
+        git_dir = self.root / ".git"
+        (git_dir / "HEAD").write_text("0" * 40 + "\n", encoding="ascii")
+        (self.root / "source.txt").write_text("source\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(GitError, "symbolic branch"):
+            self.writer.create_baseline()
+
     def test_historical_missing_and_oversized_blobs_are_bounded(self) -> None:
         (self.root / "large.txt").write_text("large\n", encoding="utf-8")
         self._git("init", "-q", "--initial-branch=main")

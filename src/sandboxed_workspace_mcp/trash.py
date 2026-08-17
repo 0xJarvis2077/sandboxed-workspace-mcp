@@ -13,7 +13,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import Any, Literal, TypedDict, overload
 
 from .access_policy import TRASH_DIRECTORY_NAME
 from .workspace import RestoreTargetError, Workspace, WorkspaceError
@@ -71,6 +71,13 @@ class _Store:
     staging: Path
     items: Path
     purging: Path
+
+
+class _RestoreIntent(TypedDict):
+    version: int
+    trash_id: str
+    destination_path: str
+    sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +400,12 @@ class TrashManager:
         raise TrashError(
             TRASH_OPERATION_CONFLICT, "could not allocate a unique trash id"
         )
+
+    @overload
+    def _ensure_store(self, *, create: Literal[True]) -> _Store: ...
+
+    @overload
+    def _ensure_store(self, *, create: Literal[False]) -> _Store | None: ...
 
     def _ensure_store(self, *, create: bool) -> _Store | None:
         root = self.workspace.root / TRASH_DIRECTORY_NAME
@@ -902,7 +915,7 @@ class TrashManager:
         path: Path,
         trash_id: str,
         metadata: dict[str, Any],
-    ) -> dict[str, str | int]:
+    ) -> _RestoreIntent:
         value = self._read_json(
             path, _METADATA_MAX_BYTES, details={"trash_id": trash_id}
         )
@@ -912,19 +925,18 @@ class TrashManager:
                 "restore intent has an invalid schema",
                 details={"trash_id": trash_id},
             )
+        destination = value.get("destination_path")
         if (
             value.get("version") != 1
             or value.get("trash_id") != trash_id
             or value.get("sha256") != metadata["sha256"]
-            or not isinstance(value.get("destination_path"), str)
+            or not isinstance(destination, str)
         ):
             raise TrashError(
                 TRASH_ITEM_CORRUPT,
                 "restore intent does not match metadata",
                 details={"trash_id": trash_id},
             )
-        destination = value["destination_path"]
-        assert isinstance(destination, str)
         try:
             self.workspace.safe_restore_target(destination, require_absent=False)
         except WorkspaceError as exc:

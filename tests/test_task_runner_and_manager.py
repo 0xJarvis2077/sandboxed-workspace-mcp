@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,7 @@ from sandboxed_workspace_mcp.task_runner import (
     TaskExecutionError,
     WorkspaceGrowthMonitor,
     _next_workspace_scan_delay,
+    _WorkspaceUsage,
     build_container_argv,
     run_container_task,
 )
@@ -319,6 +321,89 @@ class ContainerRunnerTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(results[0].status, "workspace_limit_exceeded")
         self.assertTrue(backend.handles[0].stopped)
+
+    def test_workspace_growth_monitor_cancellation_keeps_usage_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory)
+            (snapshot / "first.txt").write_bytes(b"1234")
+            (snapshot / "second.txt").write_bytes(b"5678")
+            request = ContainerRequest(
+                "sandboxed-workspace-mcp-growth-cancel",
+                snapshot,
+                TaskDefinition(
+                    "build",
+                    "run",
+                    PINNED_IMAGE,
+                    ("python",),
+                    workspace_access="writable",
+                ),
+                TaskLimits(
+                    max_workspace_file_bytes=1024,
+                    max_workspace_growth_bytes=1024,
+                ),
+            )
+            monitor = WorkspaceGrowthMonitor(request, ImmediateHandle())
+            real_scandir = os.scandir
+
+            class StoppingEntries:
+                def __init__(self, path: Path) -> None:
+                    self._entries = list(real_scandir(path))
+
+                def __enter__(self):
+                    return iter(self)
+
+                def __exit__(self, exc_type, exc, tb) -> None:
+                    return None
+
+                def __iter__(self):
+                    yield self._entries[0]
+                    monitor._stop.set()
+                    yield self._entries[1]
+
+            with patch(
+                "sandboxed_workspace_mcp.task_runner.os.scandir",
+                side_effect=lambda path: StoppingEntries(Path(path)),
+            ):
+                result = monitor._measure_usage()
+
+        self.assertIsInstance(result, _WorkspaceUsage)
+        self.assertFalse(result.exceeded)
+        self.assertEqual(result.pressure, 0.0)
+
+    def test_workspace_growth_monitor_ignores_transient_scan_oserror(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory)
+            request = ContainerRequest(
+                "sandboxed-workspace-mcp-growth-oserror",
+                snapshot,
+                TaskDefinition(
+                    "build",
+                    "run",
+                    PINNED_IMAGE,
+                    ("python",),
+                    workspace_access="writable",
+                ),
+                TaskLimits(
+                    max_workspace_file_bytes=1024,
+                    max_workspace_growth_bytes=1024,
+                ),
+            )
+            handle = ImmediateHandle()
+            monitor = WorkspaceGrowthMonitor(request, handle)
+            monitor._started = True
+
+            with (
+                patch.object(monitor, "_measure_usage", side_effect=OSError("gone")),
+                patch.object(
+                    monitor._stop,
+                    "wait",
+                    side_effect=lambda timeout: monitor._stop.set(),
+                ),
+            ):
+                monitor._run()
+
+        self.assertFalse(monitor.exceeded.is_set())
+        self.assertFalse(handle.stopped)
 
     def test_workspace_growth_monitor_delay_targets_a_bounded_duty_cycle(self) -> None:
         self.assertEqual(_next_workspace_scan_delay(0.01, 0.0), 0.25)
