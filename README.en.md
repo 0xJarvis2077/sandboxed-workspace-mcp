@@ -75,7 +75,7 @@ The compatibility entrypoint remains available:
 | Compatibility commands | `run_shell` | Closed read-only grammar; never starts a shell |
 | Fixed tasks | `list_tasks`, `run_task` | Operator-defined synchronous tasks |
 | Long-running tasks | `start_task`, `task_status`, `task_logs`, `stop_task` | Bounded stdout/stderr with cursor-based logs |
-| Execution profiles | `list_execution_profiles`, `python_version`, `run_pytest`, `run_python_script`, `run_command`, `start_command` | Authorized execution in a pinned image and disposable snapshot |
+| Execution profiles | `list_execution_profiles`, `python_version`, `run_pytest`, `run_ruff`, `run_mypy`, `run_pytest_coverage`, `run_python_script`, `run_command`, `start_command` | Authorized execution and structured diagnostics in a pinned image and disposable snapshot |
 
 Without a task config, the task manager, container backend, and dynamic execution tools are not created or registered.
 
@@ -112,14 +112,16 @@ Use `tree`, `read_file`, and `search_text` to locate code. For an existing file,
 
 ### Run tests or checks
 
-Prefer an operator-defined `run_task("test")`. For controlled exploration, use an authorized profile:
+Prefer an operator-defined `run_task("test")`. For controlled debugging and analysis, structured tools resolve a suitable profile server-side, so `list_execution_profiles` is normally capability discovery rather than a required preflight:
 
 ```python
-run_pytest(profile="python-debug", targets=["tests"], quiet=True)
-run_command(profile="coding", program="ruff", args=["check", "."])
+run_pytest(targets=["tests/test_auth.py"], max_failures=3, show_locals=True)
+run_ruff(paths=["src", "tests"])
+run_mypy(paths=["src"])
+run_pytest_coverage(targets=["tests"], branch=True, fail_under=85)
 ```
 
-`run_pytest` compiles its argv on the server and automatically places pytest cache at `/tmp/cache/pytest`. Generic `run_command`/`start_command` preserve caller argv; pass the cache option explicitly when invoking pytest directly:
+`run_pytest`, `run_ruff`, `run_mypy`, and `run_pytest_coverage` compile argv on the server, validate workspace paths, and return bounded structured diagnostics/failures. Pytest failure inspection includes the test, exception, workspace frames, and optional bounded locals with basic secret redaction. Generic `run_command`/`start_command` preserve caller argv and remain the escape hatch for project-specific probes, benchmarks, and uncommon analyzers:
 
 ```python
 run_command(
@@ -157,9 +159,14 @@ A task that must create workspace artifacts must explicitly use `"workspace_acce
 Copy [examples/execution-profiles.json](examples/execution-profiles.json) outside the workspace. A profile fixes its image, tool set, and workspace access:
 
 - `python_version`: runs `python --version` inside the container.
-- `run_pytest`: validates targets and compiles the pytest argv on the server.
+- `run_pytest`: validates targets, compiles pytest argv, and collects bounded failure/frame/local information.
+- `run_ruff`: runs a fixed Ruff check and returns JSON diagnostics; `fix=true` requires a writable profile.
+- `run_mypy`: runs fixed mypy arguments; `strict=true` only adds `--strict`.
+- `run_pytest_coverage`: runs pytest and coverage in one execution; data stays under `/tmp` and does not create workspace `.coverage`.
 - `run_python_script`: accepts one real workspace `.py` file.
 - `run_command`/`start_command`: require `allow_arbitrary_commands: true`; this grants arbitrary code execution inside the container.
+
+An execution profile is operator security/environment policy, not a tool taxonomy the agent must memorize. Without `profile`, a structured tool first uses the top-level `default_profile`, then a unique capability candidate; multiple remaining candidates produce an explicit ambiguous-profile error. `run_command` and `start_command` always require an explicit profile and `allow_arbitrary_commands=true`. `list_execution_profiles` remains available for capability discovery and operator inspection and marks the default profile.
 
 Callers cannot override environment, image, network, mounts, ports, resource limits, or container IDs. Every execution starts from a filtered temporary snapshot; snapshot changes are never written back to the real workspace.
 
@@ -220,7 +227,9 @@ src/sandboxed_workspace_mcp/
   server.py             # MCP tools, scope checks, and auth challenges
   cli.py                # stdio/HTTP startup and OAuth configuration
   task_config.py        # Trusted task/profile JSON validation and freezing
-  python_execution.py   # Structured Python/pytest argv compilation
+  python_execution.py   # Structured Python/pytest/analysis argv compilation
+  diagnostics.py        # Bounded Ruff/mypy/pytest/coverage result adapters
+  pytest_debug_plugin.py # Snapshot-injected controlled pytest failure collector
   command_execution.py  # Generic argv and workspace cwd validation
   task_snapshot.py      # Filtered bounded temporary snapshots
   task_runner.py        # Docker/Podman argv, pipes, and synchronous execution

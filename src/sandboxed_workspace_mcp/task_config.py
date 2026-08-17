@@ -25,6 +25,9 @@ EXECUTION_PROFILE_TOOLS = frozenset(
         "python_version",
         "run_pytest",
         "run_python_script",
+        "run_ruff",
+        "run_mypy",
+        "run_pytest_coverage",
         "run_command",
         "start_command",
     }
@@ -86,6 +89,7 @@ class TaskConfiguration:
     profiles: Mapping[str, ExecutionProfile] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    default_profile: str | None = None
 
 
 def load_task_config(
@@ -191,7 +195,7 @@ def _validate_config(raw: Any, source: Path) -> TaskConfiguration:
     value = _object(raw, "task config")
     _known_fields(
         value,
-        {"version", "runtime", "limits", "tasks", "profiles"},
+        {"version", "runtime", "limits", "tasks", "profiles", "default_profile"},
         "task config",
     )
     _required_fields(value, {"version", "runtime"}, "task config")
@@ -223,6 +227,19 @@ def _validate_config(raw: Any, source: Path) -> TaskConfiguration:
                 f"invalid profile name {name!r}; use 1-64 letters, digits, '_' or '-'"
             )
         profiles[name] = _validate_execution_profile(name, profile_value)
+    default_profile = value.get("default_profile")
+    if default_profile is not None:
+        if (
+            not isinstance(default_profile, str)
+            or _TASK_NAME.fullmatch(default_profile) is None
+        ):
+            raise TaskConfigurationError(
+                "default_profile must be a valid execution profile name"
+            )
+        if default_profile not in profiles:
+            raise TaskConfigurationError(
+                f"default_profile must name an existing profile: {default_profile}"
+            )
     if any(task.workspace_access == "writable" for task in tasks.values()) or any(
         profile.workspace_access == "writable" for profile in profiles.values()
     ):
@@ -247,6 +264,7 @@ def _validate_config(raw: Any, source: Path) -> TaskConfiguration:
         limits=limits,
         tasks=MappingProxyType(tasks),
         profiles=MappingProxyType(profiles),
+        default_profile=default_profile,
     )
 
 

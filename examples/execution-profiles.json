@@ -11,15 +11,32 @@
     "pids": 128,
     "max_concurrent_tasks": 1
   },
+  "default_profile": "coding",
   "profiles": {
-    "python-debug": {
+    "python-safe": {
       "image": "REPLACE_WITH_REPOSITORY_DIGEST_OR_FULL_LOCAL_SHA256_IMAGE_ID",
-      "tools": ["python_version", "run_pytest", "run_python_script"],
+      "tools": [
+        "python_version",
+        "run_pytest",
+        "run_python_script",
+        "run_ruff",
+        "run_mypy",
+        "run_pytest_coverage"
+      ],
       "workspace_access": "read-only"
     },
     "coding": {
       "image": "REPLACE_WITH_REPOSITORY_DIGEST_OR_FULL_LOCAL_SHA256_IMAGE_ID",
-      "tools": ["run_command", "start_command"],
+      "tools": [
+        "python_version",
+        "run_pytest",
+        "run_python_script",
+        "run_ruff",
+        "run_mypy",
+        "run_pytest_coverage",
+        "run_command",
+        "start_command"
+      ],
       "workspace_access": "read-only",
       "allow_arbitrary_commands": true
     }

@@ -102,9 +102,16 @@ _STRICT_TOOL_ARGUMENTS = {
             "exit_first",
             "no_capture",
             "traceback",
+            "show_locals",
+            "max_failures",
         }
     ),
     "run_python_script": frozenset({"profile", "path"}),
+    "run_ruff": frozenset({"profile", "paths", "fix"}),
+    "run_mypy": frozenset({"profile", "paths", "strict"}),
+    "run_pytest_coverage": frozenset(
+        {"profile", "targets", "keyword", "branch", "fail_under"}
+    ),
     "run_command": frozenset({"profile", "program", "args", "cwd"}),
     "start_command": frozenset({"profile", "program", "args", "cwd"}),
     "trash_file": frozenset({"path", "expected_sha256"}),
@@ -658,7 +665,7 @@ def create_server(
         ):
 
             @server.tool(annotations=TASK_EXECUTION)
-            async def python_version(profile: str) -> dict[str, object]:
+            async def python_version(profile: str | None = None) -> dict[str, object]:
                 """Read Python version inside an authorized pinned container image."""
 
                 cancellation = threading.Event()
@@ -679,7 +686,7 @@ def create_server(
 
             @server.tool(annotations=TASK_EXECUTION)
             async def run_pytest(
-                profile: str,
+                profile: str | None = None,
                 targets: list[str] | None = None,
                 keyword: str | None = None,
                 quiet: bool = False,
@@ -687,6 +694,8 @@ def create_server(
                 exit_first: bool = False,
                 no_capture: bool = False,
                 traceback: Literal["auto", "short", "long"] = "auto",
+                show_locals: bool = False,
+                max_failures: int | None = None,
             ) -> dict[str, object]:
                 """Run structured targeted pytest in an authorized container profile."""
 
@@ -702,6 +711,8 @@ def create_server(
                         exit_first=exit_first,
                         no_capture=no_capture,
                         traceback=traceback,
+                        show_locals=show_locals,
+                        max_failures=max_failures,
                         cancellation_event=cancellation,
                     )
                 except asyncio.CancelledError:
@@ -714,7 +725,9 @@ def create_server(
         ):
 
             @server.tool(annotations=TASK_EXECUTION)
-            async def run_python_script(profile: str, path: str) -> dict[str, object]:
+            async def run_python_script(
+                path: str, profile: str | None = None
+            ) -> dict[str, object]:
                 """Execute one policy-checked workspace .py file without arguments."""
 
                 cancellation = threading.Event()
@@ -723,6 +736,88 @@ def create_server(
                         task_manager.run_python_script,
                         profile,
                         path,
+                        cancellation_event=cancellation,
+                    )
+                except asyncio.CancelledError:
+                    cancellation.set()
+                    raise
+
+        if any(
+            "run_ruff" in profile.tools
+            for profile in task_manager.configuration.profiles.values()
+        ):
+
+            @server.tool(annotations=TASK_EXECUTION)
+            async def run_ruff(
+                profile: str | None = None,
+                paths: list[str] | None = None,
+                fix: bool = False,
+            ) -> dict[str, object]:
+                """Run server-compiled Ruff checks with structured diagnostics."""
+
+                cancellation = threading.Event()
+                try:
+                    return await asyncio.to_thread(
+                        task_manager.run_ruff,
+                        profile,
+                        paths=paths,
+                        fix=fix,
+                        cancellation_event=cancellation,
+                    )
+                except asyncio.CancelledError:
+                    cancellation.set()
+                    raise
+
+        if any(
+            "run_mypy" in profile.tools
+            for profile in task_manager.configuration.profiles.values()
+        ):
+
+            @server.tool(annotations=TASK_EXECUTION)
+            async def run_mypy(
+                profile: str | None = None,
+                paths: list[str] | None = None,
+                strict: bool = False,
+            ) -> dict[str, object]:
+                """Run server-compiled mypy checks with structured diagnostics."""
+
+                cancellation = threading.Event()
+                try:
+                    return await asyncio.to_thread(
+                        task_manager.run_mypy,
+                        profile,
+                        paths=paths,
+                        strict=strict,
+                        cancellation_event=cancellation,
+                    )
+                except asyncio.CancelledError:
+                    cancellation.set()
+                    raise
+
+        if any(
+            "run_pytest_coverage" in profile.tools
+            for profile in task_manager.configuration.profiles.values()
+        ):
+
+            @server.tool(annotations=TASK_EXECUTION)
+            async def run_pytest_coverage(
+                profile: str | None = None,
+                targets: list[str] | None = None,
+                keyword: str | None = None,
+                branch: bool = False,
+                fail_under: float | None = None,
+            ) -> dict[str, object]:
+                """Run pytest and coverage in one disposable execution."""
+
+                cancellation = threading.Event()
+                try:
+                    return await asyncio.to_thread(
+                        task_manager.run_pytest_coverage,
+                        profile,
+                        targets=targets,
+                        keyword=keyword,
+                        branch=branch,
+                        fail_under=fail_under,
                         cancellation_event=cancellation,
                     )
                 except asyncio.CancelledError:

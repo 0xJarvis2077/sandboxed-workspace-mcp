@@ -159,6 +159,31 @@ class TaskConfigurationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             configuration.profiles["other"] = profile  # type: ignore[index]
 
+    def test_default_profile_is_validated_and_frozen(self) -> None:
+        value = self._valid()
+        value["profiles"] = {
+            "safe": {"image": PINNED_IMAGE, "tools": ["run_pytest"]},
+            "coding": {
+                "image": PINNED_IMAGE,
+                "tools": ["run_pytest", "run_command"],
+                "allow_arbitrary_commands": True,
+            },
+        }
+        value["default_profile"] = "coding"
+        configuration = load_task_config(
+            self._write(value), workspace_root=self.workspace
+        )
+        self.assertEqual(configuration.default_profile, "coding")
+
+        for invalid in ("missing", 1, True):
+            with self.subTest(invalid=invalid):
+                mutated = json.loads(json.dumps(value))
+                mutated["default_profile"] = invalid
+                with self.assertRaisesRegex(TaskConfigurationError, "default_profile"):
+                    load_task_config(
+                        self._write(mutated), workspace_root=self.workspace
+                    )
+
     def test_generic_command_profile_requires_explicit_arbitrary_code_grant(
         self,
     ) -> None:
