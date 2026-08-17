@@ -608,6 +608,48 @@ class ContainerRunnerTests(unittest.TestCase):
         self.assertEqual(start_failed.status, "start_failed")
         self.assertIn("runtime unavailable", start_failed.stderr)
 
+    def test_monitor_start_failure_cleans_up_started_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            backend = FakeBackend(blocking=True)
+            request = ContainerRequest(
+                "workspace-guard-mcp-monitor-start-failure",
+                Path(directory),
+                TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
+                TaskLimits(timeout_seconds=1, max_output_bytes=1024),
+            )
+            with patch.object(
+                WorkspaceGrowthMonitor,
+                "start",
+                side_effect=RuntimeError("thread unavailable"),
+            ):
+                result = run_container_task(backend, request)
+
+        self.assertEqual(result.status, "start_failed")
+        self.assertIn("workspace monitor start failure", result.stderr)
+        self.assertTrue(backend.handles[0].stopped)
+        self.assertTrue(backend.handles[0].closed)
+
+    def test_cleanup_failure_does_not_mask_completed_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            backend = FakeBackend(exit_code=0)
+            request = ContainerRequest(
+                "workspace-guard-mcp-cleanup-failure",
+                Path(directory),
+                TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
+                TaskLimits(timeout_seconds=1, max_output_bytes=1024),
+            )
+            with patch.object(
+                ImmediateHandle,
+                "close",
+                side_effect=RuntimeError("pipe cleanup failed"),
+            ):
+                result = run_container_task(backend, request)
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("container cleanup failure", result.stderr)
+        self.assertIn("pipe cleanup failed", result.stderr)
+
     def test_timeout_and_output_overflow_stop_the_tracked_handle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             task = TaskDefinition("test", "run", PINNED_IMAGE, ("python",))
