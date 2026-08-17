@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from mcp.types import CallToolResult
+
 from sandboxed_workspace_mcp import server as server_module
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.server import create_server
@@ -43,6 +45,28 @@ class ToolContractTests(unittest.TestCase):
                     "openWorldHint",
                 ):
                     self.assertIsInstance(annotations[name], bool)
+
+    def test_call_tool_result_preserves_mcp_wire_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            (workspace / "sample.txt").write_text("sample", encoding="utf-8")
+            server = create_server(Settings.create(root, allow_trash=True))
+            result = asyncio.run(
+                server.call_tool(
+                    "trash_file",
+                    {"path": "sample.txt", "expected_sha256": "0" * 64},
+                )
+            )
+
+        self.assertIsInstance(result, CallToolResult)
+        assert isinstance(result, CallToolResult)
+        self.assertTrue(result.is_error)
+        self.assertIsNotNone(result.structured_content)
+        wire = result.model_dump(by_alias=True)
+        self.assertTrue(wire["isError"])
+        self.assertIsNotNone(wire["structuredContent"])
+        self.assertNotIn("is_error", wire)
+        self.assertNotIn("structured_content", wire)
 
     def test_registry_names_are_unique_and_contracts_are_meaningful(self) -> None:
         self.assertEqual(len(TOOL_CONTRACTS), len(set(TOOL_CONTRACTS)))

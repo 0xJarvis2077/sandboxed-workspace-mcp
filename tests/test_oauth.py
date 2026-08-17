@@ -12,8 +12,10 @@ from unittest.mock import AsyncMock, patch
 import jwt
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm
+from mcp.server import MCPServer
 from mcp.server.auth.provider import AccessToken
 from mcp.server.mcpserver.exceptions import ResourceNotFoundError
+from starlette.applications import Starlette
 
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.oauth import (
@@ -503,6 +505,7 @@ class OAuthServerTests(unittest.TestCase):
             token_verifier=verifier,
         )
         app = server.streamable_http_app(streamable_http_path="/mcp", host="127.0.0.1")
+        self.assertIsInstance(app, Starlette)
 
         status, headers, body = asyncio.run(
             _asgi_request(app, "GET", "/.well-known/oauth-protected-resource")
@@ -525,6 +528,37 @@ class OAuthServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 401)
         self.assertNotIn(secret_token, repr((headers, body)))
+
+    def test_streamable_http_app_forwards_current_sdk_parameters(self) -> None:
+        server = create_server(Settings.create(self.root, allow_writes=False))
+        parent_app = Starlette()
+        with patch.object(
+            MCPServer,
+            "streamable_http_app",
+            return_value=parent_app,
+        ) as parent:
+            app = server.streamable_http_app(
+                streamable_http_path="/custom-mcp",
+                json_response=True,
+                stateless_http=True,
+                event_store=None,
+                retry_interval=17,
+                max_request_body_size=12345,
+                transport_security=None,
+                host="localhost",
+            )
+
+        self.assertIs(app, parent_app)
+        parent.assert_called_once_with(
+            streamable_http_path="/custom-mcp",
+            json_response=True,
+            stateless_http=True,
+            event_store=None,
+            retry_interval=17,
+            max_request_body_size=12345,
+            transport_security=None,
+            host="localhost",
+        )
 
 
 if __name__ == "__main__":

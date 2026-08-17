@@ -10,7 +10,7 @@ results.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
@@ -470,10 +470,10 @@ def _annotations(
     open_world: bool = False,
 ) -> ToolAnnotations:
     return ToolAnnotations(
-        readOnlyHint=read_only,
-        destructiveHint=destructive,
-        idempotentHint=idempotent,
-        openWorldHint=open_world,
+        read_only_hint=read_only,
+        destructive_hint=destructive,
+        idempotent_hint=idempotent,
+        open_world_hint=open_world,
     )
 
 
@@ -872,7 +872,7 @@ def git_files_payload(text: str) -> dict[str, object]:
     return {"files": files}
 
 
-_PROJECT_INFO_FIELDS = {
+_PROJECT_INFO_FIELDS: Mapping[str, tuple[str, Callable[[str], object]]] = {
     "Exists": ("exists", lambda value: value == "True"),
     "Writable": ("writable", lambda value: value == "True"),
     "Mode": ("mode", str),
@@ -975,6 +975,25 @@ def _git_status_from_text(text: str) -> dict[str, object]:
     return {"text": text, "clean": not entries, "entries": entries}
 
 
+def _validated_tool_int(value: object, *, field: str) -> int:
+    """Mirror MCP tool-layer integer coercions at this adapter boundary."""
+
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        raise ValueError(f"tool argument {field} must be an integer")
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise ValueError(f"tool argument {field} must be an integer") from exc
+    raise ValueError(f"tool argument {field} must be an integer")
+
+
 def adapt_tool_call_result(
     name: str,
     arguments: Mapping[str, object],
@@ -1034,7 +1053,7 @@ def adapt_tool_call_result(
         assert structured is not None
         payload = tree_payload(
             str(arguments.get("path", ".")),
-            int(arguments.get("max_depth", 4)),
+            _validated_tool_int(arguments.get("max_depth", 4), field="max_depth"),
             text,
             source_truncated=bool(structured.get("source_truncated", False)),
         )
@@ -1045,8 +1064,8 @@ def adapt_tool_call_result(
         payload = file_content_payload(
             str(arguments.get("path", "")),
             text,
-            int(arguments.get("start_line", 1)),
-            int(arguments.get("end_line", 0)),
+            _validated_tool_int(arguments.get("start_line", 1), field="start_line"),
+            _validated_tool_int(arguments.get("end_line", 0), field="end_line"),
             source_truncated=bool(structured.get("source_truncated", False)),
         )
     elif name == "write_file":
