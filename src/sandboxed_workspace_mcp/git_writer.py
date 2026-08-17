@@ -370,6 +370,7 @@ class GitWriter:
             "commit": resolved_commit,
             "blob": blob_oid,
             "content": content,
+            "source_truncated": False,
             "sha256": hashlib.sha256(data).hexdigest(),
             "size": len(data),
             "mode": mode,

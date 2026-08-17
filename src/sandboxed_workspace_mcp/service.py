@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shlex
 
+from .bounded_output import BoundedText
 from .config import Settings
 from .git_reader import GitReader
 from .git_writer import GitWriter
@@ -32,8 +33,8 @@ class SandboxedWorkspace:
         self.git_writer = git_writer or GitWriter(settings)
         self.trash = TrashManager(self.workspace)
 
-    def run_shell(self, command: str) -> str:
-        """Parse a tiny shell-like grammar without invoking a real shell."""
+    def run_shell_result(self, command: str) -> BoundedText:
+        """Parse the safe shell grammar and preserve source truncation provenance."""
 
         if not command or not command.strip():
             raise CommandError("empty command")
@@ -51,44 +52,48 @@ class SandboxedWorkspace:
         program = args[0]
         if program == "pwd":
             self._require_arity(args, 1, "pwd")
-            return str(self.settings.root)
+            return BoundedText(str(self.settings.root), False)
 
         if program == "ls":
-            return self._run_ls(args)
+            return self._run_ls_result(args)
 
         if program == "cat":
             self._require_arity(args, 2, "cat <file>")
-            return self.workspace.read_file(args[1])
+            result = self.workspace.read_file_result(args[1])
+            return BoundedText(result.text, result.source_truncated)
 
         if program == "head":
             path, count = self._file_and_line_count(args, "head")
-            return self.workspace.read_file(path, start_line=1, end_line=count)
+            result = self.workspace.read_file_result(path, start_line=1, end_line=count)
+            return BoundedText(result.text, result.source_truncated)
 
         if program == "tail":
             path, count = self._file_and_line_count(args, "tail")
-            return self.workspace.tail_file(path, count)
+            result = self.workspace.tail_file_result(path, count)
+            return BoundedText(result.text, result.source_truncated)
 
         if program == "tree":
-            return self._run_tree(args)
+            return self._run_tree_result(args)
 
         if program == "grep":
             self._require_arity(args, 3, "grep <text> <file>")
-            return self.workspace.grep_file(args[1], args[2])
+            result = self.workspace.grep_file_result(args[1], args[2])
+            return BoundedText(result.text, result.source_truncated)
 
         if program == "rg":
-            return self._run_rg(args)
+            return self._run_rg_result(args)
 
         if program == "find":
-            return self._run_find(args)
+            return self._run_find_result(args)
 
         if program == "wc":
-            return self._run_wc(args)
+            return BoundedText(self._run_wc(args), False)
 
         if program == "sed":
-            return self._run_sed(args)
+            return self._run_sed_result(args)
 
         if program == "git":
-            return self._run_git(args)
+            return BoundedText(self._run_git(args), False)
 
         raise CommandError(
             f"command is not allowed: {program}; allowed commands are "
@@ -96,7 +101,12 @@ class SandboxedWorkspace:
             "policy-bounded git queries"
         )
 
-    def _run_ls(self, args: list[str]) -> str:
+    def run_shell(self, command: str) -> str:
+        """Parse a tiny shell-like grammar without invoking a real shell."""
+
+        return self.run_shell_result(command).text
+
+    def _run_ls_result(self, args: list[str]) -> BoundedText:
         path = "."
         path_seen = False
         options_done = False
@@ -114,9 +124,10 @@ class SandboxedWorkspace:
                 raise CommandError("usage: ls [-alh1] [path]")
             path = token
             path_seen = True
-        return self.workspace.list_directory(path)
+        result = self.workspace.list_directory_result(path)
+        return BoundedText(result.text, result.source_truncated)
 
-    def _run_tree(self, args: list[str]) -> str:
+    def _run_tree_result(self, args: list[str]) -> BoundedText:
         path = "."
         depth = 4
         remaining = args[1:]
@@ -127,9 +138,10 @@ class SandboxedWorkspace:
             raise CommandError("usage: tree [-L depth] [path]")
         if remaining:
             path = remaining[0]
-        return self.workspace.tree(path, max_depth=depth)
+        result = self.workspace.tree_result(path, max_depth=depth)
+        return BoundedText(result.text, result.source_truncated)
 
-    def _run_rg(self, args: list[str]) -> str:
+    def _run_rg_result(self, args: list[str]) -> BoundedText:
         files_only = False
         ignore_case = False
         smart_case = False
@@ -192,11 +204,12 @@ class SandboxedWorkspace:
                 )
             if len(positional) > 1:
                 raise CommandError("usage: rg --files [-g GLOB] [path]")
-            return self.workspace.find_paths(
+            paths_result = self.workspace.find_paths_result(
                 positional[0] if positional else ".",
                 kind="file",
                 path_glob=path_glob,
             )
+            return BoundedText(paths_result.text, paths_result.source_truncated)
 
         if not 1 <= len(positional) <= 2:
             raise CommandError(
@@ -209,7 +222,7 @@ class SandboxedWorkspace:
         effective_ignore_case = ignore_case or (
             smart_case and not any(character.isupper() for character in pattern)
         )
-        return self.workspace.search_pattern(
+        search_result = self.workspace.search_pattern_result(
             pattern,
             positional[1] if len(positional) == 2 else ".",
             fixed_strings=fixed_strings,
@@ -217,8 +230,9 @@ class SandboxedWorkspace:
             line_numbers=line_numbers,
             path_glob=path_glob,
         )
+        return BoundedText(search_result.text, search_result.truncated)
 
-    def _run_find(self, args: list[str]) -> str:
+    def _run_find_result(self, args: list[str]) -> BoundedText:
         remaining = args[1:]
         path = "."
         if remaining and not remaining[0].startswith("-"):
@@ -249,9 +263,10 @@ class SandboxedWorkspace:
                 name = value
             index += 2
 
-        return self.workspace.find_paths(
+        result = self.workspace.find_paths_result(
             path, max_depth=max_depth, kind=kind, name=name
         )
+        return BoundedText(result.text, result.source_truncated)
 
     def _run_wc(self, args: list[str]) -> str:
         self._require_arity(args, 3, "wc -l|-w|-c <file>")
@@ -261,7 +276,7 @@ class SandboxedWorkspace:
             raise CommandError("wc only accepts one of -l, -w, or -c")
         return f"{self.workspace.count_file(args[2], metric)} {args[2]}"
 
-    def _run_sed(self, args: list[str]) -> str:
+    def _run_sed_result(self, args: list[str]) -> BoundedText:
         self._require_arity(args, 4, "sed -n '<start>[,<end>]p' <file>")
         if args[1] != "-n":
             raise CommandError("sed only accepts -n range printing")
@@ -272,7 +287,10 @@ class SandboxedWorkspace:
         end = self._bounded_line_number(match.group(2) or match.group(1))
         if end < start:
             raise CommandError("sed range end is before its start")
-        return self.workspace.read_file(args[3], start_line=start, end_line=end)
+        result = self.workspace.read_file_result(
+            args[3], start_line=start, end_line=end
+        )
+        return BoundedText(result.text, result.source_truncated)
 
     def _run_git(self, args: list[str]) -> str:
         if len(args) < 2:

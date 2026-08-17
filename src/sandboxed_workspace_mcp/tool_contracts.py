@@ -20,7 +20,6 @@ from pydantic import BaseModel, ConfigDict, RootModel
 
 from .result_cache import ResultCache
 from .result_presentation import externalize_tool_payload
-from .workspace import TRUNCATION_MARKER
 
 
 class PublicResultModel(BaseModel):
@@ -765,7 +764,9 @@ def get_tool_contract(name: str) -> ToolContract:
         raise KeyError(f"missing MCP tool contract: {name}") from exc
 
 
-def directory_list_payload(path: str, text: str) -> dict[str, object]:
+def directory_list_payload(
+    path: str, text: str, *, source_truncated: bool
+) -> dict[str, object]:
     entries: list[str] = []
     diagnostics: list[str] = []
     for line in text.splitlines():
@@ -779,19 +780,19 @@ def directory_list_payload(path: str, text: str) -> dict[str, object]:
         "path": path,
         "entries": entries,
         "diagnostics": diagnostics,
-        "truncated": any("return limit reached" in line for line in diagnostics)
-        or TRUNCATION_MARKER.strip() in text,
+        "truncated": source_truncated,
     }
 
 
-def tree_payload(path: str, max_depth: int, text: str) -> dict[str, object]:
+def tree_payload(
+    path: str, max_depth: int, text: str, *, source_truncated: bool
+) -> dict[str, object]:
     return {
         "path": path,
         "max_depth": max_depth,
         "text": text,
-        "truncated": "tree return limit reached" in text
-        or "tree scan budget exhausted" in text
-        or TRUNCATION_MARKER.strip() in text,
+        "source_truncated": source_truncated,
+        "truncated": source_truncated,
     }
 
 
@@ -800,36 +801,30 @@ def file_content_payload(
     text: str,
     start_line: int,
     end_line: int,
+    *,
+    source_truncated: bool,
 ) -> dict[str, object]:
     return {
         "path": path,
         "content": text,
         "start_line": max(start_line, 1),
         "end_line": end_line if end_line > 0 else None,
-        "truncated": TRUNCATION_MARKER.strip() in text,
+        "source_truncated": source_truncated,
+        "truncated": source_truncated,
     }
 
 
 _SEARCH_LINE = re.compile(r"^(?P<path>.+?):(?P<line>[0-9]+): (?P<text>.*)$")
 
 
-def search_payload(text: str) -> dict[str, object]:
+def search_payload(
+    text: str, *, truncated: bool, stop_reason: str | None
+) -> dict[str, object]:
     matches: list[dict[str, object]] = []
     diagnostics: list[str] = []
-    stop_reason: str | None = None
     for line in text.splitlines():
-        if line.startswith("... ") or line == TRUNCATION_MARKER.strip():
+        if line.startswith("... "):
             diagnostics.append(line)
-            if "return limit reached" in line:
-                stop_reason = "result_limit"
-            elif "byte budget exhausted" in line:
-                stop_reason = "byte_budget"
-            elif "time budget exhausted" in line:
-                stop_reason = "time_budget"
-            elif "scan budget exhausted" in line:
-                stop_reason = "scan_budget"
-            elif "OUTPUT TRUNCATED" in line:
-                stop_reason = "output_limit"
             continue
         match = _SEARCH_LINE.match(line)
         if match is None:
@@ -845,17 +840,17 @@ def search_payload(text: str) -> dict[str, object]:
         )
     return {
         "matches": matches,
-        "truncated": stop_reason is not None,
+        "truncated": truncated,
         "stop_reason": stop_reason,
         "diagnostics": diagnostics,
     }
 
 
-def git_text_payload(text: str) -> dict[str, object]:
+def git_text_payload(text: str, *, source_truncated: bool) -> dict[str, object]:
     return {
         "text": text,
-        "truncated": TRUNCATION_MARKER.strip() in text
-        or "workspace_diff output truncated" in text,
+        "source_truncated": source_truncated,
+        "truncated": source_truncated,
     }
 
 
@@ -1006,24 +1001,53 @@ def adapt_tool_call_result(
 
     text = _text_content(result)
     structured = _structured_mapping(result)
+    carrier_tools = {
+        "list_directory",
+        "tree",
+        "read_file",
+        "search_text",
+        "git_diff",
+        "workspace_diff",
+        "git_log",
+        "git_show",
+        "run_shell",
+    }
+    if name in carrier_tools and structured is not None:
+        carrier_text = structured.get("text")
+        if not isinstance(carrier_text, str):
+            raise ValueError(f"tool {name} internal carrier is missing text")
+        text = carrier_text
+        result.content = [TextContent(type="text", text=text)]
+
     payload: Mapping[str, object]
 
     if name == "project_info":
         payload = project_info_payload(text)
     elif name == "list_directory":
-        payload = directory_list_payload(str(arguments.get("path", ".")), text)
+        assert structured is not None
+        payload = directory_list_payload(
+            str(arguments.get("path", ".")),
+            text,
+            source_truncated=bool(structured.get("source_truncated", False)),
+        )
     elif name == "tree":
+        assert structured is not None
         payload = tree_payload(
-            str(arguments.get("path", ".")), int(arguments.get("max_depth", 4)), text
+            str(arguments.get("path", ".")),
+            int(arguments.get("max_depth", 4)),
+            text,
+            source_truncated=bool(structured.get("source_truncated", False)),
         )
     elif name == "create_directory":
         payload = directory_mutation_payload(text)
     elif name == "read_file":
+        assert structured is not None
         payload = file_content_payload(
             str(arguments.get("path", "")),
             text,
             int(arguments.get("start_line", 1)),
             int(arguments.get("end_line", 0)),
+            source_truncated=bool(structured.get("source_truncated", False)),
         )
     elif name == "write_file":
         payload = write_file_payload(
@@ -1040,11 +1064,21 @@ def adapt_tool_call_result(
             str(arguments.get("content", "")),
         )
     elif name == "search_text":
-        payload = search_payload(text)
+        assert structured is not None
+        stop_reason = structured.get("stop_reason")
+        payload = search_payload(
+            text,
+            truncated=bool(structured.get("truncated", False)),
+            stop_reason=stop_reason if isinstance(stop_reason, str) else None,
+        )
     elif name == "git_status":
         payload = _git_status_from_text(text)
     elif name in {"git_diff", "workspace_diff", "git_log", "git_show", "run_shell"}:
-        payload = git_text_payload(text)
+        assert structured is not None
+        payload = git_text_payload(
+            text,
+            source_truncated=bool(structured.get("source_truncated", False)),
+        )
     elif name == "git_branch":
         payload = git_branch_payload(text, bool(arguments.get("show_current", False)))
     elif name == "git_rev_parse":

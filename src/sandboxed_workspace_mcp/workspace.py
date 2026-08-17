@@ -18,10 +18,11 @@ from pathlib import Path, PureWindowsPath
 from typing import BinaryIO
 
 from .access_policy import AccessPolicy, NarrowingPathFilter
+from .bounded_output import TRUNCATION_MARKER as TRUNCATION_MARKER
+from .bounded_output import BoundedText, truncate_utf8_result
 from .config import Settings
 from .safe_regex import SafeRegex
 
-TRUNCATION_MARKER = "\n\n... OUTPUT TRUNCATED ..."
 _SEARCH_CHUNK_BYTES = 64 * 1024
 _PATH_LOCK_STRIPE_COUNT = 64
 
@@ -54,6 +55,23 @@ class _FileState:
     device: int
     inode: int
     mode: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceTextResult:
+    """Human-readable workspace text plus authoritative source truncation state."""
+
+    text: str
+    source_truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SearchTextResult:
+    """Rendered search output plus authoritative stop metadata."""
+
+    text: str
+    truncated: bool
+    stop_reason: str | None
 
 
 @dataclass(slots=True)
@@ -96,16 +114,7 @@ class _DirectoryEntry:
 def truncate_utf8(text: str, max_bytes: int) -> str:
     """Return text whose UTF-8 representation fits within ``max_bytes``."""
 
-    encoded = text.encode("utf-8")
-    if len(encoded) <= max_bytes:
-        return text
-
-    marker = TRUNCATION_MARKER.encode("utf-8")
-    if max_bytes <= len(marker):
-        return marker[:max_bytes].decode("utf-8", errors="ignore")
-
-    prefix = encoded[: max_bytes - len(marker)].decode("utf-8", errors="ignore")
-    return prefix + TRUNCATION_MARKER
+    return truncate_utf8_result(text, max_bytes).text
 
 
 class Workspace:
@@ -243,8 +252,11 @@ class Workspace:
             raise WorkspaceError("cannot render a path outside the workspace") from exc
         return "." if not relative.parts else relative.as_posix()
 
+    def truncate_result(self, text: str) -> BoundedText:
+        return truncate_utf8_result(text, self.settings.max_output_size)
+
     def truncate(self, text: str) -> str:
-        return truncate_utf8(text, self.settings.max_output_size)
+        return self.truncate_result(text).text
 
     def project_info(self) -> str:
         writable = self.settings.allow_writes and os.access(self.root, os.W_OK)
@@ -263,7 +275,7 @@ class Workspace:
             f"Trash byte limit: {self.settings.max_trash_bytes}"
         )
 
-    def list_directory(self, path: str = ".") -> str:
+    def list_directory_result(self, path: str = ".") -> WorkspaceTextResult:
         target = self._existing_directory(path)
         state = _ScanState()
         entries = self._scan_directory(
@@ -276,9 +288,16 @@ class Workspace:
 
         rendered = [self._render_list_entry(entry) for entry in entries]
         self._append_scan_diagnostics(rendered, state, "listing")
-        return self.truncate("\n".join(rendered) or "(empty directory)")
+        bounded = self.truncate_result("\n".join(rendered) or "(empty directory)")
+        return WorkspaceTextResult(
+            text=bounded.text,
+            source_truncated=bool(state.dropped) or bounded.truncated,
+        )
 
-    def tree(self, path: str = ".", max_depth: int = 4) -> str:
+    def list_directory(self, path: str = ".") -> str:
+        return self.list_directory_result(path).text
+
+    def tree_result(self, path: str = ".", max_depth: int = 4) -> WorkspaceTextResult:
         target = self._existing_directory(path)
         depth_limit = max(1, min(max_depth, self.settings.max_tree_depth))
         label = target.name or str(target)
@@ -337,7 +356,19 @@ class Workspace:
             result.append("... tree scan budget exhausted ...")
         if state.skipped:
             result.append(f"... tree skipped {state.skipped} inaccessible entries ...")
-        return self.truncate("\n".join(result))
+        bounded = self.truncate_result("\n".join(result))
+        return WorkspaceTextResult(
+            text=bounded.text,
+            source_truncated=(
+                return_truncated
+                or bool(state.dropped)
+                or state.exhausted
+                or bounded.truncated
+            ),
+        )
+
+    def tree(self, path: str = ".", max_depth: int = 4) -> str:
+        return self.tree_result(path, max_depth).text
 
     def create_directory(self, path: str) -> str:
         self._require_writable()
@@ -350,7 +381,9 @@ class Workspace:
             raise WorkspaceError(f"target is not a directory: {path}")
         return f"Directory ready: {self.relative_path(target)}"
 
-    def read_file(self, path: str, start_line: int = 1, end_line: int = 0) -> str:
+    def read_file_result(
+        self, path: str, start_line: int = 1, end_line: int = 0
+    ) -> WorkspaceTextResult:
         target = self.safe_path(path)
         text = self._read_text(target, errors="replace")
         lines = text.splitlines(keepends=True)
@@ -360,7 +393,14 @@ class Workspace:
             raise WorkspaceError("end_line is before start_line")
 
         selected = lines[first - 1 :] if end_line <= 0 else lines[first - 1 : end_line]
-        return self.truncate("".join(selected))
+        bounded = self.truncate_result("".join(selected))
+        return WorkspaceTextResult(
+            text=bounded.text,
+            source_truncated=bounded.truncated,
+        )
+
+    def read_file(self, path: str, start_line: int = 1, end_line: int = 0) -> str:
+        return self.read_file_result(path, start_line, end_line).text
 
     def read_file_bytes(self, path: str) -> bytes:
         """Read bounded bytes from one policy-approved, non-symlinked file."""
@@ -382,19 +422,25 @@ class Workspace:
         if end_line > 0 and end_line < first:
             raise WorkspaceError("end_line is before start_line")
         selected = lines[first - 1 :] if end_line <= 0 else lines[first - 1 : end_line]
+        bounded = self.truncate_result("".join(selected))
         return {
             "path": self.relative_path(target),
-            "content": self.truncate("".join(selected)),
+            "content": bounded.text,
+            "source_truncated": bounded.truncated,
             "sha256": state.sha256,
             "size": state.size,
             "mtime_ns": state.mtime_ns,
         }
 
-    def tail_file(self, path: str, line_count: int = 50) -> str:
+    def tail_file_result(self, path: str, line_count: int = 50) -> WorkspaceTextResult:
         target = self.safe_path(path)
         count = max(1, min(line_count, 1_000))
         lines = self._read_text(target, errors="replace").splitlines()
-        return self.truncate("\n".join(lines[-count:]))
+        bounded = self.truncate_result("\n".join(lines[-count:]))
+        return WorkspaceTextResult(bounded.text, bounded.truncated)
+
+    def tail_file(self, path: str, line_count: int = 50) -> str:
+        return self.tail_file_result(path, line_count).text
 
     def count_file(self, path: str, metric: str = "lines") -> int:
         """Count lines, words, or bytes in one policy-checked regular file."""
@@ -409,7 +455,7 @@ class Workspace:
             return len(data.decode("utf-8", errors="replace").split())
         raise WorkspaceError(f"unsupported count metric: {metric}")
 
-    def find_paths(
+    def find_paths_result(
         self,
         path: str = ".",
         *,
@@ -417,7 +463,7 @@ class Workspace:
         kind: str | None = None,
         name: str | None = None,
         path_glob: str | None = None,
-    ) -> str:
+    ) -> WorkspaceTextResult:
         """Return a bounded, non-following path listing below ``path``."""
 
         target = self.safe_path(path)
@@ -488,14 +534,38 @@ class Workspace:
                 break
 
         self._append_scan_diagnostics(results, state, "find")
-        return self.truncate("\n".join(results) or "No paths found.")
+        bounded = self.truncate_result("\n".join(results) or "No paths found.")
+        return WorkspaceTextResult(
+            bounded.text,
+            bool(state.dropped) or state.exhausted or bounded.truncated,
+        )
 
-    def grep_file(self, text: str, path: str, max_results: int = 500) -> str:
+    def find_paths(
+        self,
+        path: str = ".",
+        *,
+        max_depth: int | None = None,
+        kind: str | None = None,
+        name: str | None = None,
+        path_glob: str | None = None,
+    ) -> str:
+        return self.find_paths_result(
+            path,
+            max_depth=max_depth,
+            kind=kind,
+            name=name,
+            path_glob=path_glob,
+        ).text
+
+    def grep_file_result(
+        self, text: str, path: str, max_results: int = 500
+    ) -> WorkspaceTextResult:
         if not text:
             raise WorkspaceError("search text is empty")
         target = self.safe_path(path)
         matches: list[str] = []
         total_bytes = 0
+        source_truncated = False
 
         for line_number, line in enumerate(
             self._read_text(target, errors="replace").splitlines(), start=1
@@ -507,11 +577,44 @@ class Workspace:
             total_bytes += len(rendered.encode("utf-8")) + 1
             if len(matches) >= max_results:
                 matches.append("... results truncated ...")
+                source_truncated = True
                 break
             if total_bytes >= self.settings.max_output_size:
+                source_truncated = True
                 break
 
-        return self.truncate("\n".join(matches) or "No matches found.")
+        bounded = self.truncate_result("\n".join(matches) or "No matches found.")
+        return WorkspaceTextResult(bounded.text, source_truncated or bounded.truncated)
+
+    def grep_file(self, text: str, path: str, max_results: int = 500) -> str:
+        return self.grep_file_result(text, path, max_results).text
+
+    def search_text_result(
+        self,
+        text: str,
+        path: str = ".",
+        max_results: int = 200,
+        *,
+        ignore_case: bool = False,
+        cancellation_event: threading.Event | None = None,
+    ) -> SearchTextResult:
+        if not text:
+            raise WorkspaceError("search text is empty")
+
+        comparable_needle = text.casefold() if ignore_case else text
+
+        def matches(line: str, _budget: _SearchBudget) -> bool:
+            comparable = line.casefold() if ignore_case else line
+            return comparable_needle in comparable
+
+        return self._search_result(
+            matches,
+            path,
+            max_results,
+            cancellation_event=cancellation_event,
+            line_numbers=True,
+            path_glob=None,
+        )
 
     def search_text(
         self,
@@ -522,25 +625,15 @@ class Workspace:
         ignore_case: bool = False,
         cancellation_event: threading.Event | None = None,
     ) -> str:
-        if not text:
-            raise WorkspaceError("search text is empty")
-
-        comparable_needle = text.casefold() if ignore_case else text
-
-        def matches(line: str, _budget: _SearchBudget) -> bool:
-            comparable = line.casefold() if ignore_case else line
-            return comparable_needle in comparable
-
-        return self._search(
-            matches,
+        return self.search_text_result(
+            text,
             path,
             max_results,
+            ignore_case=ignore_case,
             cancellation_event=cancellation_event,
-            line_numbers=True,
-            path_glob=None,
-        )
+        ).text
 
-    def search_pattern(
+    def search_pattern_result(
         self,
         pattern: str,
         path: str = ".",
@@ -551,7 +644,7 @@ class Workspace:
         line_numbers: bool = False,
         path_glob: str | None = None,
         cancellation_event: threading.Event | None = None,
-    ) -> str:
+    ) -> SearchTextResult:
         """Search using a literal or the documented non-backtracking regex subset."""
 
         if not pattern:
@@ -569,10 +662,10 @@ class Workspace:
         else:
             expression = SafeRegex(pattern, ignore_case=ignore_case)
 
-            def matches(line: str, budget: _SearchBudget) -> bool:
-                return expression.search(line, should_stop=budget.should_stop)
+            def matches(line: str, _budget: _SearchBudget) -> bool:
+                return expression.search(line, should_stop=_budget.should_stop)
 
-        return self._search(
+        return self._search_result(
             matches,
             path,
             max_results,
@@ -580,6 +673,53 @@ class Workspace:
             line_numbers=line_numbers,
             path_glob=narrowing_filter,
         )
+
+    def search_pattern(
+        self,
+        pattern: str,
+        path: str = ".",
+        max_results: int = 200,
+        *,
+        fixed_strings: bool = False,
+        ignore_case: bool = False,
+        line_numbers: bool = False,
+        path_glob: str | None = None,
+        cancellation_event: threading.Event | None = None,
+    ) -> str:
+        return self.search_pattern_result(
+            pattern,
+            path,
+            max_results,
+            fixed_strings=fixed_strings,
+            ignore_case=ignore_case,
+            line_numbers=line_numbers,
+            path_glob=path_glob,
+            cancellation_event=cancellation_event,
+        ).text
+
+    def _search_result(
+        self,
+        matcher: Callable[[str, _SearchBudget], bool],
+        path: str,
+        max_results: int,
+        *,
+        cancellation_event: threading.Event | None,
+        line_numbers: bool,
+        path_glob: NarrowingPathFilter | None,
+    ) -> SearchTextResult:
+        if not self._search_capacity.acquire(blocking=False):
+            raise WorkspaceError("maximum concurrent search limit has been reached")
+        try:
+            return self._search_text_acquired_result(
+                matcher,
+                path,
+                max_results,
+                cancellation_event=cancellation_event,
+                line_numbers=line_numbers,
+                path_glob=path_glob,
+            )
+        finally:
+            self._search_capacity.release()
 
     def _search(
         self,
@@ -591,22 +731,16 @@ class Workspace:
         line_numbers: bool,
         path_glob: NarrowingPathFilter | None,
     ) -> str:
+        return self._search_result(
+            matcher,
+            path,
+            max_results,
+            cancellation_event=cancellation_event,
+            line_numbers=line_numbers,
+            path_glob=path_glob,
+        ).text
 
-        if not self._search_capacity.acquire(blocking=False):
-            raise WorkspaceError("maximum concurrent search limit has been reached")
-        try:
-            return self._search_text_acquired(
-                matcher,
-                path,
-                max_results,
-                cancellation_event=cancellation_event,
-                line_numbers=line_numbers,
-                path_glob=path_glob,
-            )
-        finally:
-            self._search_capacity.release()
-
-    def _search_text_acquired(
+    def _search_text_acquired_result(
         self,
         matcher: Callable[[str, _SearchBudget], bool],
         path: str,
@@ -615,7 +749,7 @@ class Workspace:
         cancellation_event: threading.Event | None,
         line_numbers: bool,
         path_glob: NarrowingPathFilter | None,
-    ) -> str:
+    ) -> SearchTextResult:
         target = self.safe_path(path)
         if not target.exists():
             raise WorkspaceError(f"path does not exist: {path}")
@@ -652,23 +786,39 @@ class Workspace:
                 continue
             if return_limit:
                 results.append("... search return limit reached ...")
-                return self.truncate("\n".join(results))
+                bounded = self.truncate_result("\n".join(results))
+                return SearchTextResult(
+                    text=bounded.text,
+                    truncated=True,
+                    stop_reason="output_limit" if bounded.truncated else "result_limit",
+                )
 
+        stop_reason: str | None = None
         if budget.stop_reason == "bytes":
             results.append(
                 f"... search byte budget exhausted after {budget.bytes_read} bytes ..."
             )
+            stop_reason = "byte_budget"
         elif budget.stop_reason == "timeout":
             results.append("... search time budget exhausted ...")
+            stop_reason = "time_budget"
         elif budget.stop_reason == "cancelled":
             results.append("... search cancelled ...")
         if state.exhausted:
             results.append("... search scan budget exhausted ...")
+            stop_reason = "scan_budget"
         if state.skipped:
             results.append(
                 f"... search skipped {state.skipped} inaccessible entries ..."
             )
-        return self.truncate("\n".join(results) or "No matches found.")
+        bounded = self.truncate_result("\n".join(results) or "No matches found.")
+        if bounded.truncated:
+            stop_reason = "output_limit"
+        return SearchTextResult(
+            text=bounded.text,
+            truncated=stop_reason is not None,
+            stop_reason=stop_reason,
+        )
 
     def _stream_search_file(
         self,
