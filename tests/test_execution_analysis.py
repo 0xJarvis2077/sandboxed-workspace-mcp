@@ -401,6 +401,61 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(result["tests"]["exit_code"], 0)  # type: ignore[index]
         self.assertTrue(result["coverage"]["fail_under_failed"])  # type: ignore[index]
 
+    def test_coverage_numeric_strings_remain_accepted(self) -> None:
+        result = adapt_coverage_result(
+            {
+                "status": "succeeded",
+                "exit_code": 0,
+                "stdout": (
+                    "SWMCP_COVERAGE:"
+                    + json.dumps(
+                        {
+                            "tests_exit_code": 0,
+                            "coverage": {
+                                "percent": "91.2",
+                                "covered": "10",
+                                "missing": "1",
+                            },
+                        }
+                    )
+                ),
+            }
+        )
+
+        coverage = result["coverage"]
+        self.assertIsInstance(coverage, dict)
+        if not isinstance(coverage, dict):
+            self.fail("coverage result should be a mapping")
+        self.assertEqual(coverage["percent"], 91.2)
+        self.assertEqual(coverage["covered"], 10)
+        self.assertEqual(coverage["missing"], 1)
+
+    def test_invalid_coverage_numeric_payload_is_reported(self) -> None:
+        result = adapt_coverage_result(
+            {
+                "status": "succeeded",
+                "exit_code": 0,
+                "stdout": (
+                    "SWMCP_COVERAGE:"
+                    + json.dumps(
+                        {
+                            "tests_exit_code": 0,
+                            "coverage": {
+                                "percent": {},
+                                "covered": 10,
+                                "missing": 1,
+                            },
+                        }
+                    )
+                ),
+            }
+        )
+
+        self.assertIsNone(result["coverage"])
+        self.assertEqual(
+            result["coverage_parser_error"], "coverage summary output was malformed"
+        )
+
     def test_parser_rejects_host_paths_and_caps_diagnostics(self) -> None:
         with self.assertRaises(ValueError):
             parse_ruff_diagnostics(

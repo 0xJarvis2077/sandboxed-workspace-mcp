@@ -328,9 +328,9 @@ class TaskManager:
         *,
         cancellation_event: threading.Event | None = None,
     ) -> dict[str, object]:
-        profile = self.resolve_execution_profile("python_version", profile)
+        resolved_profile = self.resolve_execution_profile("python_version", profile)
         return self._run_profile_command(
-            profile.name,
+            resolved_profile.name,
             "python_version",
             self.python_commands.python_version(),
             cancellation_event=cancellation_event,
