@@ -6,6 +6,12 @@ import unittest
 from pathlib import Path
 from types import MappingProxyType
 
+from _mcp_assertions import (
+    require_call_tool_result,
+    require_resource_contents,
+    require_structured_content,
+)
+
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.server import create_server
 from sandboxed_workspace_mcp.task_config import (
@@ -14,12 +20,6 @@ from sandboxed_workspace_mcp.task_config import (
     TaskLimits,
 )
 from sandboxed_workspace_mcp.task_manager import TaskManager
-
-from _mcp_assertions import (
-    require_call_tool_result,
-    require_resource_contents,
-    require_structured_content,
-)
 
 PINNED_IMAGE = "example.invalid/project@sha256:" + "d" * 64
 
@@ -73,9 +73,7 @@ class LargeResultIntegrationTests(unittest.TestCase):
                 uri = structured["text_resource_uri"]
                 self.assertIsInstance(uri, str)
 
-                contents = require_resource_contents(
-                    await server.read_resource(uri)
-                )
+                contents = require_resource_contents(await server.read_resource(uri))
                 self.assertTrue(contents)
                 full_diff = contents[0].content
                 assert isinstance(full_diff, str)
@@ -123,9 +121,7 @@ class LargeResultIntegrationTests(unittest.TestCase):
                 uri = structured["stdout_resource_uri"]
                 self.assertIsInstance(uri, str)
 
-                contents = require_resource_contents(
-                    await server.read_resource(uri)
-                )
+                contents = require_resource_contents(await server.read_resource(uri))
                 self.assertTrue(contents)
                 self.assertEqual(contents[0].content, stdout.decode())
 

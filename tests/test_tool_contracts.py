@@ -7,18 +7,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _mcp_assertions import (
+    require_call_tool_result,
+    require_structured_content,
+    require_text_content,
+)
 from mcp.types import CallToolResult
 
 from sandboxed_workspace_mcp import server as server_module
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.server import create_server
 from sandboxed_workspace_mcp.tool_contracts import TOOL_CONTRACTS
-
-from _mcp_assertions import (
-    require_call_tool_result,
-    require_structured_content,
-    require_text_content,
-)
 
 
 class ToolContractTests(unittest.TestCase):
@@ -148,9 +147,7 @@ class ToolContractTests(unittest.TestCase):
                     )
                 )
                 search = require_call_tool_result(
-                    await server.call_tool(
-                        "search_text", {"text": "beta", "path": "."}
-                    )
+                    await server.call_tool("search_text", {"text": "beta", "path": "."})
                 )
                 written = require_call_tool_result(
                     await server.call_tool(
@@ -179,9 +176,7 @@ class ToolContractTests(unittest.TestCase):
                 self.assertEqual(versioned_structured["path"], "sample.txt")
                 self.assertEqual(len(versioned_structured["sha256"]), 64)
                 self.assertEqual(search_structured["matches"][0]["line"], 2)
-                self.assertEqual(
-                    search_structured["matches"][0]["path"], "sample.txt"
-                )
+                self.assertEqual(search_structured["matches"][0]["path"], "sample.txt")
                 self.assertTrue(written_structured["written"])
                 self.assertEqual(written_structured["bytes"], 5)
 

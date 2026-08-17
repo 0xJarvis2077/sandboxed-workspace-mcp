@@ -11,12 +11,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from _mcp_assertions import require_call_tool_result, require_text_content
+
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.git_reader import GitError, GitReader
 from sandboxed_workspace_mcp.server import create_server
 from sandboxed_workspace_mcp.service import CommandError, SandboxedWorkspace
-
-from _mcp_assertions import require_call_tool_result, require_text_content
 
 
 @unittest.skipUnless(shutil.which("git"), "git is not installed")
@@ -359,9 +359,7 @@ class GitAndServiceTests(unittest.TestCase):
                 await server.call_tool("git_diff", {"path": "nested"})
             )
             native_show = require_call_tool_result(
-                await server.call_tool(
-                    "git_show", {"commit": "HEAD", "path": "nested"}
-                )
+                await server.call_tool("git_show", {"commit": "HEAD", "path": "nested"})
             )
             self.assertFalse(native_diff.is_error)
             self.assertFalse(native_show.is_error)
@@ -642,9 +640,7 @@ class GitAndServiceTests(unittest.TestCase):
         self.assertFalse(by_name["workspace_diff"].input_schema["additionalProperties"])
 
         async def exercise() -> None:
-            calls: tuple[
-                tuple[str, dict[str, str | int | bool], str], ...
-            ] = (
+            calls: tuple[tuple[str, dict[str, str | int | bool], str], ...] = (
                 ("git_status", {"style": "porcelain"}, "tracked.txt"),
                 ("git_diff", {"path": "tracked.txt"}, "after"),
                 ("workspace_diff", {}, "Tracked changes"),

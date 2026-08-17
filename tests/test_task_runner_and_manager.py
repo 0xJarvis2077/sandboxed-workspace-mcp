@@ -14,6 +14,8 @@ from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import patch
 
+from _mcp_assertions import require_call_tool_result, require_structured_content
+
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.server import create_server
 from sandboxed_workspace_mcp.task_config import (
@@ -27,8 +29,6 @@ from sandboxed_workspace_mcp.task_manager import (
     TaskManager,
     TaskManagerError,
 )
-from _mcp_assertions import require_call_tool_result, require_structured_content
-
 from sandboxed_workspace_mcp.task_runner import (
     CliContainerBackend,
     ContainerRequest,
@@ -1644,9 +1644,7 @@ class TaskManagerTests(unittest.TestCase):
         server = create_server(self.settings, task_manager=manager)
 
         async def exercise_pytest() -> None:
-            result = require_call_tool_result(
-                await server.call_tool("run_pytest", {})
-            )
+            result = require_call_tool_result(await server.call_tool("run_pytest", {}))
             self.assertFalse(result.is_error)
             structured = require_structured_content(result)
             self.assertEqual(structured["status"], "failed")

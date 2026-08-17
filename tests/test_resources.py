@@ -8,6 +8,12 @@ import unittest
 from pathlib import Path
 from types import MappingProxyType
 
+from _mcp_assertions import (
+    require_call_tool_result,
+    require_resource_contents,
+    require_structured_content,
+    require_text_content,
+)
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.server.mcpserver.exceptions import ResourceNotFoundError
@@ -24,13 +30,6 @@ from sandboxed_workspace_mcp.task_config import (
 )
 from sandboxed_workspace_mcp.task_manager import TaskManager
 from sandboxed_workspace_mcp.tool_contracts import TOOL_CONTRACTS
-
-from _mcp_assertions import (
-    require_call_tool_result,
-    require_resource_contents,
-    require_structured_content,
-    require_text_content,
-)
 
 
 class _UnusedBackend:
@@ -346,7 +345,9 @@ class SelfDescriptionResourceTests(unittest.TestCase):
                     await server.read_resource("internal://tool-catalog")
                 )
                 tool_info = require_resource_contents(
-                    await server.read_resource("internal://tool-info/read_file_versioned")
+                    await server.read_resource(
+                        "internal://tool-info/read_file_versioned"
+                    )
                 )
                 self.assertTrue(instructions)
                 self.assertTrue(catalog)
@@ -382,9 +383,7 @@ class SelfDescriptionResourceTests(unittest.TestCase):
                     require_text_content(result.content[0]).text, full_text
                 )
 
-                contents = require_resource_contents(
-                    await server.read_resource(uri)
-                )
+                contents = require_resource_contents(await server.read_resource(uri))
                 self.assertTrue(contents)
                 self.assertEqual(contents[0].content, full_text)
                 self.assertEqual(contents[0].mime_type, RESULT_TEXT_MIME)
@@ -451,9 +450,7 @@ class SelfDescriptionResourceTests(unittest.TestCase):
                 self.assertTrue(structured["source_truncated"])
                 self.assertTrue(structured["content_inline_truncated"])
                 uri = structured["content_resource_uri"]
-                contents = require_resource_contents(
-                    await server.read_resource(uri)
-                )
+                contents = require_resource_contents(await server.read_resource(uri))
                 self.assertTrue(contents)
                 cached = contents[0].content
                 assert isinstance(cached, str)

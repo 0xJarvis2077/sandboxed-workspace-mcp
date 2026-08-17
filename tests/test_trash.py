@@ -226,9 +226,7 @@ class TrashManagerTests(unittest.TestCase):
         trash = TrashManager(workspace)
         target = self.root / "purge.txt"
         target.write_bytes(b"purge me")
-        item = trash.trash_file(
-            "purge.txt", self._version_sha(workspace, "purge.txt")
-        )
+        item = trash.trash_file("purge.txt", self._version_sha(workspace, "purge.txt"))
 
         with self.assertRaises(TrashError) as stale:
             trash.purge_trashed_file(self._str_field(item, "trash_id"), "0" * 64)

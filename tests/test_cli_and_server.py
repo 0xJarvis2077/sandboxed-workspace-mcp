@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from _mcp_assertions import require_call_tool_result, require_structured_content
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -23,8 +24,6 @@ from mcp.client.streamable_http import streamable_http_client
 from sandboxed_workspace_mcp.cli import _transport_security, main, parse_runtime
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.server import create_server
-
-from _mcp_assertions import require_call_tool_result, require_structured_content
 
 
 class CliTests(unittest.TestCase):

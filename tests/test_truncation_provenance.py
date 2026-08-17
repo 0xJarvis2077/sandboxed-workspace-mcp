@@ -7,14 +7,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _mcp_assertions import require_call_tool_result, require_text_content
+
 from sandboxed_workspace_mcp.bounded_output import (
     TRUNCATION_MARKER,
     truncate_utf8_result,
 )
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.server import create_server
-
-from _mcp_assertions import require_call_tool_result, require_text_content
 
 
 class BoundedTextTests(unittest.TestCase):
@@ -104,9 +104,7 @@ class MCPTruncationProvenanceTests(unittest.TestCase):
                 assert structured is not None
                 self.assertTrue(structured["source_truncated"])
                 self.assertTrue(structured["truncated"])
-                self.assertLessEqual(
-                    len(structured["content"].encode("utf-8")), 1000
-                )
+                self.assertLessEqual(len(structured["content"].encode("utf-8")), 1000)
 
             asyncio.run(exercise())
 
@@ -187,9 +185,7 @@ class MCPTruncationProvenanceTests(unittest.TestCase):
 
             async def exercise() -> None:
                 result = require_call_tool_result(
-                    await server.call_tool(
-                        "run_shell", {"command": "cat marker.txt"}
-                    )
+                    await server.call_tool("run_shell", {"command": "cat marker.txt"})
                 )
                 structured = result.structured_content
                 assert structured is not None

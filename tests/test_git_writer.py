@@ -11,6 +11,12 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from _mcp_assertions import (
+    require_call_tool_result,
+    require_structured_content,
+    require_text_content,
+)
+
 from sandboxed_workspace_mcp.access_policy import (
     DEFAULT_GIT_BASELINE_IGNORE_RULES,
     GIT_BASELINE_NOISE_MANAGED_BLOCK_BEGIN,
@@ -23,12 +29,6 @@ from sandboxed_workspace_mcp.git_reader import GitError, GitReader
 from sandboxed_workspace_mcp.git_writer import GitWriter
 from sandboxed_workspace_mcp.server import create_server
 from sandboxed_workspace_mcp.workspace import Workspace
-
-from _mcp_assertions import (
-    require_call_tool_result,
-    require_structured_content,
-    require_text_content,
-)
 
 
 @unittest.skipUnless(shutil.which("git"), "git is not installed")
@@ -114,7 +114,9 @@ class GitWriterTests(unittest.TestCase):
                 )
             )
             self.assertFalse(created.is_error)
-            initialized = require_call_tool_result(await server.call_tool("git_init", {}))
+            initialized = require_call_tool_result(
+                await server.call_tool("git_init", {})
+            )
             self.assertFalse(initialized.is_error)
             baseline = require_call_tool_result(
                 await server.call_tool("git_create_baseline", {})
@@ -137,9 +139,7 @@ class GitWriterTests(unittest.TestCase):
                 "(no output)",
             )
             original = require_call_tool_result(
-                await server.call_tool(
-                    "read_file_versioned", {"path": "source.txt"}
-                )
+                await server.call_tool("read_file_versioned", {"path": "source.txt"})
             )
             original_structured = require_structured_content(original)
             require_call_tool_result(
@@ -157,9 +157,7 @@ class GitWriterTests(unittest.TestCase):
             self.assertTrue(diff.content)
             self.assertIn("+bug", require_text_content(diff.content[0]).text)
             changed = require_call_tool_result(
-                await server.call_tool(
-                    "read_file_versioned", {"path": "source.txt"}
-                )
+                await server.call_tool("read_file_versioned", {"path": "source.txt"})
             )
             changed_structured = require_structured_content(changed)
             historical = require_call_tool_result(
