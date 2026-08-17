@@ -162,7 +162,7 @@ Copy [examples/execution-profiles.json](examples/execution-profiles.json) outsid
 - `run_pytest`: validates targets, compiles pytest argv, and collects bounded failure/frame/local information.
 - `run_ruff`: runs a fixed Ruff check and returns JSON diagnostics; `fix=true` requires a writable profile.
 - `run_mypy`: runs fixed mypy arguments; `strict=true` only adds `--strict`.
-- `run_pytest_coverage`: runs pytest and coverage in one execution; data stays under `/tmp` and does not create workspace `.coverage`.
+- `run_pytest_coverage`: runs pytest and coverage in one execution; data stays under `/tmp` and does not create workspace `.coverage`. By default it respects the project's coverage `source`/`branch` configuration, while `branch=true` explicitly enables branch coverage.
 - `run_python_script`: accepts one real workspace `.py` file.
 - `run_command`/`start_command`: require `allow_arbitrary_commands: true`; this grants arbitrary code execution inside the container.
 

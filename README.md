@@ -162,7 +162,7 @@ stop_task(started["task_id"])
 - `run_pytest`：服务端验证 target、生成 pytest argv，并返回有界 failure/frame/local 信息。
 - `run_ruff`：固定 Ruff check argv，返回 JSON diagnostics；`fix=true` 仅允许 writable profile。
 - `run_mypy`：固定 mypy argv，`strict=true` 只增加 `--strict`。
-- `run_pytest_coverage`：在一次 execution 内完成 pytest 与 coverage，数据只写入 `/tmp`，不产生 workspace `.coverage`。
+- `run_pytest_coverage`：在一次 execution 内完成 pytest 与 coverage，数据只写入 `/tmp`，不产生 workspace `.coverage`；默认尊重项目自己的 coverage `source`/`branch` 配置，`branch=true` 可显式启用分支覆盖率。
 - `run_python_script`：只接受一个真实的 workspace `.py` 文件。
 - `run_command`/`start_command`：只有同时声明 `allow_arbitrary_commands: true` 才能使用；这代表容器内任意代码执行授权。
 
