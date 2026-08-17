@@ -1,4 +1,18 @@
 #!/bin/sh
 set -eu
 
-python scripts/check.py --fast
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+if [ -x "$ROOT/.venv/bin/python" ]; then
+    PYTHON="$ROOT/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON=$(command -v python3)
+elif command -v python >/dev/null 2>&1; then
+    PYTHON=$(command -v python)
+else
+    echo "pre-push: Python interpreter not found (.venv/bin/python, python3, python)" >&2
+    exit 1
+fi
+
+exec "$PYTHON" "$ROOT/scripts/check.py" --fast

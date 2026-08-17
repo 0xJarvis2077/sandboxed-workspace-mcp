@@ -2,18 +2,29 @@
 
 [中文](README.md) · [Security boundary](SECURITY.md) · [Task template](examples/tasks.json) · [Execution profile template](examples/execution-profiles.json)
 
-WorkspaceGuard MCP is a capability-bounded security layer between AI coding agents and real developer workspaces. It lets agents inspect, edit, review, test, and debug real repositories while keeping host shell access, sensitive paths, dangerous Git mutations, and code execution behind explicit boundaries.
+WorkspaceGuard MCP lets AI coding agents work directly with real repositories while keeping file access, mutation, Git operations, and code execution inside explicit boundaries.
 
-## Three things to know first
+It is built for the useful middle ground between a read-only code browser and handing an agent your full local shell. An agent can search code, edit files, review Git diffs, run pytest / Ruff / mypy, and launch controlled debugging commands without automatically gaining access to the rest of the host filesystem, arbitrary Docker settings, or unrestricted Git mutation.
+
+Core capabilities:
+
+- **Safe workspace access** with path confinement, sensitive-path blocking, SHA-256 version checks, and atomic writes.
+- **Recoverable changes** through an optional recycle bin, historical file reads, and a controlled first Git baseline.
+- **Agent-friendly review** with bounded Git queries, `workspace_diff`, structured Tool Results, and self-describing MCP Resources.
+- **Isolated execution** for pytest, Ruff, mypy, coverage, and approved commands inside pinned images and disposable workspace snapshots.
+- **Explicit privilege gates** for Git writes, recycle-bin purge, container execution, and HTTP/OAuth exposure.
+
+## What to know before using it
 
 - One server instance owns one `--root`. Run separate instances for unrelated projects.
-- Workspace tools are writable by default; pass `--read-only` explicitly for production or read-only use.
-- `--read-only` disables workspace write tools. Authorized tasks still run in a disposable snapshot and never write back to the real workspace.
-- Git initialization and the first baseline commit are disabled by default. `--allow-git-writes` requires writable mode and the separate `workspace.git.write` OAuth scope.
-- The recycle bin is disabled by default. `--allow-trash` also requires writes and provides single-file trash plus non-overwriting restoration to the original or a safe alternate path. Irreversible single-item purge requires the separate `--allow-trash-purge` flag.
-- Container execution is opt-in through a trusted JSON file outside the workspace. Images must be full registry digests or full local `sha256` image IDs.
+- Workspace tools are writable by default. Add `--read-only` when you only want the agent to inspect code.
+- `--read-only` does not disable testing: authorized tasks can still run in disposable snapshots without writing back to the real workspace.
+- Git initialization, the recycle bin, and container execution do not gain extra privileges automatically; each is explicitly enabled and configured.
+- Execution profiles use pinned image digests / full local `sha256` image IDs, and callers cannot add network access, arbitrary host mounts, or swap images at runtime.
 
-For the threat model, file semantics, Git restrictions, and container boundary, see [SECURITY.md](SECURITY.md).
+For personal local use, a good starting point is `stdio + --read-only`. Remove `--read-only` when you want direct edits, then enable Git writes, the recycle bin, or execution profiles only when you actually need them.
+
+For the full threat model, file semantics, Git restrictions, and container boundary, see [SECURITY.md](SECURITY.md).
 
 ## Start in five minutes
 

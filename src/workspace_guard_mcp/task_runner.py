@@ -502,8 +502,47 @@ def run_container_task(
     output_overflow = False
     cancelled = False
     workspace_limit_exceeded = False
+    lifecycle_failed = False
     workspace_monitor = WorkspaceGrowthMonitor(request, handle)
-    workspace_monitor.start()
+
+    def record_lifecycle_failure(phase: str, exc: Exception) -> None:
+        nonlocal lifecycle_failed
+        lifecycle_failed = True
+        capture.stderr(f"{phase}: {exc}\n".encode("utf-8", errors="replace"))
+
+    def stop_handle() -> None:
+        try:
+            handle.stop()
+        except Exception as exc:
+            record_lifecycle_failure("container stop failure", exc)
+
+    def close_handle() -> None:
+        try:
+            handle.close()
+        except Exception as exc:
+            record_lifecycle_failure("container cleanup failure", exc)
+
+    try:
+        workspace_monitor.start()
+    except Exception as exc:
+        record_lifecycle_failure("workspace monitor start failure", exc)
+        stop_handle()
+        try:
+            workspace_monitor.stop_and_join()
+        except Exception as cleanup_exc:
+            record_lifecycle_failure("workspace monitor cleanup failure", cleanup_exc)
+        close_handle()
+        stdout, stderr = capture.text()
+        return TaskRunResult(
+            status="start_failed",
+            exit_code=None,
+            stdout=stdout,
+            stderr=stderr,
+            truncated=capture.truncated,
+            timed_out=False,
+            duration_ms=_duration_ms(started),
+        )
+
     try:
         while True:
             if workspace_monitor.exceeded.is_set():
@@ -511,16 +550,16 @@ def run_container_task(
                 break
             if cancellation_event is not None and cancellation_event.is_set():
                 cancelled = True
-                handle.stop()
+                stop_handle()
                 break
             if capture.truncated:
                 output_overflow = True
-                handle.stop()
+                stop_handle()
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
-                handle.stop()
+                stop_handle()
                 break
             try:
                 exit_code = handle.wait(timeout=min(remaining, 0.1))
@@ -531,13 +570,16 @@ def run_container_task(
             try:
                 exit_code = handle.wait(timeout=5)
             except TimeoutError:
-                handle.stop()
+                stop_handle()
     except BaseException:
-        handle.stop()
+        stop_handle()
         raise
     finally:
-        workspace_monitor.stop_and_join()
-        handle.close()
+        try:
+            workspace_monitor.stop_and_join()
+        except Exception as exc:
+            record_lifecycle_failure("workspace monitor cleanup failure", exc)
+        close_handle()
 
     if capture.truncated:
         output_overflow = True
@@ -554,6 +596,8 @@ def run_container_task(
         status = "output_limit_exceeded"
     elif timed_out:
         status = "timed_out"
+    elif lifecycle_failed:
+        status = "failed"
     elif exit_code == 0:
         status = "succeeded"
     else:

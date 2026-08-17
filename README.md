@@ -2,18 +2,29 @@
 
 [English](README.en.md) · [安全边界](SECURITY.md) · [任务模板](examples/tasks.json) · [Execution profile 模板](examples/execution-profiles.json)
 
-WorkspaceGuard MCP 是 AI Coding Agent 与真实开发工作区之间的 capability-bounded 安全边界。它允许 Agent 在明确授权下读取、搜索、编辑和审查真实代码仓库，并通过隔离执行环境运行测试与诊断，同时限制宿主 Shell、敏感路径、危险 Git 操作和未经授权的执行能力。
+WorkspaceGuard MCP 让 AI Coding Agent 可以直接操作真实代码仓库，同时把“能读什么、能改什么、能执行什么”限制在明确的边界里。
 
-## 先看这三点
+它适合这种场景：你希望 ChatGPT / Coding Agent 能像本地开发助手一样搜索代码、修改文件、看 Git diff、跑 pytest / Ruff / mypy，甚至启动受控的调试命令，但又不想直接交出宿主机 Shell、整个文件系统或无限制的 Docker 权限。
+
+核心能力包括：
+
+- **安全读写工作区**：路径限制、敏感文件屏蔽、SHA-256 乐观锁和原子写入。
+- **可恢复修改**：可选回收站、历史文件读取和受控 Git baseline，误删或改坏时有退路。
+- **面向 Agent 的代码审查**：有界 Git 查询、`workspace_diff` 和结构化 Tool Results。
+- **隔离执行**：pytest、Ruff、mypy、coverage 和通用命令运行在固定镜像的一次性快照中，不直接执行在宿主工作区。
+- **按需开放能力**：Git 写入、回收站、永久清理、容器执行和 HTTP/OAuth 都需要显式开启。
+
+## 使用前知道这些就够了
 
 - 一个服务实例只负责一个 `--root`。需要多个项目时，启动多个实例。
-- 默认工作区工具可写；生产或只读场景应显式传 `--read-only`。
-- `--read-only` 只关闭工作区写工具；已授权的任务仍在一次性快照中运行，不会写回真实工作区。
-- Git 初始化和首次基线提交默认关闭；`--allow-git-writes` 只能在可写模式下开启，并需要额外的 `workspace.git.write` OAuth scope。
-- 回收站默认关闭；`--allow-trash` 需要同时允许写入，提供单文件回收、原路径恢复和安全备用路径恢复。不可恢复的单项 purge 还需要单独的 `--allow-trash-purge`。
-- 容器任务是可选能力，必须通过工作区外的可信 JSON 显式开启；配置文件中的 image 必须是完整 digest 或完整本地 `sha256` ID。
+- 默认工作区工具可写；如果只想让 Agent 看代码，启动时加 `--read-only`。
+- `--read-only` 不等于禁用测试：已授权的任务仍可以在一次性快照中执行，但不会写回真实工作区。
+- Git 初始化、回收站和容器执行默认都不会自动获得额外权限，需要显式配置。
+- execution profile 使用固定 image digest / 完整本地 `sha256` ID，运行时不让 Agent 临时换镜像、加网络或挂载宿主目录。
 
-详细的威胁模型、文件安全语义、Git 约束和容器边界见 [SECURITY.md](SECURITY.md)。
+如果你只在本机自己用，推荐从 `stdio + --read-only` 开始，需要编辑时再去掉 `--read-only`；只有确实需要时再开启 Git 写入、回收站或 execution profile。
+
+完整威胁模型、文件安全语义、Git 约束和容器边界见 [SECURITY.md](SECURITY.md)。
 
 ## 5 分钟启动
 
