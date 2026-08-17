@@ -630,16 +630,21 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(target.read_text(encoding="utf-8"), "original\n")
 
     def test_search_configuration_has_finite_upper_bounds(self) -> None:
-        for values, message in (
-            ({"max_search_bytes": 1024**3 + 1}, "max_search_bytes"),
-            ({"search_timeout_seconds": 301}, "search_timeout_seconds"),
-            ({"max_concurrent_searches": 33}, "max_concurrent_searches"),
+        with (
+            self.subTest(field="max_search_bytes"),
+            self.assertRaisesRegex(ConfigurationError, "max_search_bytes"),
         ):
-            with (
-                self.subTest(values=values),
-                self.assertRaisesRegex(ConfigurationError, message),
-            ):
-                Settings.create(self.root, **values)
+            Settings.create(self.root, max_search_bytes=1024**3 + 1)
+        with (
+            self.subTest(field="search_timeout_seconds"),
+            self.assertRaisesRegex(ConfigurationError, "search_timeout_seconds"),
+        ):
+            Settings.create(self.root, search_timeout_seconds=301)
+        with (
+            self.subTest(field="max_concurrent_searches"),
+            self.assertRaisesRegex(ConfigurationError, "max_concurrent_searches"),
+        ):
+            Settings.create(self.root, max_concurrent_searches=33)
 
     def test_search_byte_timeout_utf8_and_cross_chunk_diagnostics(self) -> None:
         (self.root / "one.txt").write_text("abcdef", encoding="utf-8")

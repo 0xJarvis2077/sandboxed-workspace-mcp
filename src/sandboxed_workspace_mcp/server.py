@@ -19,7 +19,11 @@ from mcp.server.auth.middleware.bearer_auth import (
 )
 from mcp.server.auth.provider import TokenVerifier
 from mcp.server.mcpserver.exceptions import ResourceNotFoundError
+from mcp.server.streamable_http import EventStore
+from mcp.server.streamable_http_manager import DEFAULT_MAX_REQUEST_BODY_SIZE
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, Tool
+from starlette.applications import Starlette
 from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -144,8 +148,8 @@ def _trash_error_result(error: TrashError) -> CallToolResult:
 
     return CallToolResult(
         content=[TextContent(type="text", text=error.message)],
-        isError=True,
-        structuredContent=error.public_error,
+        is_error=True,
+        structured_content=error.public_error,
     )
 
 
@@ -272,21 +276,45 @@ class SandboxedWorkspaceMCPServer(MCPServer[None]):
         )
         return CallToolResult(
             content=[TextContent(type="text", text=description)],
-            isError=True,
+            is_error=True,
             _meta={"mcp/www_authenticate": [challenge]},
         )
 
-    def streamable_http_app(self, **kwargs: Any) -> ASGIApp:
-        streamable_http_path = kwargs.get("streamable_http_path", "/mcp")
-        app = super().streamable_http_app(**kwargs)
+    def streamable_http_app(
+        self,
+        *,
+        streamable_http_path: str = "/mcp",
+        json_response: bool = False,
+        stateless_http: bool = False,
+        event_store: EventStore | None = None,
+        retry_interval: int | None = None,
+        max_request_body_size: int = DEFAULT_MAX_REQUEST_BODY_SIZE,
+        transport_security: TransportSecuritySettings | None = None,
+        host: str = "127.0.0.1",
+    ) -> Starlette:
+        app = super().streamable_http_app(
+            streamable_http_path=streamable_http_path,
+            json_response=json_response,
+            stateless_http=stateless_http,
+            event_store=event_store,
+            retry_interval=retry_interval,
+            max_request_body_size=max_request_body_size,
+            transport_security=transport_security,
+            host=host,
+        )
         if self.oauth is None or self.oauth_token_verifier is None:
             return app
-        protected = _SelectiveOAuthApp(app, self.oauth, streamable_http_path)
-        contextual = AuthContextMiddleware(protected)
-        return AuthenticationMiddleware(
-            contextual,
+        app.add_middleware(
+            _SelectiveOAuthApp,
+            oauth=self.oauth,
+            streamable_http_path=streamable_http_path,
+        )
+        app.add_middleware(AuthContextMiddleware)
+        app.add_middleware(
+            AuthenticationMiddleware,
             backend=BearerAuthBackend(self.oauth_token_verifier),
         )
+        return app
 
 
 def create_server(

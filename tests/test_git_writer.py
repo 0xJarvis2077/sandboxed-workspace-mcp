@@ -11,6 +11,12 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from _mcp_assertions import (
+    require_call_tool_result,
+    require_structured_content,
+    require_text_content,
+)
+
 from sandboxed_workspace_mcp.access_policy import (
     DEFAULT_GIT_BASELINE_IGNORE_RULES,
     GIT_BASELINE_NOISE_MANAGED_BLOCK_BEGIN,
@@ -46,6 +52,12 @@ class GitWriterTests(unittest.TestCase):
         )
         return result.stdout
 
+    @staticmethod
+    def _str_field(payload: dict[str, object], key: str) -> str:
+        value = payload[key]
+        assert isinstance(value, str)
+        return value
+
     def test_init_baseline_diff_history_read_and_versioned_restore(self) -> None:
         source = self.root / "source file Ω [literal].txt"
         source.write_text("baseline\n", encoding="utf-8")
@@ -71,22 +83,23 @@ class GitWriterTests(unittest.TestCase):
             source.name,
             "bug\n",
             overwrite=True,
-            expected_sha256=versioned["sha256"],
+            expected_sha256=self._str_field(versioned, "sha256"),
         )
         diff = GitReader(self.settings).diff()
         self.assertIn("-baseline", diff)
         self.assertIn("+bug", diff)
 
         historical = self.writer.read_file_at_revision(source.name, "HEAD")
-        self.assertEqual(historical["content"], "baseline\n")
+        historical_content = self._str_field(historical, "content")
+        self.assertEqual(historical_content, "baseline\n")
         self.assertEqual(historical["commit"], baseline["commit"])
         self.assertEqual(historical["mode"], "100644")
         current = workspace.read_file_versioned(source.name)
         workspace.write_file(
             source.name,
-            historical["content"],
+            historical_content,
             overwrite=True,
-            expected_sha256=current["sha256"],
+            expected_sha256=self._str_field(current, "sha256"),
         )
         self.assertEqual(GitReader(self.settings).diff(), "(no output)")
         self.assertNotIn("source file", GitReader(self.settings).status())
@@ -95,60 +108,91 @@ class GitWriterTests(unittest.TestCase):
         server = create_server(self.settings)
 
         async def exercise() -> None:
-            created = await server.call_tool(
-                "write_file", {"path": "source.txt", "content": "baseline\n"}
+            created = require_call_tool_result(
+                await server.call_tool(
+                    "write_file", {"path": "source.txt", "content": "baseline\n"}
+                )
             )
             self.assertFalse(created.is_error)
-            initialized = await server.call_tool("git_init", {})
+            initialized = require_call_tool_result(
+                await server.call_tool("git_init", {})
+            )
             self.assertFalse(initialized.is_error)
-            baseline = await server.call_tool("git_create_baseline", {})
+            baseline = require_call_tool_result(
+                await server.call_tool("git_create_baseline", {})
+            )
             self.assertFalse(baseline.is_error)
+            log_result = require_call_tool_result(
+                await server.call_tool("git_log", {"count": 1})
+            )
+            self.assertTrue(log_result.content)
             self.assertIn(
                 "sandboxed-workspace-mcp baseline",
-                (await server.call_tool("git_log", {"count": 1})).content[0].text,
+                require_text_content(log_result.content[0]).text,
             )
+            clean_diff = require_call_tool_result(
+                await server.call_tool("git_diff", {})
+            )
+            self.assertTrue(clean_diff.content)
             self.assertEqual(
-                (await server.call_tool("git_diff", {})).content[0].text,
+                require_text_content(clean_diff.content[0]).text,
                 "(no output)",
             )
-            original = await server.call_tool(
-                "read_file_versioned", {"path": "source.txt"}
+            original = require_call_tool_result(
+                await server.call_tool("read_file_versioned", {"path": "source.txt"})
             )
-            await server.call_tool(
-                "write_file",
-                {
-                    "path": "source.txt",
-                    "content": "bug\n",
-                    "overwrite": True,
-                    "expected_sha256": original.structured_content["sha256"],
-                },
+            original_structured = require_structured_content(original)
+            require_call_tool_result(
+                await server.call_tool(
+                    "write_file",
+                    {
+                        "path": "source.txt",
+                        "content": "bug\n",
+                        "overwrite": True,
+                        "expected_sha256": original_structured["sha256"],
+                    },
+                )
             )
-            diff = await server.call_tool("git_diff", {})
-            self.assertIn("+bug", diff.content[0].text)
-            changed = await server.call_tool(
-                "read_file_versioned", {"path": "source.txt"}
+            diff = require_call_tool_result(await server.call_tool("git_diff", {}))
+            self.assertTrue(diff.content)
+            self.assertIn("+bug", require_text_content(diff.content[0]).text)
+            changed = require_call_tool_result(
+                await server.call_tool("read_file_versioned", {"path": "source.txt"})
             )
-            historical = await server.call_tool(
-                "git_read_file_at_revision", {"path": "source.txt", "commit": "HEAD"}
+            changed_structured = require_structured_content(changed)
+            historical = require_call_tool_result(
+                await server.call_tool(
+                    "git_read_file_at_revision",
+                    {"path": "source.txt", "commit": "HEAD"},
+                )
             )
-            self.assertEqual(historical.structured_content["content"], "baseline\n")
-            restored = await server.call_tool(
-                "write_file",
-                {
-                    "path": "source.txt",
-                    "content": historical.structured_content["content"],
-                    "overwrite": True,
-                    "expected_sha256": changed.structured_content["sha256"],
-                },
+            historical_structured = require_structured_content(historical)
+            self.assertEqual(historical_structured["content"], "baseline\n")
+            restored = require_call_tool_result(
+                await server.call_tool(
+                    "write_file",
+                    {
+                        "path": "source.txt",
+                        "content": historical_structured["content"],
+                        "overwrite": True,
+                        "expected_sha256": changed_structured["sha256"],
+                    },
+                )
             )
             self.assertFalse(restored.is_error)
+            final_diff = require_call_tool_result(
+                await server.call_tool("git_diff", {})
+            )
+            self.assertTrue(final_diff.content)
             self.assertEqual(
-                (await server.call_tool("git_diff", {})).content[0].text,
+                require_text_content(final_diff.content[0]).text,
                 "(no output)",
             )
+            status = require_call_tool_result(await server.call_tool("git_status", {}))
+            self.assertTrue(status.content)
             self.assertNotIn(
                 "source.txt",
-                (await server.call_tool("git_status", {})).content[0].text,
+                require_text_content(status.content[0]).text,
             )
 
         asyncio.run(exercise())
@@ -345,10 +389,25 @@ class GitWriterTests(unittest.TestCase):
         writer = GitWriter(Settings.create(self.root, allow_git_writes=True))
         original_run = writer._run
 
-        def fail_ref(args: list[str], **kwargs: object) -> bytes:
+        def fail_ref(
+            args: list[str],
+            *,
+            cwd: Path | None = None,
+            stdin: bytes | None = None,
+            environment: dict[str, str] | None = None,
+            output_limit: int | None = None,
+            allow_failure: bool = False,
+        ) -> bytes:
             if args and args[0] == "update-ref":
                 raise GitError("simulated ref failure")
-            return original_run(args, **kwargs)
+            return original_run(
+                args,
+                cwd=cwd,
+                stdin=stdin,
+                environment=environment,
+                output_limit=output_limit,
+                allow_failure=allow_failure,
+            )
 
         with patch.object(writer, "_run", side_effect=fail_ref):
             with self.assertRaisesRegex(GitError, "simulated ref failure"):
@@ -594,10 +653,25 @@ class GitWriterTests(unittest.TestCase):
         writer = GitWriter(Settings.create(self.root, allow_git_writes=True))
         original_run = writer._run
 
-        def fail_ref(args: list[str], **kwargs: object) -> bytes:
+        def fail_ref(
+            args: list[str],
+            *,
+            cwd: Path | None = None,
+            stdin: bytes | None = None,
+            environment: dict[str, str] | None = None,
+            output_limit: int | None = None,
+            allow_failure: bool = False,
+        ) -> bytes:
             if args and args[0] == "update-ref":
                 raise GitError("simulated ref failure")
-            return original_run(args, **kwargs)
+            return original_run(
+                args,
+                cwd=cwd,
+                stdin=stdin,
+                environment=environment,
+                output_limit=output_limit,
+                allow_failure=allow_failure,
+            )
 
         with patch.object(writer, "_run", side_effect=fail_ref):
             with self.assertRaisesRegex(GitError, "simulated ref failure"):
@@ -690,10 +764,25 @@ class GitWriterTests(unittest.TestCase):
         self.writer.init()
         original_run = self.writer._run
 
-        def fail_ref(args: list[str], **kwargs: object) -> bytes:
+        def fail_ref(
+            args: list[str],
+            *,
+            cwd: Path | None = None,
+            stdin: bytes | None = None,
+            environment: dict[str, str] | None = None,
+            output_limit: int | None = None,
+            allow_failure: bool = False,
+        ) -> bytes:
             if args and args[0] == "update-ref":
                 raise GitError("simulated ref failure")
-            return original_run(args, **kwargs)
+            return original_run(
+                args,
+                cwd=cwd,
+                stdin=stdin,
+                environment=environment,
+                output_limit=output_limit,
+                allow_failure=allow_failure,
+            )
 
         with patch.object(self.writer, "_run", side_effect=fail_ref):
             with self.assertRaisesRegex(GitError, "simulated ref failure"):
@@ -927,6 +1016,79 @@ class GitWriterTests(unittest.TestCase):
         with self.assertRaisesRegex(GitError, "max_file_size"):
             sized_writer.create_baseline()
 
+    def test_baseline_rejects_all_mutation_lock_locations(self) -> None:
+        lock_paths = (
+            Path("index.lock"),
+            Path("HEAD.lock"),
+            Path("refs/heads/main.lock"),
+        )
+        for relative_lock in lock_paths:
+            with (
+                self.subTest(lock=relative_lock),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                (root / "source.txt").write_text("source\n", encoding="utf-8")
+                writer = GitWriter(Settings.create(root, allow_git_writes=True))
+                writer.init()
+                lock = root / ".git" / relative_lock
+                lock.parent.mkdir(parents=True, exist_ok=True)
+                lock.touch()
+
+                with self.assertRaisesRegex(GitError, "mutation lock"):
+                    writer.create_baseline()
+
+                self.assertFalse(
+                    subprocess.run(
+                        [shutil.which("git") or "git", "rev-parse", "--verify", "HEAD"],
+                        cwd=root,
+                        capture_output=True,
+                    ).returncode
+                    == 0
+                )
+
+    def test_baseline_scan_entry_limit_and_nonregular_index_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "one.txt").write_text("one\n", encoding="utf-8")
+            (root / "two.txt").write_text("two\n", encoding="utf-8")
+            writer = GitWriter(
+                Settings.create(
+                    root,
+                    allow_git_writes=True,
+                    max_scan_entries=1,
+                )
+            )
+            writer.init()
+            with self.assertRaisesRegex(GitError, "directory-entry limit"):
+                writer.create_baseline()
+
+        for kind in ("directory", "symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "source.txt").write_text("source\n", encoding="utf-8")
+                writer = GitWriter(Settings.create(root, allow_git_writes=True))
+                writer.init()
+                index = root / ".git" / "index"
+                if kind == "directory":
+                    index.mkdir()
+                else:
+                    target = root / "index-target"
+                    target.write_text("outside", encoding="utf-8")
+                    index.symlink_to(target)
+
+                with self.assertRaisesRegex(GitError, "index is not a regular file"):
+                    writer.create_baseline()
+
+    def test_baseline_rejects_detached_unborn_head_when_main_is_required(self) -> None:
+        self._git("init", "-q", "--initial-branch=main")
+        git_dir = self.root / ".git"
+        (git_dir / "HEAD").write_text("0" * 40 + "\n", encoding="ascii")
+        (self.root / "source.txt").write_text("source\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(GitError, "symbolic branch"):
+            self.writer.create_baseline()
+
     def test_historical_missing_and_oversized_blobs_are_bounded(self) -> None:
         (self.root / "large.txt").write_text("large\n", encoding="utf-8")
         self._git("init", "-q", "--initial-branch=main")
@@ -980,10 +1142,14 @@ class GitWriterTests(unittest.TestCase):
         by_name = {tool.name: tool for tool in asyncio.run(enabled_server.list_tools())}
         self.assertIn("git_init", by_name)
         self.assertIn("git_create_baseline", by_name)
-        self.assertFalse(by_name["git_init"].annotations.read_only_hint)
-        self.assertFalse(by_name["git_init"].annotations.destructive_hint)
-        self.assertTrue(by_name["git_init"].annotations.idempotent_hint)
-        self.assertFalse(by_name["git_create_baseline"].annotations.idempotent_hint)
+        init_annotations = by_name["git_init"].annotations
+        baseline_annotations = by_name["git_create_baseline"].annotations
+        assert init_annotations is not None
+        assert baseline_annotations is not None
+        self.assertFalse(init_annotations.read_only_hint)
+        self.assertFalse(init_annotations.destructive_hint)
+        self.assertTrue(init_annotations.idempotent_hint)
+        self.assertFalse(baseline_annotations.idempotent_hint)
         for arguments in ({"path": "."}, {"template": "/tmp"}, {"argv": ["status"]}):
             with (
                 self.subTest(arguments=arguments),

@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _mcp_assertions import require_call_tool_result, require_text_content
+
 from sandboxed_workspace_mcp.bounded_output import (
     TRUNCATION_MARKER,
     truncate_utf8_result,
@@ -64,21 +66,28 @@ class MCPTruncationProvenanceTests(unittest.TestCase):
             server = create_server(Settings.create(root))
 
             async def exercise() -> None:
-                read = await server.call_tool("read_file", {"path": "marker.txt"})
-                versioned = await server.call_tool(
-                    "read_file_versioned", {"path": "marker.txt"}
+                read = require_call_tool_result(
+                    await server.call_tool("read_file", {"path": "marker.txt"})
                 )
-                self.assertEqual(read.content[0].text, text)
-                self.assertEqual(read.structured_content["content"], text)
-                self.assertFalse(read.structured_content["source_truncated"])
-                self.assertFalse(read.structured_content["content_inline_truncated"])
-                self.assertFalse(read.structured_content["truncated"])
-                self.assertEqual(versioned.structured_content["content"], text)
-                self.assertFalse(versioned.structured_content["source_truncated"])
-                self.assertEqual(
-                    versioned.structured_content["size"], len(text.encode())
+                versioned = require_call_tool_result(
+                    await server.call_tool(
+                        "read_file_versioned", {"path": "marker.txt"}
+                    )
                 )
-                self.assertEqual(len(versioned.structured_content["sha256"]), 64)
+                read_structured = read.structured_content
+                versioned_structured = versioned.structured_content
+                assert read_structured is not None
+                assert versioned_structured is not None
+                self.assertTrue(read.content)
+                self.assertEqual(require_text_content(read.content[0]).text, text)
+                self.assertEqual(read_structured["content"], text)
+                self.assertFalse(read_structured["source_truncated"])
+                self.assertFalse(read_structured["content_inline_truncated"])
+                self.assertFalse(read_structured["truncated"])
+                self.assertEqual(versioned_structured["content"], text)
+                self.assertFalse(versioned_structured["source_truncated"])
+                self.assertEqual(versioned_structured["size"], len(text.encode()))
+                self.assertEqual(len(versioned_structured["sha256"]), 64)
 
             asyncio.run(exercise())
 
@@ -88,12 +97,14 @@ class MCPTruncationProvenanceTests(unittest.TestCase):
             server = create_server(Settings.create(root, max_output_size=1000))
 
             async def exercise() -> None:
-                result = await server.call_tool("read_file", {"path": "large.txt"})
-                self.assertTrue(result.structured_content["source_truncated"])
-                self.assertTrue(result.structured_content["truncated"])
-                self.assertLessEqual(
-                    len(result.structured_content["content"].encode("utf-8")), 1000
+                result = require_call_tool_result(
+                    await server.call_tool("read_file", {"path": "large.txt"})
                 )
+                structured = result.structured_content
+                assert structured is not None
+                self.assertTrue(structured["source_truncated"])
+                self.assertTrue(structured["truncated"])
+                self.assertLessEqual(len(structured["content"].encode("utf-8")), 1000)
 
             asyncio.run(exercise())
 
@@ -119,19 +130,27 @@ class MCPTruncationProvenanceTests(unittest.TestCase):
             server = create_server(Settings.create(root))
 
             async def exercise() -> None:
-                diff = await server.call_tool("git_diff", {})
-                self.assertIn(marker_line, diff.content[0].text)
-                self.assertFalse(diff.structured_content["source_truncated"])
-                self.assertFalse(diff.structured_content["truncated"])
+                diff = require_call_tool_result(await server.call_tool("git_diff", {}))
+                diff_structured = diff.structured_content
+                assert diff_structured is not None
+                self.assertTrue(diff.content)
+                self.assertIn(marker_line, require_text_content(diff.content[0]).text)
+                self.assertFalse(diff_structured["source_truncated"])
+                self.assertFalse(diff_structured["truncated"])
 
                 subprocess.run(["git", "add", "marker.txt"], cwd=root, check=True)
                 subprocess.run(
                     ["git", "commit", "-qm", "marker commit"], cwd=root, check=True
                 )
-                shown = await server.call_tool("git_show", {"commit": "HEAD"})
-                self.assertIn(marker_line, shown.content[0].text)
-                self.assertFalse(shown.structured_content["source_truncated"])
-                self.assertFalse(shown.structured_content["truncated"])
+                shown = require_call_tool_result(
+                    await server.call_tool("git_show", {"commit": "HEAD"})
+                )
+                shown_structured = shown.structured_content
+                assert shown_structured is not None
+                self.assertTrue(shown.content)
+                self.assertIn(marker_line, require_text_content(shown.content[0]).text)
+                self.assertFalse(shown_structured["source_truncated"])
+                self.assertFalse(shown_structured["truncated"])
 
             asyncio.run(exercise())
 
@@ -143,10 +162,18 @@ class MCPTruncationProvenanceTests(unittest.TestCase):
             server = create_server(Settings.create(root, max_output_size=350))
 
             async def exercise() -> None:
-                result = await server.call_tool("workspace_diff", {})
-                self.assertIn("workspace_diff output truncated", result.content[0].text)
-                self.assertTrue(result.structured_content["source_truncated"])
-                self.assertTrue(result.structured_content["truncated"])
+                result = require_call_tool_result(
+                    await server.call_tool("workspace_diff", {})
+                )
+                structured = result.structured_content
+                assert structured is not None
+                self.assertTrue(result.content)
+                self.assertIn(
+                    "workspace_diff output truncated",
+                    require_text_content(result.content[0]).text,
+                )
+                self.assertTrue(structured["source_truncated"])
+                self.assertTrue(structured["truncated"])
 
             asyncio.run(exercise())
 
@@ -157,12 +184,15 @@ class MCPTruncationProvenanceTests(unittest.TestCase):
             server = create_server(Settings.create(root))
 
             async def exercise() -> None:
-                result = await server.call_tool(
-                    "run_shell", {"command": "cat marker.txt"}
+                result = require_call_tool_result(
+                    await server.call_tool("run_shell", {"command": "cat marker.txt"})
                 )
-                self.assertEqual(result.content[0].text, text)
-                self.assertFalse(result.structured_content["source_truncated"])
-                self.assertFalse(result.structured_content["truncated"])
+                structured = result.structured_content
+                assert structured is not None
+                self.assertTrue(result.content)
+                self.assertEqual(require_text_content(result.content[0]).text, text)
+                self.assertFalse(structured["source_truncated"])
+                self.assertFalse(structured["truncated"])
 
             asyncio.run(exercise())
 

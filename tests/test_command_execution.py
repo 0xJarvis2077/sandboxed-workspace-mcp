@@ -85,11 +85,13 @@ class CommandCompilerTests(unittest.TestCase):
     def test_cwd_rejects_escape_links_blocked_ignored_files_and_bad_syntax(
         self,
     ) -> None:
-        link = self.root / "linked-src"
+        link_path = self.root / "linked-src"
         try:
-            link.symlink_to(self.root / "src", target_is_directory=True)
+            link_path.symlink_to(self.root / "src", target_is_directory=True)
         except (OSError, NotImplementedError):
-            link = None
+            link: Path | None = None
+        else:
+            link = link_path
 
         invalid = [
             "",

@@ -36,25 +36,28 @@ class _CharacterSet:
             character.casefold() if ignore_case else character for character in literals
         )
         normalized_ranges: list[tuple[int, int]] = []
-        for start, end in ranges:
+        for range_start, range_end in ranges:
             if ignore_case:
-                start = start.casefold()
-                end = end.casefold()
-            if len(start) != 1 or len(end) != 1:
+                range_start = range_start.casefold()
+                range_end = range_end.casefold()
+            if len(range_start) != 1 or len(range_end) != 1:
                 continue
-            start_codepoint = ord(start)
-            end_codepoint = ord(end)
+            start_codepoint = ord(range_start)
+            end_codepoint = ord(range_end)
             if start_codepoint <= end_codepoint:
                 normalized_ranges.append((start_codepoint, end_codepoint))
 
         normalized_ranges.sort()
         merged_ranges: list[tuple[int, int]] = []
-        for start, end in normalized_ranges:
-            if merged_ranges and start <= merged_ranges[-1][1] + 1:
+        for current_start, current_end in normalized_ranges:
+            if merged_ranges and current_start <= merged_ranges[-1][1] + 1:
                 previous_start, previous_end = merged_ranges[-1]
-                merged_ranges[-1] = (previous_start, max(previous_end, end))
+                merged_ranges[-1] = (
+                    previous_start,
+                    max(previous_end, current_end),
+                )
             else:
-                merged_ranges.append((start, end))
+                merged_ranges.append((current_start, current_end))
 
         compiled_ranges = tuple(merged_ranges)
         return cls(

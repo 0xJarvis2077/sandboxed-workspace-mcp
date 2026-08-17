@@ -390,6 +390,8 @@ def parse_runtime(
         ]
         if missing:
             parser.error(f"OAuth configuration is missing: {', '.join(missing)}")
+        if public_origin is None:
+            parser.error("OAuth configuration is missing: MCP_PUBLIC_HOST")
         try:
             oauth = OAuthSettings(
                 issuer=args.oauth_issuer,

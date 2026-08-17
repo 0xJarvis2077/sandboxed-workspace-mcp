@@ -294,16 +294,16 @@ SECURITY.md              # 安全边界、威胁模型和剩余风险
 
 ```bash
 .venv/bin/python -m pip install -e ".[dev]"
-.venv/bin/python -m ruff check .
-.venv/bin/python -m ruff format --check .
-PYTHONPATH=src .venv/bin/python -m coverage run -m unittest discover -s tests -v
-.venv/bin/python -m coverage report --fail-under=85
-.venv/bin/python -m compileall -q server.py src tests scripts
-.venv/bin/python -m build
-.venv/bin/python scripts/wheel_smoke.py dist/*.whl
+.venv/bin/python scripts/install_hooks.py
+
+# 自动修复 Ruff 可安全修复的问题并统一格式化
+.venv/bin/python scripts/fix.py
+
+# 与 CI 相同的完整质量门禁
+.venv/bin/python scripts/check.py
 ```
 
-CI 在 Python 3.10 和 3.13 上执行 lint、format、测试、覆盖率、compile、build 和 wheel smoke。普通测试不需要 Docker/Podman。
+`python scripts/check.py --fast` 只执行 Ruff lint、Ruff format check 和 `mypy src tests`，仓库的 pre-push hook 使用这个快速门禁。完整门禁在此基础上继续执行测试、分支覆盖率（最低 85%）、compile、build 和 wheel smoke。CI 在 Python 3.10 和 3.13 上直接调用同一个 `scripts/check.py`，避免本地与 CI 的检查命令漂移。普通测试不需要 Docker/Podman。
 
 ## 许可证
 

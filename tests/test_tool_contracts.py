@@ -7,6 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _mcp_assertions import (
+    require_call_tool_result,
+    require_structured_content,
+    require_text_content,
+)
+from mcp.types import CallToolResult
+
 from sandboxed_workspace_mcp import server as server_module
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.server import create_server
@@ -30,10 +37,12 @@ class ToolContractTests(unittest.TestCase):
         self.assertTrue({tool.name for tool in tools}.issubset(TOOL_CONTRACTS))
         for tool in tools:
             with self.subTest(tool=tool.name):
-                self.assertIsNotNone(tool.output_schema)
-                self.assertEqual(tool.output_schema.get("type"), "object")
-                self.assertIsNotNone(tool.annotations)
-                annotations = tool.annotations.model_dump(
+                output_schema = tool.output_schema
+                annotations_model = tool.annotations
+                assert output_schema is not None
+                assert annotations_model is not None
+                self.assertEqual(output_schema.get("type"), "object")
+                annotations = annotations_model.model_dump(
                     by_alias=True, exclude_none=False
                 )
                 for name in (
@@ -43,6 +52,28 @@ class ToolContractTests(unittest.TestCase):
                     "openWorldHint",
                 ):
                     self.assertIsInstance(annotations[name], bool)
+
+    def test_call_tool_result_preserves_mcp_wire_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            (workspace / "sample.txt").write_text("sample", encoding="utf-8")
+            server = create_server(Settings.create(root, allow_trash=True))
+            result = asyncio.run(
+                server.call_tool(
+                    "trash_file",
+                    {"path": "sample.txt", "expected_sha256": "0" * 64},
+                )
+            )
+
+        self.assertIsInstance(result, CallToolResult)
+        assert isinstance(result, CallToolResult)
+        self.assertTrue(result.is_error)
+        self.assertIsNotNone(result.structured_content)
+        wire = result.model_dump(by_alias=True)
+        self.assertTrue(wire["isError"])
+        self.assertIsNotNone(wire["structuredContent"])
+        self.assertNotIn("is_error", wire)
+        self.assertNotIn("structured_content", wire)
 
     def test_registry_names_are_unique_and_contracts_are_meaningful(self) -> None:
         self.assertEqual(len(TOOL_CONTRACTS), len(set(TOOL_CONTRACTS)))
@@ -104,32 +135,50 @@ class ToolContractTests(unittest.TestCase):
             server = create_server(Settings.create(root))
 
             async def exercise() -> None:
-                info = await server.call_tool("project_info", {})
-                read = await server.call_tool("read_file", {"path": "sample.txt"})
-                versioned = await server.call_tool(
-                    "read_file_versioned", {"path": "sample.txt"}
+                info = require_call_tool_result(
+                    await server.call_tool("project_info", {})
                 )
-                search = await server.call_tool(
-                    "search_text", {"text": "beta", "path": "."}
+                read = require_call_tool_result(
+                    await server.call_tool("read_file", {"path": "sample.txt"})
                 )
-                written = await server.call_tool(
-                    "write_file",
-                    {"path": "created.txt", "content": "hello"},
+                versioned = require_call_tool_result(
+                    await server.call_tool(
+                        "read_file_versioned", {"path": "sample.txt"}
+                    )
                 )
+                search = require_call_tool_result(
+                    await server.call_tool("search_text", {"text": "beta", "path": "."})
+                )
+                written = require_call_tool_result(
+                    await server.call_tool(
+                        "write_file",
+                        {"path": "created.txt", "content": "hello"},
+                    )
+                )
+                info_structured = require_structured_content(info)
+                read_structured = require_structured_content(read)
+                versioned_structured = require_structured_content(versioned)
+                search_structured = require_structured_content(search)
+                written_structured = require_structured_content(written)
 
-                self.assertIn("Allowed project root:", info.content[0].text)
-                self.assertEqual(info.structured_content["workspace_root"], ".")
-                self.assertNotIn(root, json.dumps(info.structured_content))
-                self.assertEqual(read.content[0].text, "alpha\nbeta\n")
-                self.assertEqual(read.structured_content["content"], "alpha\nbeta\n")
-                self.assertEqual(versioned.structured_content["path"], "sample.txt")
-                self.assertEqual(len(versioned.structured_content["sha256"]), 64)
-                self.assertEqual(search.structured_content["matches"][0]["line"], 2)
-                self.assertEqual(
-                    search.structured_content["matches"][0]["path"], "sample.txt"
+                self.assertTrue(info.content)
+                self.assertIn(
+                    "Allowed project root:",
+                    require_text_content(info.content[0]).text,
                 )
-                self.assertTrue(written.structured_content["written"])
-                self.assertEqual(written.structured_content["bytes"], 5)
+                self.assertEqual(info_structured["workspace_root"], ".")
+                self.assertNotIn(root, json.dumps(info_structured))
+                self.assertTrue(read.content)
+                self.assertEqual(
+                    require_text_content(read.content[0]).text, "alpha\nbeta\n"
+                )
+                self.assertEqual(read_structured["content"], "alpha\nbeta\n")
+                self.assertEqual(versioned_structured["path"], "sample.txt")
+                self.assertEqual(len(versioned_structured["sha256"]), 64)
+                self.assertEqual(search_structured["matches"][0]["line"], 2)
+                self.assertEqual(search_structured["matches"][0]["path"], "sample.txt")
+                self.assertTrue(written_structured["written"])
+                self.assertEqual(written_structured["bytes"], 5)
 
             asyncio.run(exercise())
 
@@ -146,36 +195,49 @@ class ToolContractTests(unittest.TestCase):
             )
 
             async def exercise() -> None:
-                versioned = await server.call_tool(
-                    "read_file_versioned", {"path": "recover.txt"}
+                versioned = require_call_tool_result(
+                    await server.call_tool(
+                        "read_file_versioned", {"path": "recover.txt"}
+                    )
                 )
-                trashed = await server.call_tool(
-                    "trash_file",
-                    {
-                        "path": "recover.txt",
-                        "expected_sha256": versioned.structured_content["sha256"],
-                    },
+                versioned_structured = require_structured_content(versioned)
+                trashed = require_call_tool_result(
+                    await server.call_tool(
+                        "trash_file",
+                        {
+                            "path": "recover.txt",
+                            "expected_sha256": versioned_structured["sha256"],
+                        },
+                    )
                 )
-                self.assertEqual(
-                    trashed.structured_content["original_path"], "recover.txt"
+                trashed_structured = require_structured_content(trashed)
+                self.assertEqual(trashed_structured["original_path"], "recover.txt")
+                restored = require_call_tool_result(
+                    await server.call_tool(
+                        "restore_trashed_file",
+                        {
+                            "trash_id": trashed_structured["trash_id"],
+                            "expected_sha256": trashed_structured["sha256"],
+                        },
+                    )
                 )
-                restored = await server.call_tool(
-                    "restore_trashed_file",
-                    {
-                        "trash_id": trashed.structured_content["trash_id"],
-                        "expected_sha256": trashed.structured_content["sha256"],
-                    },
-                )
-                self.assertTrue(restored.structured_content["restored"])
+                restored_structured = require_structured_content(restored)
+                self.assertTrue(restored_structured["restored"])
 
-                initialized = await server.call_tool("git_init", {})
+                initialized = require_call_tool_result(
+                    await server.call_tool("git_init", {})
+                )
+                initialized_structured = require_structured_content(initialized)
                 self.assertIn(
-                    initialized.structured_content["status"],
+                    initialized_structured["status"],
                     {"initialized", "already_initialized"},
                 )
-                status = await server.call_tool("git_status", {"style": "porcelain"})
-                self.assertIn("clean", status.structured_content)
-                self.assertIsInstance(status.structured_content["entries"], list)
+                status = require_call_tool_result(
+                    await server.call_tool("git_status", {"style": "porcelain"})
+                )
+                status_structured = require_structured_content(status)
+                self.assertIn("clean", status_structured)
+                self.assertIsInstance(status_structured["entries"], list)
 
             asyncio.run(exercise())
 

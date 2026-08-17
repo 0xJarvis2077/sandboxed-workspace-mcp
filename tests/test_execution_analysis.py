@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import TypedDict
 
 from sandboxed_workspace_mcp.analysis_execution import coverage_harness
 from sandboxed_workspace_mcp.config import Settings
@@ -19,6 +20,22 @@ from sandboxed_workspace_mcp.diagnostics import (
     parse_ruff_diagnostics,
 )
 from sandboxed_workspace_mcp.python_execution import PythonCommandCompiler
+
+
+class _BranchCoverage(TypedDict):
+    missing: int
+
+
+class _CoverageSummary(TypedDict, total=False):
+    percent: float
+    missing: int
+    branches: _BranchCoverage
+    fail_under_failed: bool
+
+
+class _CoveragePayload(TypedDict):
+    tests_exit_code: int
+    coverage: _CoverageSummary
 
 
 class ExecutionCompilerTests(unittest.TestCase):
@@ -139,7 +156,7 @@ class CoverageHarnessTests(unittest.TestCase):
 
             self.assertEqual(return_code, 0)
             branches = payload["coverage"].get("branches")
-            self.assertIsInstance(branches, dict)
+            assert branches is not None
             self.assertGreater(branches["missing"], 0)
 
     def test_api_branch_true_enables_branch_coverage(self) -> None:
@@ -150,7 +167,7 @@ class CoverageHarnessTests(unittest.TestCase):
 
             self.assertEqual(return_code, 0)
             branches = payload["coverage"].get("branches")
-            self.assertIsInstance(branches, dict)
+            assert branches is not None
             self.assertGreater(branches["missing"], 0)
 
     @staticmethod
@@ -207,7 +224,7 @@ class CoverageHarnessTests(unittest.TestCase):
     @staticmethod
     def _run_harness(
         root: Path, *, branch: bool = False, fail_under: float | None = None
-    ) -> tuple[int, dict[str, object]]:
+    ) -> tuple[int, _CoveragePayload]:
         result = subprocess.run(
             [
                 sys.executable,
@@ -234,7 +251,38 @@ class CoverageHarnessTests(unittest.TestCase):
                 f"coverage marker missing; stdout={result.stdout!r}, "
                 f"stderr={result.stderr!r}"
             )
-        return result.returncode, json.loads(marker.removeprefix("SWMCP_COVERAGE:"))
+        raw_payload = json.loads(marker.removeprefix("SWMCP_COVERAGE:"))
+        assert isinstance(raw_payload, dict)
+        tests_exit_code = raw_payload.get("tests_exit_code")
+        raw_coverage = raw_payload.get("coverage")
+        assert isinstance(tests_exit_code, int)
+        assert isinstance(raw_coverage, dict)
+
+        coverage: _CoverageSummary = {}
+        percent = raw_coverage.get("percent")
+        if percent is not None:
+            assert isinstance(percent, float)
+            coverage["percent"] = percent
+        missing = raw_coverage.get("missing")
+        if missing is not None:
+            assert isinstance(missing, int)
+            coverage["missing"] = missing
+        fail_under_failed = raw_coverage.get("fail_under_failed")
+        if fail_under_failed is not None:
+            assert isinstance(fail_under_failed, bool)
+            coverage["fail_under_failed"] = fail_under_failed
+        raw_branches = raw_coverage.get("branches")
+        if raw_branches is not None:
+            assert isinstance(raw_branches, dict)
+            branch_missing = raw_branches.get("missing")
+            assert isinstance(branch_missing, int)
+            coverage["branches"] = {"missing": branch_missing}
+
+        payload: _CoveragePayload = {
+            "tests_exit_code": tests_exit_code,
+            "coverage": coverage,
+        }
+        return result.returncode, payload
 
     @staticmethod
     def _assert_workspace_is_free_of_coverage_artifacts(root: Path) -> None:
@@ -350,7 +398,9 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotIn("super-secret", repr(result))
         self.assertEqual(failure["frames"][1]["path"], "<external>")
         self.assertNotIn("/Users/host", repr(result))
-        self.assertNotIn("SWMCP_FAILURES", result["stdout"])
+        stdout = result["stdout"]
+        assert isinstance(stdout, str)
+        self.assertNotIn("SWMCP_FAILURES", stdout)
 
     def test_coverage_result_is_compact_and_one_shot(self) -> None:
         result = adapt_coverage_result(
@@ -400,6 +450,61 @@ class DiagnosticsTests(unittest.TestCase):
         )
         self.assertEqual(result["tests"]["exit_code"], 0)  # type: ignore[index]
         self.assertTrue(result["coverage"]["fail_under_failed"])  # type: ignore[index]
+
+    def test_coverage_numeric_strings_remain_accepted(self) -> None:
+        result = adapt_coverage_result(
+            {
+                "status": "succeeded",
+                "exit_code": 0,
+                "stdout": (
+                    "SWMCP_COVERAGE:"
+                    + json.dumps(
+                        {
+                            "tests_exit_code": 0,
+                            "coverage": {
+                                "percent": "91.2",
+                                "covered": "10",
+                                "missing": "1",
+                            },
+                        }
+                    )
+                ),
+            }
+        )
+
+        coverage = result["coverage"]
+        self.assertIsInstance(coverage, dict)
+        if not isinstance(coverage, dict):
+            self.fail("coverage result should be a mapping")
+        self.assertEqual(coverage["percent"], 91.2)
+        self.assertEqual(coverage["covered"], 10)
+        self.assertEqual(coverage["missing"], 1)
+
+    def test_invalid_coverage_numeric_payload_is_reported(self) -> None:
+        result = adapt_coverage_result(
+            {
+                "status": "succeeded",
+                "exit_code": 0,
+                "stdout": (
+                    "SWMCP_COVERAGE:"
+                    + json.dumps(
+                        {
+                            "tests_exit_code": 0,
+                            "coverage": {
+                                "percent": {},
+                                "covered": 10,
+                                "missing": 1,
+                            },
+                        }
+                    )
+                ),
+            }
+        )
+
+        self.assertIsNone(result["coverage"])
+        self.assertEqual(
+            result["coverage_parser_error"], "coverage summary output was malformed"
+        )
 
     def test_parser_rejects_host_paths_and_caps_diagnostics(self) -> None:
         with self.assertRaises(ValueError):

@@ -334,25 +334,30 @@ def _sanitize_locals(value: object) -> list[dict[str, object]]:
     return sanitized
 
 
-def _sanitize_coverage(value: dict[str, object]) -> dict[str, object]:
+def _coverage_number(value: object, *, integer: bool) -> float | int:
+    if not isinstance(value, (int, float, str)):
+        raise TypeError("coverage total is not numeric")
+    return int(value) if integer else float(value)
+
+
+def _coverage_totals(value: dict[str, object], error_message: str) -> dict[str, object]:
     try:
-        summary: dict[str, object] = {
-            "percent": float(value.get("percent", 0.0)),
-            "covered": int(value.get("covered", 0)),
-            "missing": int(value.get("missing", 0)),
+        return {
+            "percent": _coverage_number(value.get("percent", 0.0), integer=False),
+            "covered": _coverage_number(value.get("covered", 0), integer=True),
+            "missing": _coverage_number(value.get("missing", 0), integer=True),
         }
     except (TypeError, ValueError) as exc:
-        raise DiagnosticsParseError("coverage totals are invalid") from exc
+        raise DiagnosticsParseError(error_message) from exc
+
+
+def _sanitize_coverage(value: dict[str, object]) -> dict[str, object]:
+    summary = _coverage_totals(value, "coverage totals are invalid")
     branches = value.get("branches")
     if isinstance(branches, dict):
-        try:
-            summary["branches"] = {
-                "percent": float(branches.get("percent", 0.0)),
-                "covered": int(branches.get("covered", 0)),
-                "missing": int(branches.get("missing", 0)),
-            }
-        except (TypeError, ValueError) as exc:
-            raise DiagnosticsParseError("coverage branch totals are invalid") from exc
+        summary["branches"] = _coverage_totals(
+            branches, "coverage branch totals are invalid"
+        )
     if value.get("fail_under_failed"):
         summary["fail_under_failed"] = True
     return summary

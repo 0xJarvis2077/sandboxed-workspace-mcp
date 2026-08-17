@@ -27,7 +27,9 @@ class SafeRegexTests(unittest.TestCase):
     def test_literal_fast_path_supports_escaped_metacharacters(self) -> None:
         matcher = SafeRegex(r"a\+b")
 
-        self.assertEqual(matcher._literal_pattern.needle, "a+b")
+        literal_pattern = matcher._literal_pattern
+        assert literal_pattern is not None
+        self.assertEqual(literal_pattern.needle, "a+b")
         self.assertTrue(matcher.search("prefix a+b suffix"))
         self.assertFalse(matcher.search("a++b"))
 

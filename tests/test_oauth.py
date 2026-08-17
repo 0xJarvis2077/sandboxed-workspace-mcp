@@ -10,10 +10,19 @@ from types import MappingProxyType
 from unittest.mock import AsyncMock, patch
 
 import jwt
+from _mcp_assertions import (
+    require_call_tool_result,
+    require_resource_contents,
+    require_structured_content,
+)
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm
+from mcp.server import MCPServer
 from mcp.server.auth.provider import AccessToken
 from mcp.server.mcpserver.exceptions import ResourceNotFoundError
+from mcp.types import Tool
+from starlette.applications import Starlette
+from starlette.types import Message
 
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.oauth import (
@@ -65,6 +74,12 @@ def _oauth() -> OAuthSettings:
         public_origin=RESOURCE,
         jwks_uri=JWKS_URI,
     )
+
+
+def _security_schemes(tool: Tool) -> object:
+    meta = tool.meta
+    assert meta is not None
+    return meta["securitySchemes"]
 
 
 def _rsa_key(kid: str):
@@ -137,16 +152,16 @@ async def _asgi_request(
         "server": ("mcp.example.test", 443),
     }
     received = False
-    messages: list[dict[str, object]] = []
+    messages: list[Message] = []
 
-    async def receive():
+    async def receive() -> Message:
         nonlocal received
         if received:
             return {"type": "http.disconnect"}
         received = True
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    async def send(message):
+    async def send(message: Message) -> None:
         messages.append(message)
 
     await app(scope, receive, send)
@@ -171,7 +186,6 @@ class JWTVerifierTests(unittest.TestCase):
             with self.subTest(algorithm=algorithm):
                 private, jwk = factory(f"{algorithm}-key")
                 verifier = JWTTokenVerifier(_oauth())
-                verifier._fetch_json = AsyncMock(return_value={"keys": [jwk]})
                 encoded = _token(
                     private,
                     jwk["kid"],
@@ -179,7 +193,10 @@ class JWTVerifierTests(unittest.TestCase):
                     scopes="workspace.read workspace.write",
                 )
 
-                result = asyncio.run(verifier.verify_token(encoded))
+                with patch.object(
+                    verifier, "_fetch_json", AsyncMock(return_value={"keys": [jwk]})
+                ):
+                    result = asyncio.run(verifier.verify_token(encoded))
 
                 self.assertIsNotNone(result)
                 assert result is not None
@@ -201,23 +218,24 @@ class JWTVerifierTests(unittest.TestCase):
         for case, encoded in candidates.items():
             with self.subTest(case=case):
                 verifier = JWTTokenVerifier(_oauth())
-                verifier._fetch_json = AsyncMock(return_value={"keys": [jwk]})
-                self.assertIsNone(asyncio.run(verifier.verify_token(encoded)))
+                with patch.object(
+                    verifier, "_fetch_json", AsyncMock(return_value={"keys": [jwk]})
+                ):
+                    self.assertIsNone(asyncio.run(verifier.verify_token(encoded)))
 
     def test_unknown_kid_refreshes_jwks_once_and_discovery_is_bounded(self) -> None:
         private, wanted = _rsa_key("rotated")
         _, stale = _rsa_key("stale")
         verifier = JWTTokenVerifier(_oauth())
-        verifier._fetch_json = AsyncMock(
-            side_effect=({"keys": [stale]}, {"keys": [wanted]})
-        )
+        fetch_json = AsyncMock(side_effect=({"keys": [stale]}, {"keys": [wanted]}))
 
-        result = asyncio.run(
-            verifier.verify_token(_token(private, "rotated", scopes="tasks.run"))
-        )
+        with patch.object(verifier, "_fetch_json", fetch_json):
+            result = asyncio.run(
+                verifier.verify_token(_token(private, "rotated", scopes="tasks.run"))
+            )
 
         self.assertIsNotNone(result)
-        self.assertEqual(verifier._fetch_json.await_count, 2)
+        self.assertEqual(fetch_json.await_count, 2)
 
         settings = OAuthSettings(
             issuer=ISSUER,
@@ -226,19 +244,20 @@ class JWTVerifierTests(unittest.TestCase):
             jwks_uri=None,
         )
         discovered = JWTTokenVerifier(settings)
-        discovered._fetch_json = AsyncMock(
+        discovered_fetch_json = AsyncMock(
             side_effect=(
                 {"issuer": ISSUER, "jwks_uri": JWKS_URI},
                 {"keys": [wanted]},
             )
         )
-        self.assertIsNotNone(
-            asyncio.run(
-                discovered.verify_token(
-                    _token(private, "rotated", scopes="workspace.read")
+        with patch.object(discovered, "_fetch_json", discovered_fetch_json):
+            self.assertIsNotNone(
+                asyncio.run(
+                    discovered.verify_token(
+                        _token(private, "rotated", scopes="workspace.read")
+                    )
                 )
             )
-        )
 
     def test_issuer_trailing_slash_and_scp_string_are_preserved(self) -> None:
         issuer = "https://idp.example.test/tenant/"
@@ -250,7 +269,6 @@ class JWTVerifierTests(unittest.TestCase):
         )
         private, jwk = _rsa_key("slash")
         verifier = JWTTokenVerifier(settings)
-        verifier._fetch_json = AsyncMock(return_value={"keys": [jwk]})
         now = int(time.time())
         encoded = jwt.encode(
             {
@@ -265,7 +283,10 @@ class JWTVerifierTests(unittest.TestCase):
             headers={"kid": "slash"},
         )
 
-        result = asyncio.run(verifier.verify_token(encoded))
+        with patch.object(
+            verifier, "_fetch_json", AsyncMock(return_value={"keys": [jwk]})
+        ):
+            result = asyncio.run(verifier.verify_token(encoded))
 
         self.assertIsNotNone(result)
         assert result is not None
@@ -318,39 +339,39 @@ class OAuthServerTests(unittest.TestCase):
         tools = asyncio.run(server.list_tools())
         by_name = {tool.name: tool for tool in tools}
         self.assertEqual(
-            by_name["read_file"].meta["securitySchemes"],
+            _security_schemes(by_name["read_file"]),
             [{"type": "oauth2", "scopes": ["workspace.read"]}],
         )
         self.assertEqual(
-            by_name["git_show"].meta["securitySchemes"],
+            _security_schemes(by_name["git_show"]),
             [{"type": "oauth2", "scopes": ["workspace.read"]}],
         )
         self.assertEqual(
-            by_name["workspace_diff"].meta["securitySchemes"],
+            _security_schemes(by_name["workspace_diff"]),
             [{"type": "oauth2", "scopes": ["workspace.read"]}],
         )
         self.assertEqual(
-            by_name["write_file"].meta["securitySchemes"],
+            _security_schemes(by_name["write_file"]),
             [{"type": "oauth2", "scopes": ["workspace.write"]}],
         )
         self.assertEqual(
-            by_name["run_task"].meta["securitySchemes"],
+            _security_schemes(by_name["run_task"]),
             [{"type": "oauth2", "scopes": ["tasks.run"]}],
         )
         self.assertEqual(
-            by_name["python_version"].meta["securitySchemes"],
+            _security_schemes(by_name["python_version"]),
             [{"type": "oauth2", "scopes": ["tasks.run"]}],
         )
         self.assertEqual(
-            by_name["run_command"].meta["securitySchemes"],
+            _security_schemes(by_name["run_command"]),
             [{"type": "oauth2", "scopes": ["tasks.run"]}],
         )
         self.assertEqual(
-            by_name["start_command"].meta["securitySchemes"],
+            _security_schemes(by_name["start_command"]),
             [{"type": "oauth2", "scopes": ["tasks.run"]}],
         )
         self.assertEqual(
-            by_name["list_execution_profiles"].meta["securitySchemes"],
+            _security_schemes(by_name["list_execution_profiles"]),
             [{"type": "oauth2", "scopes": ["tasks.read"]}],
         )
 
@@ -362,16 +383,24 @@ class OAuthServerTests(unittest.TestCase):
             with patch(
                 "sandboxed_workspace_mcp.server.get_access_token", return_value=None
             ):
-                missing = await server.call_tool("project_info", {})
+                missing = require_call_tool_result(
+                    await server.call_tool("project_info", {})
+                )
                 self.assertTrue(missing.is_error)
-                self.assertIn("mcp/www_authenticate", missing.meta)
+                missing_meta = missing.meta
+                assert missing_meta is not None
+                self.assertIn("mcp/www_authenticate", missing_meta)
 
             with patch(
                 "sandboxed_workspace_mcp.server.get_access_token", return_value=read
             ):
-                allowed = await server.call_tool("read_file", {"path": "file.txt"})
-                denied = await server.call_tool(
-                    "write_file", {"path": "new.txt", "content": "new"}
+                allowed = require_call_tool_result(
+                    await server.call_tool("read_file", {"path": "file.txt"})
+                )
+                denied = require_call_tool_result(
+                    await server.call_tool(
+                        "write_file", {"path": "new.txt", "content": "new"}
+                    )
                 )
                 self.assertFalse(allowed.is_error)
                 self.assertTrue(denied.is_error)
@@ -380,25 +409,35 @@ class OAuthServerTests(unittest.TestCase):
             with patch(
                 "sandboxed_workspace_mcp.server.get_access_token", return_value=write
             ):
-                written = await server.call_tool(
-                    "write_file", {"path": "new.txt", "content": "new"}
+                written = require_call_tool_result(
+                    await server.call_tool(
+                        "write_file", {"path": "new.txt", "content": "new"}
+                    )
                 )
-                denied = await server.call_tool("run_task", {"name": "test"})
+                denied = require_call_tool_result(
+                    await server.call_tool("run_task", {"name": "test"})
+                )
                 self.assertFalse(written.is_error)
                 self.assertTrue(denied.is_error)
 
             with patch(
                 "sandboxed_workspace_mcp.server.get_access_token", return_value=task
             ):
-                run = await server.call_tool("run_task", {"name": "test"})
-                version = await server.call_tool("python_version", {"profile": "debug"})
-                command = await server.call_tool(
-                    "run_command",
-                    {
-                        "profile": "debug",
-                        "program": "ruff",
-                        "args": ["check", "."],
-                    },
+                run = require_call_tool_result(
+                    await server.call_tool("run_task", {"name": "test"})
+                )
+                version = require_call_tool_result(
+                    await server.call_tool("python_version", {"profile": "debug"})
+                )
+                command = require_call_tool_result(
+                    await server.call_tool(
+                        "run_command",
+                        {
+                            "profile": "debug",
+                            "program": "ruff",
+                            "args": ["check", "."],
+                        },
+                    )
                 )
                 self.assertFalse(run.is_error)
                 self.assertFalse(version.is_error)
@@ -427,7 +466,7 @@ class OAuthServerTests(unittest.TestCase):
         tools = asyncio.run(server.list_tools())
         by_name = {tool.name: tool for tool in tools}
         self.assertEqual(
-            by_name["git_init"].meta["securitySchemes"],
+            _security_schemes(by_name["git_init"]),
             [{"type": "oauth2", "scopes": ["workspace.git.write"]}],
         )
         write = AccessToken(token="", client_id="client", scopes=["workspace.write"])
@@ -439,14 +478,18 @@ class OAuthServerTests(unittest.TestCase):
             with patch(
                 "sandboxed_workspace_mcp.server.get_access_token", return_value=write
             ):
-                denied = await server.call_tool("git_init", {})
+                denied = require_call_tool_result(
+                    await server.call_tool("git_init", {})
+                )
                 self.assertTrue(denied.is_error)
                 self.assertIn("insufficient_scope", repr(denied.meta))
             with patch(
                 "sandboxed_workspace_mcp.server.get_access_token",
                 return_value=git_write,
             ):
-                allowed = await server.call_tool("git_init", {})
+                allowed = require_call_tool_result(
+                    await server.call_tool("git_init", {})
+                )
                 self.assertFalse(allowed.is_error)
 
         asyncio.run(exercise())
@@ -480,9 +523,13 @@ class OAuthServerTests(unittest.TestCase):
             with patch(
                 "sandboxed_workspace_mcp.server.get_access_token", return_value=owner
             ):
-                result = await server.call_tool("read_file", {"path": "large.txt"})
-                uri = result.structured_content["content_resource_uri"]
-                contents = await server.read_resource(uri)
+                result = require_call_tool_result(
+                    await server.call_tool("read_file", {"path": "large.txt"})
+                )
+                structured = require_structured_content(result)
+                uri = structured["content_resource_uri"]
+                assert isinstance(uri, str)
+                contents = require_resource_contents(await server.read_resource(uri))
                 self.assertEqual(contents[0].content, large_text)
 
             for token in (other_subject, other_client, None):
@@ -503,6 +550,7 @@ class OAuthServerTests(unittest.TestCase):
             token_verifier=verifier,
         )
         app = server.streamable_http_app(streamable_http_path="/mcp", host="127.0.0.1")
+        self.assertIsInstance(app, Starlette)
 
         status, headers, body = asyncio.run(
             _asgi_request(app, "GET", "/.well-known/oauth-protected-resource")
@@ -525,6 +573,37 @@ class OAuthServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 401)
         self.assertNotIn(secret_token, repr((headers, body)))
+
+    def test_streamable_http_app_forwards_current_sdk_parameters(self) -> None:
+        server = create_server(Settings.create(self.root, allow_writes=False))
+        parent_app = Starlette()
+        with patch.object(
+            MCPServer,
+            "streamable_http_app",
+            return_value=parent_app,
+        ) as parent:
+            app = server.streamable_http_app(
+                streamable_http_path="/custom-mcp",
+                json_response=True,
+                stateless_http=True,
+                event_store=None,
+                retry_interval=17,
+                max_request_body_size=12345,
+                transport_security=None,
+                host="localhost",
+            )
+
+        self.assertIs(app, parent_app)
+        parent.assert_called_once_with(
+            streamable_http_path="/custom-mcp",
+            json_response=True,
+            stateless_http=True,
+            event_store=None,
+            retry_interval=17,
+            max_request_body_size=12345,
+            transport_security=None,
+            host="localhost",
+        )
 
 
 if __name__ == "__main__":

@@ -294,16 +294,16 @@ SECURITY.md              # Security boundary, threat model, and residual risk
 
 ```bash
 .venv/bin/python -m pip install -e ".[dev]"
-.venv/bin/python -m ruff check .
-.venv/bin/python -m ruff format --check .
-PYTHONPATH=src .venv/bin/python -m coverage run -m unittest discover -s tests -v
-.venv/bin/python -m coverage report --fail-under=85
-.venv/bin/python -m compileall -q server.py src tests scripts
-.venv/bin/python -m build
-.venv/bin/python scripts/wheel_smoke.py dist/*.whl
+.venv/bin/python scripts/install_hooks.py
+
+# Apply safe Ruff fixes and canonical formatting.
+.venv/bin/python scripts/fix.py
+
+# Run the same complete quality gate as CI.
+.venv/bin/python scripts/check.py
 ```
 
-CI runs lint, format, tests, coverage, compile, build, and wheel smoke on Python 3.10 and 3.13. The ordinary test suite does not require Docker/Podman.
+`python scripts/check.py --fast` runs only Ruff lint, Ruff format checking, and `mypy src tests`; the repository pre-push hook uses this fast gate. The full gate additionally runs tests, branch coverage (minimum 85%), compile, build, and wheel smoke. CI on Python 3.10 and 3.13 invokes the same `scripts/check.py`, preventing local and CI command drift. The ordinary test suite does not require Docker/Podman.
 
 ## License
 

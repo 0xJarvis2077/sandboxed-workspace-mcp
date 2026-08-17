@@ -11,6 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from _mcp_assertions import require_call_tool_result, require_text_content
+
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.git_reader import GitError, GitReader
 from sandboxed_workspace_mcp.server import create_server
@@ -353,16 +355,22 @@ class GitAndServiceTests(unittest.TestCase):
         server = create_server(self.settings)
 
         async def exercise_native_tools() -> None:
-            native_diff = await server.call_tool("git_diff", {"path": "nested"})
-            native_show = await server.call_tool(
-                "git_show", {"commit": "HEAD", "path": "nested"}
+            native_diff = require_call_tool_result(
+                await server.call_tool("git_diff", {"path": "nested"})
+            )
+            native_show = require_call_tool_result(
+                await server.call_tool("git_show", {"commit": "HEAD", "path": "nested"})
             )
             self.assertFalse(native_diff.is_error)
             self.assertFalse(native_show.is_error)
-            self.assertIn("visible after", native_diff.content[0].text)
-            self.assertIn("visible before", native_show.content[0].text)
-            self.assertNotIn("NESTED_SECRET", native_diff.content[0].text)
-            self.assertNotIn("NESTED_SECRET", native_show.content[0].text)
+            self.assertTrue(native_diff.content)
+            self.assertTrue(native_show.content)
+            diff_text = require_text_content(native_diff.content[0]).text
+            show_text = require_text_content(native_show.content[0]).text
+            self.assertIn("visible after", diff_text)
+            self.assertIn("visible before", show_text)
+            self.assertNotIn("NESTED_SECRET", diff_text)
+            self.assertNotIn("NESTED_SECRET", show_text)
 
         asyncio.run(exercise_native_tools())
 
@@ -632,7 +640,7 @@ class GitAndServiceTests(unittest.TestCase):
         self.assertFalse(by_name["workspace_diff"].input_schema["additionalProperties"])
 
         async def exercise() -> None:
-            calls = (
+            calls: tuple[tuple[str, dict[str, str | int | bool], str], ...] = (
                 ("git_status", {"style": "porcelain"}, "tracked.txt"),
                 ("git_diff", {"path": "tracked.txt"}, "after"),
                 ("workspace_diff", {}, "Tracked changes"),
@@ -644,10 +652,16 @@ class GitAndServiceTests(unittest.TestCase):
             )
             for name, arguments, expected in calls:
                 with self.subTest(tool=name):
-                    result = await server.call_tool(name, arguments)
+                    result = require_call_tool_result(
+                        await server.call_tool(name, arguments)
+                    )
                     self.assertFalse(result.is_error)
                     if expected:
-                        self.assertIn(expected, result.content[0].text)
+                        self.assertTrue(result.content)
+                        self.assertIn(
+                            expected,
+                            require_text_content(result.content[0]).text,
+                        )
             with self.assertRaisesRegex(ValueError, "unexpected argument"):
                 await server.call_tool("git_show", {"commit": "HEAD", "raw": True})
             with self.assertRaisesRegex(ValueError, "unexpected argument"):

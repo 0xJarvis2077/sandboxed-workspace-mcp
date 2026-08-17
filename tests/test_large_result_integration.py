@@ -6,6 +6,12 @@ import unittest
 from pathlib import Path
 from types import MappingProxyType
 
+from _mcp_assertions import (
+    require_call_tool_result,
+    require_resource_contents,
+    require_structured_content,
+)
+
 from sandboxed_workspace_mcp.config import Settings
 from sandboxed_workspace_mcp.server import create_server
 from sandboxed_workspace_mcp.task_config import (
@@ -58,15 +64,19 @@ class LargeResultIntegrationTests(unittest.TestCase):
                 await server.call_tool("git_create_baseline", {})
                 path.write_text("after\n" * 5000, encoding="utf-8")
 
-                result = await server.call_tool("workspace_diff", {})
-                structured = result.structured_content
+                result = require_call_tool_result(
+                    await server.call_tool("workspace_diff", {})
+                )
+                structured = require_structured_content(result)
                 self.assertTrue(structured["text_inline_truncated"])
                 self.assertFalse(structured["source_truncated"])
                 uri = structured["text_resource_uri"]
                 self.assertIsInstance(uri, str)
 
-                contents = await server.read_resource(uri)
+                contents = require_resource_contents(await server.read_resource(uri))
+                self.assertTrue(contents)
                 full_diff = contents[0].content
+                assert isinstance(full_diff, str)
                 self.assertIn("-before", full_diff)
                 self.assertIn("+after", full_diff)
                 self.assertGreater(
@@ -99,8 +109,10 @@ class LargeResultIntegrationTests(unittest.TestCase):
             server = create_server(settings, task_manager=manager)
 
             async def exercise() -> None:
-                result = await server.call_tool("run_task", {"name": "large"})
-                structured = result.structured_content
+                result = require_call_tool_result(
+                    await server.call_tool("run_task", {"name": "large"})
+                )
+                structured = require_structured_content(result)
                 self.assertEqual(structured["status"], "succeeded")
                 self.assertEqual(structured["exit_code"], 0)
                 self.assertFalse(structured["source_truncated"])
@@ -109,7 +121,8 @@ class LargeResultIntegrationTests(unittest.TestCase):
                 uri = structured["stdout_resource_uri"]
                 self.assertIsInstance(uri, str)
 
-                contents = await server.read_resource(uri)
+                contents = require_resource_contents(await server.read_resource(uri))
+                self.assertTrue(contents)
                 self.assertEqual(contents[0].content, stdout.decode())
 
             try:
