@@ -1,8 +1,8 @@
-# Sandboxed Workspace MCP
+# WorkspaceGuard MCP
 
 [English](README.en.md) · [安全边界](SECURITY.md) · [任务模板](examples/tasks.json) · [Execution profile 模板](examples/execution-profiles.json)
 
-把一个本地项目根目录安全地暴露为 MCP 工具：可以读取、搜索、编辑文本和查询 Git；也可以在操作者明确授权后，把工作区快照交给 Docker/Podman 中的固定任务或执行 profile。默认不会执行项目代码、清理文件或提供宿主 Shell、端口映射；显式开启后提供受限、可恢复的回收站，永久清理仍需单独授权。
+WorkspaceGuard MCP 是 AI Coding Agent 与真实开发工作区之间的 capability-bounded 安全边界。它允许 Agent 在明确授权下读取、搜索、编辑和审查真实代码仓库，并通过隔离执行环境运行测试与诊断，同时限制宿主 Shell、敏感路径、危险 Git 操作和未经授权的执行能力。
 
 ## 先看这三点
 
@@ -24,7 +24,7 @@
 ```bash
 python -m venv .venv
 .venv/bin/python -m pip install .
-.venv/bin/sandboxed-workspace-mcp \
+.venv/bin/workspace-guard-mcp \
   --root /absolute/path/to/project \
   --read-only
 ```
@@ -42,8 +42,8 @@ python -m venv .venv
 ```json
 {
   "mcpServers": {
-    "sandboxed-project": {
-      "command": "/absolute/path/to/venv/bin/sandboxed-workspace-mcp",
+    "workspaceguard-project": {
+      "command": "/absolute/path/to/venv/bin/workspace-guard-mcp",
       "args": [
         "--root",
         "/absolute/path/to/project",
@@ -85,20 +85,20 @@ python -m venv .venv
 
 ## Large Results
 
-小型文本结果保持完整 inline。已经经过现有 workspace、Git、execution 安全边界并完成 source bounding 的较大文本，会保留原字符串字段作为 UTF-8 安全 preview，并在 `structuredContent` 中附加 ephemeral `sandboxed-workspace://result/{id}` URI。例如 execution 结果可能包含：
+小型文本结果保持完整 inline。已经经过现有 workspace、Git、execution 安全边界并完成 source bounding 的较大文本，会保留原字符串字段作为 UTF-8 安全 preview，并在 `structuredContent` 中附加 ephemeral `workspaceguard://result/{id}` URI。例如 execution 结果可能包含：
 
 ```json
 {
   "stdout": "...preview...",
   "source_truncated": false,
   "stdout_inline_truncated": true,
-  "stdout_resource_uri": "sandboxed-workspace://result/..."
+  "stdout_resource_uri": "workspaceguard://result/..."
 }
 ```
 
 `source_truncated` 表示上游安全层已经丢弃了超出 `max_output_bytes` 等预算的数据；`*_inline_truncated` 仅表示 Server 为了 MCP 上下文大小缩短了当前已经安全、有界的结果。兼容字段 `truncated` 在适用的文本/执行结果中表示两者的并集。Resource 只能恢复 Server 当前仍持有的 bounded safe result，不能恢复此前已经被 source limit 丢弃的 raw output，也不会提高任何原有输出上限。
 
-Result Resource 仅保存在当前进程内存中，固定 TTL 为 15 分钟，Server 重启、过期或容量淘汰后 URI 会失效。URI 不会作为动态条目出现在 `resources/list`；客户端只会发现 `sandboxed-workspace://result/{id}` template。HTTP/OAuth 模式下结果还会绑定生成结果时的 authenticated owner；stdio/无 OAuth 模式依赖高熵、不可枚举的 ephemeral capability URI。
+Result Resource 仅保存在当前进程内存中，固定 TTL 为 15 分钟，Server 重启、过期或容量淘汰后 URI 会失效。URI 不会作为动态条目出现在 `resources/list`；客户端只会发现 `workspaceguard://result/{id}` template。HTTP/OAuth 模式下结果还会绑定生成结果时的 authenticated owner；stdio/无 OAuth 模式依赖高熵、不可枚举的 ephemeral capability URI。
 
 ## Tool Annotations
 
@@ -111,7 +111,7 @@ Server 通过 MCP Resources 自描述当前可用能力和推荐工作流，Agen
 - `internal://instructions`：当前 Server 的安全操作原则和能力感知使用指南。
 - `internal://tool-catalog`：机器可消费、按 tool name 稳定排序的当前 Tool 摘要。
 - `internal://tool-info/{name}`：一个当前已注册 Tool 的完整 input/output contract 与 annotations。
-- `sandboxed-workspace://result/{id}`：按需读取当前进程中的 ephemeral bounded large result；具体 URI 不可枚举。
+- `workspaceguard://result/{id}`：按需读取当前进程中的 ephemeral bounded large result；具体 URI 不可枚举。
 - `internal://workflows/edit-file`、`debug-python`、`recover-file`、`review-changes`：面向 Agent 的紧凑工作流。
 
 README 只提供入口概览；详细 SOP 由这些 Resources 自己承担，并随当前实际 capability surface 生成。
@@ -129,7 +129,7 @@ workspace_diff(path="src")  # tracked final state + safe untracked text
 
 ### 使用受控 Git 基线
 
-启用 `--allow-git-writes`（或 `SANDBOXED_WORKSPACE_MCP_ALLOW_GIT_WRITES=true`）后，服务才注册 `git_init` 和 `git_create_baseline`。它们没有调用方参数：`git_init` 只在当前配置的 workspace root 创建普通、非 bare 的 `main` 仓库，并对已存在的有效 root 仓库幂等返回；不支持 `repo_path`、子目录仓库、template、separate-git-dir、bare 或任意 Git argv。`git_create_baseline` 只能执行一次首次基线，使用固定消息和身份，不是通用 commit；blocked 文件、`.git`、回收站、ignored 目录、symlink 和特殊文件不会进入基线。
+启用 `--allow-git-writes`（或 `WORKSPACE_GUARD_MCP_ALLOW_GIT_WRITES=true`）后，服务才注册 `git_init` 和 `git_create_baseline`。它们没有调用方参数：`git_init` 只在当前配置的 workspace root 创建普通、非 bare 的 `main` 仓库，并对已存在的有效 root 仓库幂等返回；不支持 `repo_path`、子目录仓库、template、separate-git-dir、bare 或任意 Git argv。`git_create_baseline` 只能执行一次首次基线，使用固定消息和身份，不是通用 commit；blocked 文件、`.git`、回收站、ignored 目录、symlink 和特殊文件不会进入基线。
 
 首次基线还会过滤跨项目的环境噪声（例如任意深度的 `.DS_Store`、`Thumbs.db`、`Desktop.ini`、Python bytecode/cache 和 coverage 文件），并把同一组固定规则以 managed block 安装到仓库私有的 `.git/info/exclude`，因此基线后新出现的噪声也不会污染 `git_status`。这不会修改项目 `.gitignore` 或用户全局 Git ignore。该迁移边界只保证未来创建的 baseline；旧版本已经 tracked 的噪声不会自动解除跟踪，也不会被重写，需由操作者在 MCP 外明确迁移或重建 baseline。
 
@@ -212,8 +212,8 @@ profile 是 operator 的安全与环境策略，不是 agent 必须记住的工�
 `examples/Dockerfile.task` 是标准 execution image 的来源，预装 pytest、coverage、Ruff、mypy 等离线执行工具。修改 Dockerfile 并不会自动更新已经运行的 MCP；operator 必须显式重建镜像、取得不可变 image ID/digest、更新工作区外的 execution profile 配置，然后重启 MCP 服务。例如：
 
 ```bash
-docker build -f examples/Dockerfile.task -t sandboxed-workspace-mcp-execution:local .
-docker image inspect sandboxed-workspace-mcp-execution:local --format '{{.Id}}'
+docker build -f examples/Dockerfile.task -t workspace-guard-mcp-execution:local .
+docker image inspect workspace-guard-mcp-execution:local --format '{{.Id}}'
 ```
 
 将输出的完整 `sha256:...` 写入外部 `execution-profiles.json` 的 `image` 字段，再重启服务。可用 `list_execution_profiles` 检查服务当前公开的 profile/capability，并用 `run_mypy` 或 `run_command` 执行 `python -m mypy --version` 验证新镜像已经生效。运行中的 execution container 保持无网络；依赖应在 image build 阶段安装，而不是在 agent 执行期间临时 `pip install`。
@@ -241,25 +241,25 @@ CI 会实际构建该 Dockerfile，并在 `--network none` 的运行容器中执
 命令行参数优先于环境变量。完整参数和环境变量列表：
 
 ```bash
-.venv/bin/sandboxed-workspace-mcp --help
+.venv/bin/workspace-guard-mcp --help
 ```
 
 最常用的配置包括：
 
 | 参数/环境变量 | 用途 |
 | --- | --- |
-| `--root` / `SANDBOXED_WORKSPACE_MCP_ROOT` | 唯一 workspace 根目录 |
-| `--read-only` / `SANDBOXED_WORKSPACE_MCP_READ_ONLY` | 关闭所有工作区写工具 |
-| `--allow-git-writes` / `SANDBOXED_WORKSPACE_MCP_ALLOW_GIT_WRITES` | 开启受控 Git 初始化和首次基线；要求可写模式，且不支持任意 Git 参数 |
-| `--max-git-baseline-files` / `SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_FILES` | 首次基线允许的普通文件数上限 |
-| `--max-git-baseline-bytes` / `SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_BYTES` | 首次基线 payload 总字节上限 |
-| `--allow-trash` / `SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH` | 开启受限、可恢复的单文件回收站 |
-| `--allow-trash-purge` / `SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH_PURGE` | 单独开启经过 SHA 校验的不可恢复单项 purge |
-| `--max-trash-items` / `SANDBOXED_WORKSPACE_MCP_MAX_TRASH_ITEMS` | 回收站最多保留的条目数（默认 200） |
-| `--max-trash-bytes` / `SANDBOXED_WORKSPACE_MCP_MAX_TRASH_BYTES` | 回收站 payload 总字节上限（默认 256 MiB） |
+| `--root` / `WORKSPACE_GUARD_MCP_ROOT` | 唯一 workspace 根目录 |
+| `--read-only` / `WORKSPACE_GUARD_MCP_READ_ONLY` | 关闭所有工作区写工具 |
+| `--allow-git-writes` / `WORKSPACE_GUARD_MCP_ALLOW_GIT_WRITES` | 开启受控 Git 初始化和首次基线；要求可写模式，且不支持任意 Git 参数 |
+| `--max-git-baseline-files` / `WORKSPACE_GUARD_MCP_MAX_GIT_BASELINE_FILES` | 首次基线允许的普通文件数上限 |
+| `--max-git-baseline-bytes` / `WORKSPACE_GUARD_MCP_MAX_GIT_BASELINE_BYTES` | 首次基线 payload 总字节上限 |
+| `--allow-trash` / `WORKSPACE_GUARD_MCP_ALLOW_TRASH` | 开启受限、可恢复的单文件回收站 |
+| `--allow-trash-purge` / `WORKSPACE_GUARD_MCP_ALLOW_TRASH_PURGE` | 单独开启经过 SHA 校验的不可恢复单项 purge |
+| `--max-trash-items` / `WORKSPACE_GUARD_MCP_MAX_TRASH_ITEMS` | 回收站最多保留的条目数（默认 200） |
+| `--max-trash-bytes` / `WORKSPACE_GUARD_MCP_MAX_TRASH_BYTES` | 回收站 payload 总字节上限（默认 256 MiB） |
 | `--block-path` | 追加 root-relative blocked glob |
 | `--ignore-dir` | 追加不主动扫描的目录 basename |
-| `--task-config` / `SANDBOXED_WORKSPACE_MCP_TASK_CONFIG` | 工作区外的可信任务 JSON |
+| `--task-config` / `WORKSPACE_GUARD_MCP_TASK_CONFIG` | 工作区外的可信任务 JSON |
 | `--transport` | `stdio` 或 `streamable-http` |
 
 `stdio` 适合本机连接。Streamable HTTP 默认只监听 `127.0.0.1:3001/mcp`；非回环或公开部署需要明确的网络开关、Host/Origin 配置、HTTPS 和外部 OAuth/OIDC。`--allow-unauthenticated-http` 仅用于临时开发，不应作为部署方案。完整 OAuth 拓扑和 RFC 9728 细节见 [SECURITY.md](SECURITY.md)。
@@ -267,7 +267,7 @@ CI 会实际构建该 Dockerfile，并在 `--network none` 的运行容器中执
 ## 项目结构
 
 ```text
-src/sandboxed_workspace_mcp/
+src/workspace_guard_mcp/
   workspace.py          # 安全路径、文件 IO、遍历和原子写入
   access_policy.py      # blocked glob、Git 排除和 baseline noise 策略
   trash.py              # 受保护回收站元数据、事务和恢复

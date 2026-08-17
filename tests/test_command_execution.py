@@ -4,11 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sandboxed_workspace_mcp.command_execution import (
+from workspace_guard_mcp.command_execution import (
     CommandCompiler,
     CommandExecutionError,
 )
-from sandboxed_workspace_mcp.config import Settings
+from workspace_guard_mcp.config import Settings
 
 
 class CommandCompilerTests(unittest.TestCase):

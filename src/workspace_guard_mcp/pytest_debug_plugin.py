@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-DEBUG_PLUGIN_FILENAME = "sandboxed_workspace_mcp_debug_plugin.py"
-DEBUG_PLUGIN_MODULE = "sandboxed_workspace_mcp_debug_plugin"
+DEBUG_PLUGIN_FILENAME = "workspace_guard_mcp_debug_plugin.py"
+DEBUG_PLUGIN_MODULE = "workspace_guard_mcp_debug_plugin"
 DEBUG_MARKER = "SWMCP_FAILURES:"
 
 _PLUGIN_SOURCE = r"""\

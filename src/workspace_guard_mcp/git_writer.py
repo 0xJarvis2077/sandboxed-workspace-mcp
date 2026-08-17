@@ -38,9 +38,9 @@ from .workspace import Workspace, WorkspaceError
 _HEX_COMMIT = re.compile(r"[0-9a-fA-F]{7,40}\Z")
 _FULL_OBJECT = re.compile(r"[0-9a-fA-F]{40,64}\Z")
 _BASELINE_BRANCH = "main"
-_BASELINE_MESSAGE = "sandboxed-workspace-mcp baseline"
-_IDENTITY_NAME = "Sandboxed Workspace MCP"
-_IDENTITY_EMAIL = "sandboxed-workspace-mcp@example.invalid"
+_BASELINE_MESSAGE = "workspace-guard-mcp baseline"
+_IDENTITY_NAME = "WorkspaceGuard MCP"
+_IDENTITY_EMAIL = "workspace-guard-mcp@example.invalid"
 _MAX_SMALL_OUTPUT = 64 * 1024
 _MAX_EXCLUDE_SIZE = 64 * 1024
 _EXCLUDE_BEGIN_BYTES = GIT_BASELINE_NOISE_MANAGED_BLOCK_BEGIN.encode("ascii")

@@ -64,7 +64,7 @@ class SnapshotBuilder:
         self._deadline = deadline
         self._cancellation_event = cancellation_event
         self._check_active()
-        temporary = tempfile.TemporaryDirectory(prefix="sandboxed-workspace-mcp-task-")
+        temporary = tempfile.TemporaryDirectory(prefix="workspace-guard-mcp-task-")
         snapshot_root = Path(temporary.name).resolve() / "workspace"
         try:
             snapshot_root.mkdir(mode=self._directory_mode())

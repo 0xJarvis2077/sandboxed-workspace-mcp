@@ -246,7 +246,7 @@ class JWTTokenVerifier:
             url,
             headers={
                 "Accept": "application/json",
-                "User-Agent": "sandboxed-workspace-mcp/0.2",
+                "User-Agent": "workspace-guard-mcp/0.2",
             },
             method="GET",
         )

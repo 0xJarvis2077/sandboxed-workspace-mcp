@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 RESULT_TEXT_MIME = "text/plain; charset=utf-8"
-RESULT_URI_PREFIX = "sandboxed-workspace://result/"
+RESULT_URI_PREFIX = "workspaceguard://result/"
 RESULT_URI_TEMPLATE = RESULT_URI_PREFIX + "{id}"
 DEFAULT_INLINE_THRESHOLD_BYTES = 24 * 1024
 DEFAULT_CACHE_MAX_ITEM_BYTES = 1024 * 1024

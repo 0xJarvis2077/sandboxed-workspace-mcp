@@ -1,4 +1,4 @@
-"""MCP adapter for the sandboxed-workspace-mcp application service."""
+"""MCP adapter for the WorkspaceGuard MCP application service."""
 
 from __future__ import annotations
 
@@ -357,8 +357,8 @@ def create_server(
         token_verifier = token_verifier or JWTTokenVerifier(oauth)
 
     server: SandboxedWorkspaceMCPServer = SandboxedWorkspaceMCPServer(
-        "sandboxed-workspace-mcp",
-        title="Sandboxed Workspace MCP",
+        "workspace-guard-mcp",
+        title="WorkspaceGuard MCP",
         description=(
             "Capability-bounded workspace file operations with optional recycle-bin "
             "trash, recovery, alternate-path restore, and read-only Git access within "

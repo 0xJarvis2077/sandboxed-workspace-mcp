@@ -21,9 +21,9 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
-from sandboxed_workspace_mcp.cli import _transport_security, main, parse_runtime
-from sandboxed_workspace_mcp.config import Settings
-from sandboxed_workspace_mcp.server import create_server
+from workspace_guard_mcp.cli import _transport_security, main, parse_runtime
+from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.server import create_server
 
 
 class CliTests(unittest.TestCase):
@@ -74,8 +74,8 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             environment = {
-                "SANDBOXED_WORKSPACE_MCP_OAUTH_ISSUER": "https://idp.example.test",
-                "SANDBOXED_WORKSPACE_MCP_OAUTH_AUDIENCE": "https://mcp.example.test",
+                "WORKSPACE_GUARD_MCP_OAUTH_ISSUER": "https://idp.example.test",
+                "WORKSPACE_GUARD_MCP_OAUTH_AUDIENCE": "https://mcp.example.test",
                 "MCP_PUBLIC_HOST": "https://mcp.example.test",
             }
             arguments = [
@@ -98,11 +98,9 @@ class CliTests(unittest.TestCase):
                 parse_runtime(arguments, environment)
 
     def test_module_entrypoint_exits_with_cli_result(self) -> None:
-        with patch("sandboxed_workspace_mcp.cli.main", return_value=0) as cli_main:
+        with patch("workspace_guard_mcp.cli.main", return_value=0) as cli_main:
             with self.assertRaises(SystemExit) as raised:
-                runpy.run_module(
-                    "sandboxed_workspace_mcp.__main__", run_name="__main__"
-                )
+                runpy.run_module("workspace_guard_mcp.__main__", run_name="__main__")
 
         self.assertEqual(raised.exception.code, 0)
         cli_main.assert_called_once_with()
@@ -118,9 +116,9 @@ class CliTests(unittest.TestCase):
                     "private/**",
                 ],
                 {
-                    "SANDBOXED_WORKSPACE_MCP_ROOT": root,
-                    "SANDBOXED_WORKSPACE_MCP_BLOCKED_PATHS": "*.token",
-                    "SANDBOXED_WORKSPACE_MCP_MAX_SCAN_ENTRIES": "4321",
+                    "WORKSPACE_GUARD_MCP_ROOT": root,
+                    "WORKSPACE_GUARD_MCP_BLOCKED_PATHS": "*.token",
+                    "WORKSPACE_GUARD_MCP_MAX_SCAN_ENTRIES": "4321",
                 },
             )
 
@@ -136,9 +134,9 @@ class CliTests(unittest.TestCase):
             runtime = parse_runtime(
                 ["--allow-git-writes"],
                 {
-                    "SANDBOXED_WORKSPACE_MCP_ROOT": root,
-                    "SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_FILES": "12",
-                    "SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_BYTES": "3456",
+                    "WORKSPACE_GUARD_MCP_ROOT": root,
+                    "WORKSPACE_GUARD_MCP_MAX_GIT_BASELINE_FILES": "12",
+                    "WORKSPACE_GUARD_MCP_MAX_GIT_BASELINE_BYTES": "3456",
                 },
             )
             self.assertTrue(runtime.settings.allow_git_writes)
@@ -151,7 +149,7 @@ class CliTests(unittest.TestCase):
             ):
                 parse_runtime(
                     ["--read-only", "--allow-git-writes"],
-                    {"SANDBOXED_WORKSPACE_MCP_ROOT": root},
+                    {"WORKSPACE_GUARD_MCP_ROOT": root},
                 )
 
     def test_root_is_required(self) -> None:
@@ -163,7 +161,7 @@ class CliTests(unittest.TestCase):
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(project_root / "src")
         result = subprocess.run(
-            [sys.executable, "-m", "sandboxed_workspace_mcp", "--version"],
+            [sys.executable, "-m", "workspace_guard_mcp", "--version"],
             cwd=project_root,
             env=environment,
             check=True,
@@ -171,17 +169,17 @@ class CliTests(unittest.TestCase):
             text=True,
         )
 
-        self.assertIn("sandboxed-workspace-mcp 0.2.0", result.stdout)
+        self.assertIn("workspace-guard-mcp 0.2.0", result.stdout)
 
     def test_invalid_environment_values_are_reported_as_cli_errors(self) -> None:
         invalid_values = (
-            ("SANDBOXED_WORKSPACE_MCP_TRANSPORT", "invalid"),
-            ("SANDBOXED_WORKSPACE_MCP_READ_ONLY", "maybe"),
-            ("SANDBOXED_WORKSPACE_MCP_BLOCKED_PATHS", "valid,,empty"),
+            ("WORKSPACE_GUARD_MCP_TRANSPORT", "invalid"),
+            ("WORKSPACE_GUARD_MCP_READ_ONLY", "maybe"),
+            ("WORKSPACE_GUARD_MCP_BLOCKED_PATHS", "valid,,empty"),
         )
         for name, value in invalid_values:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as root:
-                environment = {"SANDBOXED_WORKSPACE_MCP_ROOT": root, name: value}
+                environment = {"WORKSPACE_GUARD_MCP_ROOT": root, name: value}
                 with (
                     contextlib.redirect_stderr(io.StringIO()),
                     self.assertRaises(SystemExit),
@@ -272,8 +270,8 @@ class CliTests(unittest.TestCase):
                     "--allow-unauthenticated-http",
                 ],
                 {
-                    "SANDBOXED_WORKSPACE_MCP_ROOT": root,
-                    "SANDBOXED_WORKSPACE_MCP_TRANSPORT": "streamable-http",
+                    "WORKSPACE_GUARD_MCP_ROOT": root,
+                    "WORKSPACE_GUARD_MCP_TRANSPORT": "streamable-http",
                     "MCP_PUBLIC_HOST": f"https://{public_host}/",
                 },
             )
@@ -293,8 +291,8 @@ class CliTests(unittest.TestCase):
                     "--allow-unauthenticated-http",
                 ],
                 {
-                    "SANDBOXED_WORKSPACE_MCP_ROOT": root,
-                    "SANDBOXED_WORKSPACE_MCP_TRANSPORT": "streamable-http",
+                    "WORKSPACE_GUARD_MCP_ROOT": root,
+                    "WORKSPACE_GUARD_MCP_TRANSPORT": "streamable-http",
                     "MCP_PUBLIC_HOST": "https://mcp.example.test:8443",
                 },
             )
@@ -313,8 +311,8 @@ class CliTests(unittest.TestCase):
         for origin in invalid_origins:
             with self.subTest(origin=origin), tempfile.TemporaryDirectory() as root:
                 environment = {
-                    "SANDBOXED_WORKSPACE_MCP_ROOT": root,
-                    "SANDBOXED_WORKSPACE_MCP_TRANSPORT": "streamable-http",
+                    "WORKSPACE_GUARD_MCP_ROOT": root,
+                    "WORKSPACE_GUARD_MCP_TRANSPORT": "streamable-http",
                     "MCP_PUBLIC_HOST": origin,
                 }
                 with (
@@ -327,7 +325,7 @@ class CliTests(unittest.TestCase):
             runtime = parse_runtime(
                 [],
                 {
-                    "SANDBOXED_WORKSPACE_MCP_ROOT": root,
+                    "WORKSPACE_GUARD_MCP_ROOT": root,
                     "MCP_PUBLIC_HOST": "not-an-http-origin",
                 },
             )
@@ -336,12 +334,12 @@ class CliTests(unittest.TestCase):
     def test_oauth_http_configuration_is_complete_and_origin_bound(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             environment = {
-                "SANDBOXED_WORKSPACE_MCP_ROOT": root,
-                "SANDBOXED_WORKSPACE_MCP_TRANSPORT": "streamable-http",
+                "WORKSPACE_GUARD_MCP_ROOT": root,
+                "WORKSPACE_GUARD_MCP_TRANSPORT": "streamable-http",
                 "MCP_PUBLIC_HOST": "https://MCP.example.test:443/",
-                "SANDBOXED_WORKSPACE_MCP_OAUTH_ENABLED": "true",
-                "SANDBOXED_WORKSPACE_MCP_OAUTH_ISSUER": "https://idp.example.test/tenant/",
-                "SANDBOXED_WORKSPACE_MCP_OAUTH_AUDIENCE": "https://mcp.example.test",
+                "WORKSPACE_GUARD_MCP_OAUTH_ENABLED": "true",
+                "WORKSPACE_GUARD_MCP_OAUTH_ISSUER": "https://idp.example.test/tenant/",
+                "WORKSPACE_GUARD_MCP_OAUTH_AUDIENCE": "https://mcp.example.test",
             }
             runtime = parse_runtime([], environment)
 
@@ -352,9 +350,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(runtime.oauth.issuer, "https://idp.example.test/tenant/")
 
             for name, value in (
-                ("SANDBOXED_WORKSPACE_MCP_OAUTH_ISSUER", ""),
+                ("WORKSPACE_GUARD_MCP_OAUTH_ISSUER", ""),
                 (
-                    "SANDBOXED_WORKSPACE_MCP_OAUTH_AUDIENCE",
+                    "WORKSPACE_GUARD_MCP_OAUTH_AUDIENCE",
                     "https://other.example.test",
                 ),
             ):
@@ -370,8 +368,8 @@ class CliTests(unittest.TestCase):
     def test_public_http_requires_oauth_unless_escape_hatch_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             environment = {
-                "SANDBOXED_WORKSPACE_MCP_ROOT": root,
-                "SANDBOXED_WORKSPACE_MCP_TRANSPORT": "streamable-http",
+                "WORKSPACE_GUARD_MCP_ROOT": root,
+                "WORKSPACE_GUARD_MCP_TRANSPORT": "streamable-http",
                 "MCP_PUBLIC_HOST": "https://mcp.example.test",
             }
             with (
@@ -399,9 +397,7 @@ class CliTests(unittest.TestCase):
         fake_server = Mock()
         with (
             tempfile.TemporaryDirectory() as root,
-            patch(
-                "sandboxed_workspace_mcp.cli.create_server", return_value=fake_server
-            ),
+            patch("workspace_guard_mcp.cli.create_server", return_value=fake_server),
             contextlib.redirect_stdout(io.StringIO()) as stdout,
         ):
             result = main(["--root", root])
@@ -414,9 +410,7 @@ class CliTests(unittest.TestCase):
         fake_server = Mock()
         with (
             tempfile.TemporaryDirectory() as root,
-            patch(
-                "sandboxed_workspace_mcp.cli.create_server", return_value=fake_server
-            ),
+            patch("workspace_guard_mcp.cli.create_server", return_value=fake_server),
             contextlib.redirect_stderr(io.StringIO()) as stderr,
         ):
             result = main(
@@ -621,7 +615,7 @@ class StdioIntegrationTests(unittest.TestCase):
                             "test": {
                                 "mode": "run",
                                 "image": (
-                                    "example.invalid/sandboxed-workspace-mcp@sha256:"
+                                    "example.invalid/workspace-guard-mcp@sha256:"
                                     + "d" * 64
                                 ),
                                 "argv": ["python", "-m", "unittest"],

@@ -14,10 +14,10 @@ from _mcp_assertions import (
 )
 from mcp.types import CallToolResult
 
-from sandboxed_workspace_mcp import server as server_module
-from sandboxed_workspace_mcp.config import Settings
-from sandboxed_workspace_mcp.server import create_server
-from sandboxed_workspace_mcp.tool_contracts import TOOL_CONTRACTS
+from workspace_guard_mcp import server as server_module
+from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.server import create_server
+from workspace_guard_mcp.tool_contracts import TOOL_CONTRACTS
 
 
 class ToolContractTests(unittest.TestCase):

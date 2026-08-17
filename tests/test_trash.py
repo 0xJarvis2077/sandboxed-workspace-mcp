@@ -12,12 +12,12 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from sandboxed_workspace_mcp.access_policy import TRASH_DIRECTORY_NAME
-from sandboxed_workspace_mcp.cli import parse_runtime
-from sandboxed_workspace_mcp.config import ConfigurationError, Settings
-from sandboxed_workspace_mcp.oauth import DEFAULT_OAUTH_SCOPES, OAuthSettings
-from sandboxed_workspace_mcp.server import create_server
-from sandboxed_workspace_mcp.trash import (
+from workspace_guard_mcp.access_policy import TRASH_DIRECTORY_NAME
+from workspace_guard_mcp.cli import parse_runtime
+from workspace_guard_mcp.config import ConfigurationError, Settings
+from workspace_guard_mcp.oauth import DEFAULT_OAUTH_SCOPES, OAuthSettings
+from workspace_guard_mcp.server import create_server
+from workspace_guard_mcp.trash import (
     TRASH_DESTINATION_EXISTS,
     TRASH_DESTINATION_INVALID,
     TRASH_ID_INVALID,
@@ -27,7 +27,7 @@ from sandboxed_workspace_mcp.trash import (
     TrashError,
     TrashManager,
 )
-from sandboxed_workspace_mcp.workspace import Workspace, WorkspaceError
+from workspace_guard_mcp.workspace import Workspace, WorkspaceError
 
 
 class TrashManagerTests(unittest.TestCase):
@@ -501,7 +501,7 @@ class TrashManagerTests(unittest.TestCase):
         self.assertIn("purge transaction cleanup is pending", diagnostics)
 
         with patch(
-            "sandboxed_workspace_mcp.trash.os.scandir",
+            "workspace_guard_mcp.trash.os.scandir",
             side_effect=OSError("simulated scan failure"),
         ):
             diagnostics = []
@@ -802,7 +802,7 @@ class TrashConfigurationAndServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             runtime = parse_runtime(
                 ["--allow-trash", "--max-trash-items", "3", "--max-trash-bytes", "99"],
-                {"SANDBOXED_WORKSPACE_MCP_ROOT": root},
+                {"WORKSPACE_GUARD_MCP_ROOT": root},
             )
             self.assertTrue(runtime.settings.allow_trash)
             self.assertEqual(runtime.settings.max_trash_items, 3)
@@ -810,20 +810,20 @@ class TrashConfigurationAndServerTests(unittest.TestCase):
             with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
                 parse_runtime(
                     ["--read-only", "--allow-trash"],
-                    {"SANDBOXED_WORKSPACE_MCP_ROOT": root},
+                    {"WORKSPACE_GUARD_MCP_ROOT": root},
                 )
 
             purge_runtime = parse_runtime(
                 ["--allow-trash", "--allow-trash-purge"],
-                {"SANDBOXED_WORKSPACE_MCP_ROOT": root},
+                {"WORKSPACE_GUARD_MCP_ROOT": root},
             )
             self.assertTrue(purge_runtime.settings.allow_trash_purge)
             env_runtime = parse_runtime(
                 [],
                 {
-                    "SANDBOXED_WORKSPACE_MCP_ROOT": root,
-                    "SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH": "true",
-                    "SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH_PURGE": "true",
+                    "WORKSPACE_GUARD_MCP_ROOT": root,
+                    "WORKSPACE_GUARD_MCP_ALLOW_TRASH": "true",
+                    "WORKSPACE_GUARD_MCP_ALLOW_TRASH_PURGE": "true",
                 },
             )
             self.assertTrue(env_runtime.settings.allow_trash_purge)

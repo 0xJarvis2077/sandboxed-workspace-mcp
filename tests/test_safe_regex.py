@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from sandboxed_workspace_mcp.safe_regex import SafeRegex, SafeRegexError
+from workspace_guard_mcp.safe_regex import SafeRegex, SafeRegexError
 
 
 class SafeRegexTests(unittest.TestCase):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import unittest
 
-from sandboxed_workspace_mcp.result_cache import ResultCache, ResultCacheMiss
+from workspace_guard_mcp.result_cache import ResultCache, ResultCacheMiss
 
 
 class _FakeClock:

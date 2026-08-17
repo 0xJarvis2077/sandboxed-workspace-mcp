@@ -1,8 +1,8 @@
-# Sandboxed Workspace MCP
+# WorkspaceGuard MCP
 
 [中文](README.md) · [Security boundary](SECURITY.md) · [Task template](examples/tasks.json) · [Execution profile template](examples/execution-profiles.json)
 
-Expose one local project root as a bounded MCP server. Clients can read, search, edit text, and inspect Git; trusted operators can optionally run fixed tasks or execution profiles inside Docker/Podman against a disposable workspace snapshot. The server does not execute project code, clean up files, or provide a host shell or port mapping by default; when explicitly enabled, cleanup remains bounded and permanent deletion requires separate authorization.
+WorkspaceGuard MCP is a capability-bounded security layer between AI coding agents and real developer workspaces. It lets agents inspect, edit, review, test, and debug real repositories while keeping host shell access, sensitive paths, dangerous Git mutations, and code execution behind explicit boundaries.
 
 ## Three things to know first
 
@@ -24,7 +24,7 @@ Python 3.10+ is required. Git is only needed when using the Git tools.
 ```bash
 python -m venv .venv
 .venv/bin/python -m pip install .
-.venv/bin/sandboxed-workspace-mcp \
+.venv/bin/workspace-guard-mcp \
   --root /absolute/path/to/project \
   --read-only
 ```
@@ -42,8 +42,8 @@ For source development and tests:
 ```json
 {
   "mcpServers": {
-    "sandboxed-project": {
-      "command": "/absolute/path/to/venv/bin/sandboxed-workspace-mcp",
+    "workspaceguard-project": {
+      "command": "/absolute/path/to/venv/bin/workspace-guard-mcp",
       "args": [
         "--root",
         "/absolute/path/to/project",
@@ -85,20 +85,20 @@ Every actually registered public tool declares a stable `outputSchema`. Normal c
 
 ## Large Results
 
-Small text results remain fully inline. Larger text that has already passed the existing workspace, Git, or execution safety boundary and source bounding keeps its original string field as a UTF-8-safe preview and adds an ephemeral `sandboxed-workspace://result/{id}` URI in `structuredContent`. An execution result may look like:
+Small text results remain fully inline. Larger text that has already passed the existing workspace, Git, or execution safety boundary and source bounding keeps its original string field as a UTF-8-safe preview and adds an ephemeral `workspaceguard://result/{id}` URI in `structuredContent`. An execution result may look like:
 
 ```json
 {
   "stdout": "...preview...",
   "source_truncated": false,
   "stdout_inline_truncated": true,
-  "stdout_resource_uri": "sandboxed-workspace://result/..."
+  "stdout_resource_uri": "workspaceguard://result/..."
 }
 ```
 
 `source_truncated` means the upstream safety layer already discarded data beyond a budget such as `max_output_bytes`; `*_inline_truncated` only means the server shortened the already-safe bounded result for MCP context size. Where the legacy `truncated` field applies, it remains backward-compatible as the union of source and inline truncation. A Result Resource can recover only the bounded safe result still held by the server. It cannot recover raw output already discarded by a source limit and never raises an existing output limit.
 
-Result Resources live only in process memory, have a fixed 15-minute TTL, and disappear on server restart, expiration, or capacity eviction. Dynamic result URIs are never enumerated by `resources/list`; clients discover only the `sandboxed-workspace://result/{id}` template. In HTTP/OAuth mode each result is also scoped to the authenticated owner that created it. In stdio/no-OAuth mode, access relies on the high-entropy, non-enumerable ephemeral capability URI.
+Result Resources live only in process memory, have a fixed 15-minute TTL, and disappear on server restart, expiration, or capacity eviction. Dynamic result URIs are never enumerated by `resources/list`; clients discover only the `workspaceguard://result/{id}` template. In HTTP/OAuth mode each result is also scoped to the authenticated owner that created it. In stdio/no-OAuth mode, access relies on the high-entropy, non-enumerable ephemeral capability URI.
 
 ## Tool Annotations
 
@@ -111,7 +111,7 @@ The server self-describes its currently available capabilities and recommended w
 - `internal://instructions`: capability-aware safe operating guidance for the current server.
 - `internal://tool-catalog`: a machine-readable current Tool summary with stable tool-name ordering.
 - `internal://tool-info/{name}`: the full input/output contract and annotations for one currently registered Tool.
-- `sandboxed-workspace://result/{id}`: on-demand access to an ephemeral bounded large result in the current process; concrete URIs are not enumerable.
+- `workspaceguard://result/{id}`: on-demand access to an ephemeral bounded large result in the current process; concrete URIs are not enumerable.
 - `internal://workflows/edit-file`, `debug-python`, `recover-file`, and `review-changes`: compact agent workflows.
 
 The README remains an entry-point overview. Detailed agent SOPs live in these Resources and are generated against the current public capability surface.
@@ -129,7 +129,7 @@ workspace_diff(path="src")  # tracked final state + safe untracked text
 
 ### Use a controlled Git baseline
 
-Enable `--allow-git-writes` (or `SANDBOXED_WORKSPACE_MCP_ALLOW_GIT_WRITES=true`) to register `git_init` and `git_create_baseline`. They accept no caller parameters. `git_init` creates an ordinary non-bare `main` repository only at the configured workspace root and returns an idempotent result for an already-valid root repository. `repo_path`, subdirectory repositories, templates, separate Git directories, bare/shared/object-format options, and arbitrary Git argv are unsupported. `git_create_baseline` is allowed only once before the first commit, uses a fixed message and identity, and is not a general commit tool; blocked files, `.git`, the recycle bin, ignored directories, symlinks, and special files are excluded.
+Enable `--allow-git-writes` (or `WORKSPACE_GUARD_MCP_ALLOW_GIT_WRITES=true`) to register `git_init` and `git_create_baseline`. They accept no caller parameters. `git_init` creates an ordinary non-bare `main` repository only at the configured workspace root and returns an idempotent result for an already-valid root repository. `repo_path`, subdirectory repositories, templates, separate Git directories, bare/shared/object-format options, and arbitrary Git argv are unsupported. `git_create_baseline` is allowed only once before the first commit, uses a fixed message and identity, and is not a general commit tool; blocked files, `.git`, the recycle bin, ignored directories, symlinks, and special files are excluded.
 
 The first baseline also filters cross-project environment noise such as `.DS_Store`, `Thumbs.db`, `Desktop.ini`, Python bytecode/cache, and coverage files at any depth. It installs the same fixed rules in a managed block in the repository-private `.git/info/exclude`, so noise created after the baseline does not pollute `git_status`. This does not modify the project `.gitignore` or the user's global Git ignore. The migration boundary applies only to future baselines: noise already tracked by an older baseline is not automatically untracked or rewritten and must be explicitly migrated or rebuilt outside MCP.
 
@@ -212,8 +212,8 @@ Callers cannot override environment, image, network, mounts, ports, resource lim
 `examples/Dockerfile.task` is the source for the standard execution image and preinstalls offline tools such as pytest, coverage, Ruff, and mypy. Editing the Dockerfile does not update an already running MCP service automatically; the operator must rebuild the image, obtain its immutable image ID/digest, update the execution profile configuration outside the workspace, and restart the MCP service. For example:
 
 ```bash
-docker build -f examples/Dockerfile.task -t sandboxed-workspace-mcp-execution:local .
-docker image inspect sandboxed-workspace-mcp-execution:local --format '{{.Id}}'
+docker build -f examples/Dockerfile.task -t workspace-guard-mcp-execution:local .
+docker image inspect workspace-guard-mcp-execution:local --format '{{.Id}}'
 ```
 
 Write the resulting full `sha256:...` value to the external `execution-profiles.json` `image` field, then restart the service. Use `list_execution_profiles` to inspect the profiles/capabilities currently exposed by the service, and verify the new image with `run_mypy` or `run_command` running `python -m mypy --version`. Runtime execution containers stay offline; dependencies belong in the image build stage rather than an agent-time `pip install`.
@@ -241,25 +241,25 @@ Normal Python import bytecode writes are disabled; explicit bytecode compilation
 Command-line arguments take precedence over environment variables. See the complete list with:
 
 ```bash
-.venv/bin/sandboxed-workspace-mcp --help
+.venv/bin/workspace-guard-mcp --help
 ```
 
 Common settings:
 
 | Argument/environment variable | Purpose |
 | --- | --- |
-| `--root` / `SANDBOXED_WORKSPACE_MCP_ROOT` | The one workspace root |
-| `--read-only` / `SANDBOXED_WORKSPACE_MCP_READ_ONLY` | Disable all workspace write tools |
-| `--allow-git-writes` / `SANDBOXED_WORKSPACE_MCP_ALLOW_GIT_WRITES` | Enable controlled Git initialization and first baseline; requires writable mode and does not accept arbitrary Git arguments |
-| `--max-git-baseline-files` / `SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_FILES` | Maximum regular files in the first baseline |
-| `--max-git-baseline-bytes` / `SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_BYTES` | Maximum aggregate payload bytes in the first baseline |
-| `--allow-trash` / `SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH` | Enable the restricted recoverable single-file recycle bin |
-| `--allow-trash-purge` / `SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH_PURGE` | Enable verified, irreversible single-item purge separately |
-| `--max-trash-items` / `SANDBOXED_WORKSPACE_MCP_MAX_TRASH_ITEMS` | Maximum retained recycle-bin entries (default 200) |
-| `--max-trash-bytes` / `SANDBOXED_WORKSPACE_MCP_MAX_TRASH_BYTES` | Maximum aggregate payload bytes (default 256 MiB) |
+| `--root` / `WORKSPACE_GUARD_MCP_ROOT` | The one workspace root |
+| `--read-only` / `WORKSPACE_GUARD_MCP_READ_ONLY` | Disable all workspace write tools |
+| `--allow-git-writes` / `WORKSPACE_GUARD_MCP_ALLOW_GIT_WRITES` | Enable controlled Git initialization and first baseline; requires writable mode and does not accept arbitrary Git arguments |
+| `--max-git-baseline-files` / `WORKSPACE_GUARD_MCP_MAX_GIT_BASELINE_FILES` | Maximum regular files in the first baseline |
+| `--max-git-baseline-bytes` / `WORKSPACE_GUARD_MCP_MAX_GIT_BASELINE_BYTES` | Maximum aggregate payload bytes in the first baseline |
+| `--allow-trash` / `WORKSPACE_GUARD_MCP_ALLOW_TRASH` | Enable the restricted recoverable single-file recycle bin |
+| `--allow-trash-purge` / `WORKSPACE_GUARD_MCP_ALLOW_TRASH_PURGE` | Enable verified, irreversible single-item purge separately |
+| `--max-trash-items` / `WORKSPACE_GUARD_MCP_MAX_TRASH_ITEMS` | Maximum retained recycle-bin entries (default 200) |
+| `--max-trash-bytes` / `WORKSPACE_GUARD_MCP_MAX_TRASH_BYTES` | Maximum aggregate payload bytes (default 256 MiB) |
 | `--block-path` | Add a root-relative blocked glob |
 | `--ignore-dir` | Add a directory basename excluded from automatic scans |
-| `--task-config` / `SANDBOXED_WORKSPACE_MCP_TASK_CONFIG` | Trusted task JSON outside the workspace |
+| `--task-config` / `WORKSPACE_GUARD_MCP_TASK_CONFIG` | Trusted task JSON outside the workspace |
 | `--transport` | `stdio` or `streamable-http` |
 
 `stdio` is intended for local clients. Streamable HTTP listens on `127.0.0.1:3001/mcp` by default; non-loopback or public deployments need explicit network, Host/Origin, HTTPS, and external OAuth/OIDC configuration. `--allow-unauthenticated-http` is for temporary development only. See [SECURITY.md](SECURITY.md) for the full OAuth topology and RFC 9728 details.
@@ -267,7 +267,7 @@ Common settings:
 ## Project layout
 
 ```text
-src/sandboxed_workspace_mcp/
+src/workspace_guard_mcp/
   workspace.py          # Safe paths, file I/O, traversal, and atomic writes
   access_policy.py      # Blocked globs, Git exclusion, and baseline noise policy
   trash.py              # Protected recycle-bin metadata, transactions, and recovery

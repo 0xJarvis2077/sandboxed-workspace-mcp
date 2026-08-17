@@ -35,9 +35,9 @@ def main() -> int:
             check=True,
         )
         executable = environment / (
-            "Scripts/sandboxed-workspace-mcp.exe"
+            "Scripts/workspace-guard-mcp.exe"
             if os.name == "nt"
-            else "bin/sandboxed-workspace-mcp"
+            else "bin/workspace-guard-mcp"
         )
         version = subprocess.run(
             [str(executable), "--version"],
@@ -46,7 +46,7 @@ def main() -> int:
             capture_output=True,
             text=True,
         )
-        if version.stdout.strip() != "sandboxed-workspace-mcp 0.2.0":
+        if version.stdout.strip() != "workspace-guard-mcp 0.2.0":
             raise RuntimeError(f"unexpected CLI version: {version.stdout!r}")
         code = """
 import asyncio
@@ -54,10 +54,10 @@ import json
 import tempfile
 from pathlib import Path
 
-import sandboxed_workspace_mcp
-from sandboxed_workspace_mcp import Settings, create_server
-from sandboxed_workspace_mcp.oauth import OAuthSettings
-from sandboxed_workspace_mcp import (
+import workspace_guard_mcp
+from workspace_guard_mcp import Settings, create_server
+from workspace_guard_mcp.oauth import OAuthSettings
+from workspace_guard_mcp import (
     python_execution,
     safe_regex,
     task_config,
@@ -65,8 +65,8 @@ from sandboxed_workspace_mcp import (
     task_runner,
     task_snapshot,
 )
-from sandboxed_workspace_mcp.task_config import load_task_config
-from sandboxed_workspace_mcp.task_manager import TaskManager
+from workspace_guard_mcp.task_config import load_task_config
+from workspace_guard_mcp.task_manager import TaskManager
 
 with tempfile.TemporaryDirectory() as root:
     writable = create_server(Settings.create(root, allow_writes=True))
@@ -101,7 +101,7 @@ with tempfile.TemporaryDirectory() as base:
         "tasks": {
             "test": {
                 "mode": "run",
-                "image": "example.invalid/sandboxed-workspace-mcp@sha256:" + "c" * 64,
+                "image": "example.invalid/workspace-guard-mcp@sha256:" + "c" * 64,
                 "argv": ["python", "-m", "unittest"],
             }
         },
@@ -127,7 +127,7 @@ with tempfile.TemporaryDirectory() as base:
         "runtime": "docker",
         "profiles": {
             "debug": {
-                "image": "example.invalid/sandboxed-workspace-mcp@sha256:" + "d" * 64,
+                "image": "example.invalid/workspace-guard-mcp@sha256:" + "d" * 64,
                 "tools": ["python_version", "run_pytest", "run_python_script"],
             }
         },
@@ -152,7 +152,7 @@ with tempfile.TemporaryDirectory() as base:
         "tasks.run"
     ]
     profile_manager.shutdown()
-package_path = Path(sandboxed_workspace_mcp.__file__).resolve()
+package_path = Path(workspace_guard_mcp.__file__).resolve()
 assert "site-packages" in package_path.parts, package_path
 for module in (
     python_execution,

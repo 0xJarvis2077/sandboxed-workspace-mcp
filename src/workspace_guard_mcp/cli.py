@@ -1,4 +1,4 @@
-"""Command-line entry point for Sandboxed Workspace MCP."""
+"""Command-line entry point for WorkspaceGuard MCP."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def build_parser(
 ) -> argparse.ArgumentParser:
     env = os.environ if environment is None else environment
     parser = argparse.ArgumentParser(
-        prog="sandboxed-workspace-mcp",
+        prog="workspace-guard-mcp",
         description="Expose one local workspace through a size-bounded MCP server.",
     )
     parser.add_argument(
@@ -57,28 +57,28 @@ def build_parser(
     )
     parser.add_argument(
         "--root",
-        default=env.get("SANDBOXED_WORKSPACE_MCP_ROOT"),
-        help="workspace root (or set SANDBOXED_WORKSPACE_MCP_ROOT)",
+        default=env.get("WORKSPACE_GUARD_MCP_ROOT"),
+        help="workspace root (or set WORKSPACE_GUARD_MCP_ROOT)",
     )
     parser.add_argument(
         "--transport",
         choices=("stdio", "streamable-http"),
-        default=env.get("SANDBOXED_WORKSPACE_MCP_TRANSPORT", "stdio"),
+        default=env.get("WORKSPACE_GUARD_MCP_TRANSPORT", "stdio"),
     )
     parser.add_argument(
-        "--host", default=env.get("SANDBOXED_WORKSPACE_MCP_HOST", "127.0.0.1")
+        "--host", default=env.get("WORKSPACE_GUARD_MCP_HOST", "127.0.0.1")
     )
     parser.add_argument(
-        "--port", type=int, default=env.get("SANDBOXED_WORKSPACE_MCP_PORT", "3001")
+        "--port", type=int, default=env.get("WORKSPACE_GUARD_MCP_PORT", "3001")
     )
     parser.add_argument(
-        "--path", default=env.get("SANDBOXED_WORKSPACE_MCP_HTTP_PATH", "/mcp")
+        "--path", default=env.get("WORKSPACE_GUARD_MCP_HTTP_PATH", "/mcp")
     )
     parser.add_argument(
         "--read-only",
         action=argparse.BooleanOptionalAction,
         default=_parser_environment_bool(
-            parser, env, "SANDBOXED_WORKSPACE_MCP_READ_ONLY", False
+            parser, env, "WORKSPACE_GUARD_MCP_READ_ONLY", False
         ),
         help="disable every mutating tool",
     )
@@ -86,7 +86,7 @@ def build_parser(
         "--allow-git-writes",
         action=argparse.BooleanOptionalAction,
         default=_parser_environment_bool(
-            parser, env, "SANDBOXED_WORKSPACE_MCP_ALLOW_GIT_WRITES", False
+            parser, env, "WORKSPACE_GUARD_MCP_ALLOW_GIT_WRITES", False
         ),
         help="enable controlled Git initialization and first-baseline tools",
     )
@@ -94,7 +94,7 @@ def build_parser(
         "--allow-trash",
         action=argparse.BooleanOptionalAction,
         default=_parser_environment_bool(
-            parser, env, "SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH", False
+            parser, env, "WORKSPACE_GUARD_MCP_ALLOW_TRASH", False
         ),
         help="enable the restricted, recoverable file recycle bin",
     )
@@ -102,7 +102,7 @@ def build_parser(
         "--allow-trash-purge",
         action=argparse.BooleanOptionalAction,
         default=_parser_environment_bool(
-            parser, env, "SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH_PURGE", False
+            parser, env, "WORKSPACE_GUARD_MCP_ALLOW_TRASH_PURGE", False
         ),
         help="enable irreversible, single-item recycle-bin purge",
     )
@@ -110,7 +110,7 @@ def build_parser(
         "--allow-network",
         action="store_true",
         default=_parser_environment_bool(
-            parser, env, "SANDBOXED_WORKSPACE_MCP_ALLOW_NETWORK", False
+            parser, env, "WORKSPACE_GUARD_MCP_ALLOW_NETWORK", False
         ),
         help="permit a non-loopback HTTP bind; public deployments still require OAuth",
     )
@@ -122,37 +122,37 @@ def build_parser(
     parser.add_argument(
         "--allowed-host",
         action="append",
-        default=_environment_list(env, "SANDBOXED_WORKSPACE_MCP_ALLOWED_HOSTS"),
+        default=_environment_list(env, "WORKSPACE_GUARD_MCP_ALLOWED_HOSTS"),
         help="accepted HTTP Host name for wildcard/network binds (repeatable)",
     )
     parser.add_argument(
         "--oauth",
         action=argparse.BooleanOptionalAction,
         default=_parser_environment_bool(
-            parser, env, "SANDBOXED_WORKSPACE_MCP_OAUTH_ENABLED", False
+            parser, env, "WORKSPACE_GUARD_MCP_OAUTH_ENABLED", False
         ),
         help="validate external-provider OAuth access tokens on streamable HTTP",
     )
     parser.add_argument(
         "--oauth-issuer",
-        default=env.get("SANDBOXED_WORKSPACE_MCP_OAUTH_ISSUER"),
+        default=env.get("WORKSPACE_GUARD_MCP_OAUTH_ISSUER"),
         metavar="HTTPS_URL",
     )
     parser.add_argument(
         "--oauth-audience",
-        default=env.get("SANDBOXED_WORKSPACE_MCP_OAUTH_AUDIENCE"),
+        default=env.get("WORKSPACE_GUARD_MCP_OAUTH_AUDIENCE"),
         metavar="HTTPS_ORIGIN",
     )
     parser.add_argument(
         "--oauth-jwks-uri",
-        default=env.get("SANDBOXED_WORKSPACE_MCP_OAUTH_JWKS_URI"),
+        default=env.get("WORKSPACE_GUARD_MCP_OAUTH_JWKS_URI"),
         metavar="HTTPS_URL",
     )
     parser.add_argument(
         "--oauth-scope",
         action="append",
         default=(
-            _environment_list(env, "SANDBOXED_WORKSPACE_MCP_OAUTH_SCOPES")
+            _environment_list(env, "WORKSPACE_GUARD_MCP_OAUTH_SCOPES")
             or list(DEFAULT_OAUTH_SCOPES)
         ),
         help="advertised and accepted OAuth scope (repeatable)",
@@ -160,13 +160,13 @@ def build_parser(
     parser.add_argument(
         "--oauth-jwks-cache-seconds",
         type=float,
-        default=env.get("SANDBOXED_WORKSPACE_MCP_OAUTH_JWKS_CACHE_SECONDS", "300"),
+        default=env.get("WORKSPACE_GUARD_MCP_OAUTH_JWKS_CACHE_SECONDS", "300"),
         metavar="SECONDS",
     )
     parser.add_argument(
         "--oauth-http-timeout",
         type=float,
-        default=env.get("SANDBOXED_WORKSPACE_MCP_OAUTH_HTTP_TIMEOUT", "5"),
+        default=env.get("WORKSPACE_GUARD_MCP_OAUTH_HTTP_TIMEOUT", "5"),
         metavar="SECONDS",
     )
     parser.add_argument(
@@ -181,67 +181,65 @@ def build_parser(
     parser.add_argument(
         "--max-file-size",
         type=int,
-        default=env.get("SANDBOXED_WORKSPACE_MCP_MAX_FILE_SIZE", str(2 * 1024 * 1024)),
+        default=env.get("WORKSPACE_GUARD_MCP_MAX_FILE_SIZE", str(2 * 1024 * 1024)),
         metavar="BYTES",
     )
     parser.add_argument(
         "--max-output-size",
         type=int,
-        default=env.get("SANDBOXED_WORKSPACE_MCP_MAX_OUTPUT_SIZE", "200000"),
+        default=env.get("WORKSPACE_GUARD_MCP_MAX_OUTPUT_SIZE", "200000"),
         metavar="BYTES",
     )
     parser.add_argument(
         "--max-tree-entries",
         type=int,
-        default=env.get("SANDBOXED_WORKSPACE_MCP_MAX_TREE_ENTRIES", "1500"),
+        default=env.get("WORKSPACE_GUARD_MCP_MAX_TREE_ENTRIES", "1500"),
     )
     parser.add_argument(
         "--max-tree-depth",
         type=int,
-        default=env.get("SANDBOXED_WORKSPACE_MCP_MAX_TREE_DEPTH", "5"),
+        default=env.get("WORKSPACE_GUARD_MCP_MAX_TREE_DEPTH", "5"),
     )
     parser.add_argument(
         "--max-scan-entries",
         type=int,
-        default=env.get("SANDBOXED_WORKSPACE_MCP_MAX_SCAN_ENTRIES", "10000"),
+        default=env.get("WORKSPACE_GUARD_MCP_MAX_SCAN_ENTRIES", "10000"),
         help="global directory-entry scan budget per list/tree/search request",
     )
     parser.add_argument(
         "--max-search-bytes",
         type=int,
-        default=env.get(
-            "SANDBOXED_WORKSPACE_MCP_MAX_SEARCH_BYTES", str(64 * 1024 * 1024)
-        ),
+        default=env.get("WORKSPACE_GUARD_MCP_MAX_SEARCH_BYTES", str(64 * 1024 * 1024)),
         metavar="BYTES",
     )
     parser.add_argument(
         "--search-timeout",
         type=float,
-        default=env.get("SANDBOXED_WORKSPACE_MCP_SEARCH_TIMEOUT", "10"),
+        default=env.get("WORKSPACE_GUARD_MCP_SEARCH_TIMEOUT", "10"),
         metavar="SECONDS",
     )
     parser.add_argument(
         "--max-concurrent-searches",
         type=int,
-        default=env.get("SANDBOXED_WORKSPACE_MCP_MAX_CONCURRENT_SEARCHES", "1"),
+        default=env.get("WORKSPACE_GUARD_MCP_MAX_CONCURRENT_SEARCHES", "1"),
     )
     parser.add_argument(
         "--git-timeout",
         type=float,
-        default=env.get("SANDBOXED_WORKSPACE_MCP_GIT_TIMEOUT", "30"),
+        default=env.get("WORKSPACE_GUARD_MCP_GIT_TIMEOUT", "30"),
         metavar="SECONDS",
     )
     parser.add_argument(
         "--max-git-baseline-files",
         type=int,
-        default=env.get("SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_FILES", "10000"),
+        default=env.get("WORKSPACE_GUARD_MCP_MAX_GIT_BASELINE_FILES", "10000"),
         help="maximum policy-approved files in the first Git baseline",
     )
     parser.add_argument(
         "--max-git-baseline-bytes",
         type=int,
         default=env.get(
-            "SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_BYTES", str(256 * 1024 * 1024)
+            "WORKSPACE_GUARD_MCP_MAX_GIT_BASELINE_BYTES", str(256 * 1024 * 1024)
         ),
         metavar="BYTES",
         help="maximum aggregate bytes in the first Git baseline",
@@ -249,28 +247,26 @@ def build_parser(
     parser.add_argument(
         "--max-trash-items",
         type=int,
-        default=env.get("SANDBOXED_WORKSPACE_MCP_MAX_TRASH_ITEMS", "200"),
+        default=env.get("WORKSPACE_GUARD_MCP_MAX_TRASH_ITEMS", "200"),
         help="maximum number of files retained in the recycle bin",
     )
     parser.add_argument(
         "--max-trash-bytes",
         type=int,
-        default=env.get(
-            "SANDBOXED_WORKSPACE_MCP_MAX_TRASH_BYTES", str(256 * 1024 * 1024)
-        ),
+        default=env.get("WORKSPACE_GUARD_MCP_MAX_TRASH_BYTES", str(256 * 1024 * 1024)),
         metavar="BYTES",
         help="maximum total payload bytes retained in the recycle bin",
     )
     parser.add_argument(
         "--ignore-dir",
         action="append",
-        default=_environment_list(env, "SANDBOXED_WORKSPACE_MCP_IGNORED_DIRS"),
+        default=_environment_list(env, "WORKSPACE_GUARD_MCP_IGNORED_DIRS"),
         help="add a directory base name excluded from tree/search (repeatable)",
     )
     parser.add_argument(
         "--block-path",
         action="append",
-        default=_environment_rule_list(env, "SANDBOXED_WORKSPACE_MCP_BLOCKED_PATHS"),
+        default=_environment_rule_list(env, "WORKSPACE_GUARD_MCP_BLOCKED_PATHS"),
         metavar="PATTERN",
         help=(
             "add a root-relative blocked glob using literals, *, ?, and ** (repeatable)"
@@ -278,11 +274,11 @@ def build_parser(
     )
     parser.add_argument(
         "--task-config",
-        default=env.get("SANDBOXED_WORKSPACE_MCP_TASK_CONFIG"),
+        default=env.get("WORKSPACE_GUARD_MCP_TASK_CONFIG"),
         metavar="ABSOLUTE_JSON_PATH",
         help=(
             "trusted container-task JSON outside the workspace "
-            "(or set SANDBOXED_WORKSPACE_MCP_TASK_CONFIG)"
+            "(or set WORKSPACE_GUARD_MCP_TASK_CONFIG)"
         ),
     )
     return parser
@@ -296,7 +292,7 @@ def parse_runtime(
     args = parser.parse_args(argv)
 
     if not args.root:
-        parser.error("--root or SANDBOXED_WORKSPACE_MCP_ROOT is required")
+        parser.error("--root or WORKSPACE_GUARD_MCP_ROOT is required")
     if args.transport not in {"stdio", "streamable-http"}:
         parser.error("transport must be 'stdio' or 'streamable-http'")
     if not 1 <= args.port <= 65_535:
@@ -373,7 +369,7 @@ def parse_runtime(
     if oauth_required and not args.oauth and not args.allow_unauthenticated_http:
         parser.error(
             "public streamable HTTP requires OAuth; configure "
-            "SANDBOXED_WORKSPACE_MCP_OAUTH_* "
+            "WORKSPACE_GUARD_MCP_OAUTH_* "
             "or use --allow-unauthenticated-http only for temporary development"
         )
 
@@ -382,8 +378,8 @@ def parse_runtime(
         missing = [
             name
             for name, value in (
-                ("SANDBOXED_WORKSPACE_MCP_OAUTH_ISSUER", args.oauth_issuer),
-                ("SANDBOXED_WORKSPACE_MCP_OAUTH_AUDIENCE", args.oauth_audience),
+                ("WORKSPACE_GUARD_MCP_OAUTH_ISSUER", args.oauth_issuer),
+                ("WORKSPACE_GUARD_MCP_OAUTH_AUDIENCE", args.oauth_audience),
                 ("MCP_PUBLIC_HOST", public_origin),
             )
             if not value
@@ -459,7 +455,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
         print(
-            f"Sandboxed Workspace MCP root: {runtime.settings.root}\n"
+            f"WorkspaceGuard MCP root: {runtime.settings.root}\n"
             f"Endpoint: http://{runtime.host}:{runtime.port}{runtime.path}",
             file=sys.stderr,
         )

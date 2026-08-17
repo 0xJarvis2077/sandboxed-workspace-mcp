@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sandboxed_workspace_mcp.config import ConfigurationError, Settings
-from sandboxed_workspace_mcp.workspace import Workspace, WorkspaceError, truncate_utf8
+from workspace_guard_mcp.config import ConfigurationError, Settings
+from workspace_guard_mcp.workspace import Workspace, WorkspaceError, truncate_utf8
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -39,7 +39,7 @@ class WorkspaceTests(unittest.TestCase):
     def test_external_symlink_is_blocked(self) -> None:
         outside = (
             Path(self.temporary_directory.name).parent
-            / "outside-sandboxed-workspace-mcp.txt"
+            / "outside-workspace-guard-mcp.txt"
         )
         outside.write_text("secret", encoding="utf-8")
         link = self.root / "external-link"
@@ -137,7 +137,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertIn("Replacements: 1", result)
         self.assertEqual(target.read_text(encoding="utf-8"), "value = 2\n")
         self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o640)
-        self.assertEqual(list(self.root.glob(".sandboxed_workspace_mcp_*")), [])
+        self.assertEqual(list(self.root.glob(".workspace_guard_mcp_*")), [])
 
     def test_write_refuses_accidental_overwrite_and_ambiguous_replace(self) -> None:
         target = self.root / "notes.txt"
@@ -386,7 +386,7 @@ class WorkspaceTests(unittest.TestCase):
             with (
                 self.subTest(operation=operation),
                 patch(
-                    "sandboxed_workspace_mcp.workspace.os.scandir",
+                    "workspace_guard_mcp.workspace.os.scandir",
                     side_effect=counting_scandir,
                 ),
             ):
@@ -402,7 +402,7 @@ class WorkspaceTests(unittest.TestCase):
 
         with (
             patch(
-                "sandboxed_workspace_mcp.workspace.os.replace",
+                "workspace_guard_mcp.workspace.os.replace",
                 side_effect=OSError("simulated replace failure"),
             ),
             self.assertRaisesRegex(WorkspaceError, "atomic write failed"),
@@ -415,7 +415,7 @@ class WorkspaceTests(unittest.TestCase):
             )
 
         self.assertEqual(target.read_text(encoding="utf-8"), "before")
-        self.assertEqual(list(self.root.glob(".sandboxed_workspace_mcp_*")), [])
+        self.assertEqual(list(self.root.glob(".workspace_guard_mcp_*")), [])
 
     def test_search_and_grep_validate_inputs_and_return_limits(self) -> None:
         target = self.root / "matches.txt"
@@ -474,7 +474,7 @@ class WorkspaceTests(unittest.TestCase):
 
         with (
             patch(
-                "sandboxed_workspace_mcp.workspace.os.scandir",
+                "workspace_guard_mcp.workspace.os.scandir",
                 side_effect=PermissionError("root denied"),
             ),
             self.assertRaisesRegex(WorkspaceError, "cannot scan directory"),
@@ -487,7 +487,7 @@ class WorkspaceTests(unittest.TestCase):
             return real_scandir(path)
 
         with patch(
-            "sandboxed_workspace_mcp.workspace.os.scandir",
+            "workspace_guard_mcp.workspace.os.scandir",
             side_effect=selective_scandir,
         ):
             result = self.workspace.tree()
@@ -503,7 +503,7 @@ class WorkspaceTests(unittest.TestCase):
 
         with (
             patch(
-                "sandboxed_workspace_mcp.workspace.os.fstat",
+                "workspace_guard_mcp.workspace.os.fstat",
                 return_value=special_status,
             ),
             self.assertRaisesRegex(WorkspaceError, "after open"),
@@ -663,7 +663,7 @@ class WorkspaceTests(unittest.TestCase):
         chunked = Workspace(
             Settings.create(self.root, max_search_bytes=1024, max_output_size=500)
         )
-        with patch("sandboxed_workspace_mcp.workspace._SEARCH_CHUNK_BYTES", 4):
+        with patch("workspace_guard_mcp.workspace._SEARCH_CHUNK_BYTES", 4):
             result = chunked.search_text("🙂needle", "unicode.txt")
         self.assertIn("unicode.txt:1", result)
         self.assertIn("🙂needle", result)
@@ -677,7 +677,7 @@ class WorkspaceTests(unittest.TestCase):
             return next(moments, 2.0)
 
         with patch(
-            "sandboxed_workspace_mcp.workspace.time.monotonic", side_effect=monotonic
+            "workspace_guard_mcp.workspace.time.monotonic", side_effect=monotonic
         ):
             timeout_result = timed.search_text("missing", "unicode.txt")
         self.assertIn("time budget exhausted", timeout_result)

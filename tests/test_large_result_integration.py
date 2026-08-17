@@ -12,14 +12,14 @@ from _mcp_assertions import (
     require_structured_content,
 )
 
-from sandboxed_workspace_mcp.config import Settings
-from sandboxed_workspace_mcp.server import create_server
-from sandboxed_workspace_mcp.task_config import (
+from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.server import create_server
+from workspace_guard_mcp.task_config import (
     TaskConfiguration,
     TaskDefinition,
     TaskLimits,
 )
-from sandboxed_workspace_mcp.task_manager import TaskManager
+from workspace_guard_mcp.task_manager import TaskManager
 
 PINNED_IMAGE = "example.invalid/project@sha256:" + "d" * 64
 

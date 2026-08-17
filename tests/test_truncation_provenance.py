@@ -9,12 +9,12 @@ from pathlib import Path
 
 from _mcp_assertions import require_call_tool_result, require_text_content
 
-from sandboxed_workspace_mcp.bounded_output import (
+from workspace_guard_mcp.bounded_output import (
     TRUNCATION_MARKER,
     truncate_utf8_result,
 )
-from sandboxed_workspace_mcp.config import Settings
-from sandboxed_workspace_mcp.server import create_server
+from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.server import create_server
 
 
 class BoundedTextTests(unittest.TestCase):
