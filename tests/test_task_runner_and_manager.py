@@ -16,20 +16,20 @@ from unittest.mock import patch
 
 from _mcp_assertions import require_call_tool_result, require_structured_content
 
-from sandboxed_workspace_mcp.config import Settings
-from sandboxed_workspace_mcp.server import create_server
-from sandboxed_workspace_mcp.task_config import (
+from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.server import create_server
+from workspace_guard_mcp.task_config import (
     ExecutionProfile,
     TaskConfiguration,
     TaskDefinition,
     TaskLimits,
 )
-from sandboxed_workspace_mcp.task_manager import (
+from workspace_guard_mcp.task_manager import (
     TaskLogBuffer,
     TaskManager,
     TaskManagerError,
 )
-from sandboxed_workspace_mcp.task_runner import (
+from workspace_guard_mcp.task_runner import (
     CliContainerBackend,
     ContainerRequest,
     TaskExecutionError,
@@ -40,7 +40,7 @@ from sandboxed_workspace_mcp.task_runner import (
     run_container_task,
 )
 
-PINNED_IMAGE = "example.invalid/sandboxed-workspace-mcp@sha256:" + "b" * 64
+PINNED_IMAGE = "example.invalid/workspace-guard-mcp@sha256:" + "b" * 64
 
 
 class ImmediateHandle:
@@ -195,7 +195,7 @@ class ContainerRunnerTests(unittest.TestCase):
                 "test", "run", PINNED_IMAGE, ("python", "-m", "unittest")
             )
             request = ContainerRequest(
-                "sandboxed-workspace-mcp-test-token", snapshot, task, TaskLimits()
+                "workspace-guard-mcp-test-token", snapshot, task, TaskLimits()
             )
             argv = build_container_argv("/usr/bin/docker", request)
 
@@ -254,7 +254,7 @@ class ContainerRunnerTests(unittest.TestCase):
                 ("tool", "--network=host", "-c", "echo unsafe"),
             )
             request = ContainerRequest(
-                "sandboxed-workspace-mcp-command",
+                "workspace-guard-mcp-command",
                 snapshot,
                 task,
                 TaskLimits(),
@@ -273,7 +273,7 @@ class ContainerRunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             unsafe = ContainerRequest(
-                "sandboxed-workspace-mcp-command",
+                "workspace-guard-mcp-command",
                 Path(directory),
                 task,
                 TaskLimits(),
@@ -302,7 +302,7 @@ class ContainerRunnerTests(unittest.TestCase):
                 allow_best_effort_disk_limit=True,
             )
             request = ContainerRequest(
-                "sandboxed-workspace-mcp-growth", snapshot, task, limits
+                "workspace-guard-mcp-growth", snapshot, task, limits
             )
             argv = build_container_argv("/usr/bin/docker", request)
             mount = argv[argv.index("--mount") + 1]
@@ -330,7 +330,7 @@ class ContainerRunnerTests(unittest.TestCase):
             (snapshot / "first.txt").write_bytes(b"1234")
             (snapshot / "second.txt").write_bytes(b"5678")
             request = ContainerRequest(
-                "sandboxed-workspace-mcp-growth-cancel",
+                "workspace-guard-mcp-growth-cancel",
                 snapshot,
                 TaskDefinition(
                     "build",
@@ -363,7 +363,7 @@ class ContainerRunnerTests(unittest.TestCase):
                     yield self._entries[1]
 
             with patch(
-                "sandboxed_workspace_mcp.task_runner.os.scandir",
+                "workspace_guard_mcp.task_runner.os.scandir",
                 side_effect=lambda path: StoppingEntries(Path(path)),
             ):
                 result = monitor._measure_usage()
@@ -376,7 +376,7 @@ class ContainerRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory)
             request = ContainerRequest(
-                "sandboxed-workspace-mcp-growth-oserror",
+                "workspace-guard-mcp-growth-oserror",
                 snapshot,
                 TaskDefinition(
                     "build",
@@ -416,7 +416,7 @@ class ContainerRunnerTests(unittest.TestCase):
     def test_read_only_task_does_not_start_growth_monitor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             request = ContainerRequest(
-                "sandboxed-workspace-mcp-read-only",
+                "workspace-guard-mcp-read-only",
                 Path(directory),
                 TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
                 TaskLimits(),
@@ -430,13 +430,11 @@ class ContainerRunnerTests(unittest.TestCase):
     def test_missing_runtime_fails_without_host_fallback(self) -> None:
         with (
             tempfile.TemporaryDirectory() as directory,
-            patch(
-                "sandboxed_workspace_mcp.task_runner.shutil.which", return_value=None
-            ),
+            patch("workspace_guard_mcp.task_runner.shutil.which", return_value=None),
         ):
             backend = CliContainerBackend("docker")
             request = ContainerRequest(
-                "sandboxed-workspace-mcp-test-token",
+                "workspace-guard-mcp-test-token",
                 Path(directory),
                 TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
                 TaskLimits(),
@@ -447,7 +445,7 @@ class ContainerRunnerTests(unittest.TestCase):
     def test_cli_backend_uses_sanitized_environment_and_tracked_stop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             request = ContainerRequest(
-                "sandboxed-workspace-mcp-test-token",
+                "workspace-guard-mcp-test-token",
                 Path(directory),
                 TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
                 TaskLimits(),
@@ -455,15 +453,15 @@ class ContainerRunnerTests(unittest.TestCase):
             process = FakeProcess(running=True)
             with (
                 patch(
-                    "sandboxed_workspace_mcp.task_runner.shutil.which",
+                    "workspace_guard_mcp.task_runner.shutil.which",
                     return_value="/usr/bin/docker",
                 ),
                 patch(
-                    "sandboxed_workspace_mcp.task_runner.subprocess.Popen",
+                    "workspace_guard_mcp.task_runner.subprocess.Popen",
                     return_value=process,
                 ) as popen,
                 patch(
-                    "sandboxed_workspace_mcp.task_runner.subprocess.run",
+                    "workspace_guard_mcp.task_runner.subprocess.run",
                     return_value=subprocess.CompletedProcess([], 0),
                 ) as stop,
             ):
@@ -481,9 +479,7 @@ class ContainerRunnerTests(unittest.TestCase):
         self.assertEqual(stdout, [b"container stdout"])
         self.assertEqual(stderr, [b"container stderr"])
         self.assertTrue(process.terminated)
-        self.assertEqual(
-            stop.call_args.args[0][-1], "sandboxed-workspace-mcp-test-token"
-        )
+        self.assertEqual(stop.call_args.args[0][-1], "workspace-guard-mcp-test-token")
 
     def test_cli_backend_streams_flushed_pipe_output_before_eof(self) -> None:
         child_script = (
@@ -524,18 +520,18 @@ class ContainerRunnerTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as directory:
                 request = ContainerRequest(
-                    "sandboxed-workspace-mcp-live-logs",
+                    "workspace-guard-mcp-live-logs",
                     Path(directory),
                     TaskDefinition("dev", "service", PINNED_IMAGE, ("python",)),
                     TaskLimits(),
                 )
                 with (
                     patch(
-                        "sandboxed_workspace_mcp.task_runner.shutil.which",
+                        "workspace_guard_mcp.task_runner.shutil.which",
                         return_value="/usr/bin/docker",
                     ),
                     patch(
-                        "sandboxed_workspace_mcp.task_runner.subprocess.Popen",
+                        "workspace_guard_mcp.task_runner.subprocess.Popen",
                         side_effect=launch_pipe_process,
                     ),
                 ):
@@ -568,18 +564,18 @@ class ContainerRunnerTests(unittest.TestCase):
     def test_cli_backend_start_error_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             request = ContainerRequest(
-                "sandboxed-workspace-mcp-test-token",
+                "workspace-guard-mcp-test-token",
                 Path(directory),
                 TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
                 TaskLimits(),
             )
             with (
                 patch(
-                    "sandboxed_workspace_mcp.task_runner.shutil.which",
+                    "workspace_guard_mcp.task_runner.shutil.which",
                     return_value="/usr/bin/docker",
                 ),
                 patch(
-                    "sandboxed_workspace_mcp.task_runner.subprocess.Popen",
+                    "workspace_guard_mcp.task_runner.subprocess.Popen",
                     side_effect=OSError("denied"),
                 ),
                 self.assertRaisesRegex(TaskExecutionError, "failed to start"),
@@ -591,7 +587,7 @@ class ContainerRunnerTests(unittest.TestCase):
     def test_sync_results_separate_streams_and_report_failures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             request = ContainerRequest(
-                "sandboxed-workspace-mcp-test-token",
+                "workspace-guard-mcp-test-token",
                 Path(directory),
                 TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
                 TaskLimits(timeout_seconds=1, max_output_bytes=1024),
@@ -619,7 +615,7 @@ class ContainerRunnerTests(unittest.TestCase):
             timeout = run_container_task(
                 timeout_backend,
                 ContainerRequest(
-                    "sandboxed-workspace-mcp-timeout",
+                    "workspace-guard-mcp-timeout",
                     Path(directory),
                     task,
                     TaskLimits(timeout_seconds=0.1, max_output_bytes=1024),
@@ -629,7 +625,7 @@ class ContainerRunnerTests(unittest.TestCase):
             overflow = run_container_task(
                 overflow_backend,
                 ContainerRequest(
-                    "sandboxed-workspace-mcp-overflow",
+                    "workspace-guard-mcp-overflow",
                     Path(directory),
                     task,
                     TaskLimits(timeout_seconds=1, max_output_bytes=1024),
@@ -641,7 +637,7 @@ class ContainerRunnerTests(unittest.TestCase):
             cancelled = run_container_task(
                 cancelled_backend,
                 ContainerRequest(
-                    "sandboxed-workspace-mcp-cancelled",
+                    "workspace-guard-mcp-cancelled",
                     Path(directory),
                     task,
                     TaskLimits(timeout_seconds=1, max_output_bytes=1024),
@@ -862,7 +858,7 @@ class TaskManagerTests(unittest.TestCase):
                 "-m",
                 "pytest",
                 "-p",
-                "sandboxed_workspace_mcp_debug_plugin",
+                "workspace_guard_mcp_debug_plugin",
                 "-o",
                 "cache_dir=/tmp/cache/pytest",
                 "-vv",
@@ -882,7 +878,7 @@ class TaskManagerTests(unittest.TestCase):
                 "-m",
                 "pytest",
                 "-p",
-                "sandboxed_workspace_mcp_debug_plugin",
+                "workspace_guard_mcp_debug_plugin",
                 "-o",
                 "cache_dir=/tmp/cache/pytest",
                 "-q",
@@ -1355,7 +1351,7 @@ class TaskManagerTests(unittest.TestCase):
         )
         with (
             patch(
-                "sandboxed_workspace_mcp.task_manager.WorkspaceGrowthMonitor.start",
+                "workspace_guard_mcp.task_manager.WorkspaceGrowthMonitor.start",
                 side_effect=RuntimeError("thread unavailable"),
             ),
             self.assertRaisesRegex(TaskManagerError, "thread unavailable"),

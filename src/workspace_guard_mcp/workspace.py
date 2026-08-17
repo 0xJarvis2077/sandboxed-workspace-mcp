@@ -1355,7 +1355,7 @@ class Workspace:
         previous_mode = expected.mode if expected is not None else None
 
         descriptor, temporary_name = tempfile.mkstemp(
-            prefix=".sandboxed_workspace_mcp_", dir=resolved_parent
+            prefix=".workspace_guard_mcp_", dir=resolved_parent
         )
         temporary_path = Path(temporary_name)
         replaced = False

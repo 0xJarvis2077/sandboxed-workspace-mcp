@@ -96,7 +96,7 @@ class PythonCommandCompiler:
         validated_targets = [self._pytest_target(target) for target in target_values]
         argv = ["python", "-m", "pytest"]
         if include_failure_plugin:
-            argv.extend(["-p", "sandboxed_workspace_mcp_debug_plugin"])
+            argv.extend(["-p", "workspace_guard_mcp_debug_plugin"])
         argv.extend(["-o", "cache_dir=/tmp/cache/pytest"])
         if quiet:
             argv.append("-q")

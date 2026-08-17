@@ -24,26 +24,26 @@ from mcp.types import Tool
 from starlette.applications import Starlette
 from starlette.types import Message
 
-from sandboxed_workspace_mcp.config import Settings
-from sandboxed_workspace_mcp.oauth import (
+from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.oauth import (
     DEFAULT_OAUTH_SCOPES,
     JWTTokenVerifier,
     OAuthSettings,
 )
-from sandboxed_workspace_mcp.server import create_server
-from sandboxed_workspace_mcp.task_config import (
+from workspace_guard_mcp.server import create_server
+from workspace_guard_mcp.task_config import (
     ExecutionProfile,
     TaskConfiguration,
     TaskDefinition,
     TaskLimits,
 )
-from sandboxed_workspace_mcp.task_manager import TaskManager
-from sandboxed_workspace_mcp.task_runner import ContainerRequest
+from workspace_guard_mcp.task_manager import TaskManager
+from workspace_guard_mcp.task_runner import ContainerRequest
 
 ISSUER = "https://idp.example.test/tenant"
 RESOURCE = "https://mcp.example.test"
 JWKS_URI = "https://idp.example.test/keys"
-IMAGE = "example.invalid/sandboxed-workspace-mcp@sha256:" + "f" * 64
+IMAGE = "example.invalid/workspace-guard-mcp@sha256:" + "f" * 64
 
 
 class _ImmediateHandle:
@@ -381,7 +381,7 @@ class OAuthServerTests(unittest.TestCase):
 
         async def exercise() -> None:
             with patch(
-                "sandboxed_workspace_mcp.server.get_access_token", return_value=None
+                "workspace_guard_mcp.server.get_access_token", return_value=None
             ):
                 missing = require_call_tool_result(
                     await server.call_tool("project_info", {})
@@ -392,7 +392,7 @@ class OAuthServerTests(unittest.TestCase):
                 self.assertIn("mcp/www_authenticate", missing_meta)
 
             with patch(
-                "sandboxed_workspace_mcp.server.get_access_token", return_value=read
+                "workspace_guard_mcp.server.get_access_token", return_value=read
             ):
                 allowed = require_call_tool_result(
                     await server.call_tool("read_file", {"path": "file.txt"})
@@ -407,7 +407,7 @@ class OAuthServerTests(unittest.TestCase):
                 self.assertIn("insufficient_scope", repr(denied.meta))
 
             with patch(
-                "sandboxed_workspace_mcp.server.get_access_token", return_value=write
+                "workspace_guard_mcp.server.get_access_token", return_value=write
             ):
                 written = require_call_tool_result(
                     await server.call_tool(
@@ -421,7 +421,7 @@ class OAuthServerTests(unittest.TestCase):
                 self.assertTrue(denied.is_error)
 
             with patch(
-                "sandboxed_workspace_mcp.server.get_access_token", return_value=task
+                "workspace_guard_mcp.server.get_access_token", return_value=task
             ):
                 run = require_call_tool_result(
                     await server.call_tool("run_task", {"name": "test"})
@@ -476,7 +476,7 @@ class OAuthServerTests(unittest.TestCase):
 
         async def exercise() -> None:
             with patch(
-                "sandboxed_workspace_mcp.server.get_access_token", return_value=write
+                "workspace_guard_mcp.server.get_access_token", return_value=write
             ):
                 denied = require_call_tool_result(
                     await server.call_tool("git_init", {})
@@ -484,7 +484,7 @@ class OAuthServerTests(unittest.TestCase):
                 self.assertTrue(denied.is_error)
                 self.assertIn("insufficient_scope", repr(denied.meta))
             with patch(
-                "sandboxed_workspace_mcp.server.get_access_token",
+                "workspace_guard_mcp.server.get_access_token",
                 return_value=git_write,
             ):
                 allowed = require_call_tool_result(
@@ -521,7 +521,7 @@ class OAuthServerTests(unittest.TestCase):
 
         async def exercise() -> None:
             with patch(
-                "sandboxed_workspace_mcp.server.get_access_token", return_value=owner
+                "workspace_guard_mcp.server.get_access_token", return_value=owner
             ):
                 result = require_call_tool_result(
                     await server.call_tool("read_file", {"path": "large.txt"})
@@ -534,7 +534,7 @@ class OAuthServerTests(unittest.TestCase):
 
             for token in (other_subject, other_client, None):
                 with patch(
-                    "sandboxed_workspace_mcp.server.get_access_token",
+                    "workspace_guard_mcp.server.get_access_token",
                     return_value=token,
                 ):
                     with self.assertRaises(ResourceNotFoundError):

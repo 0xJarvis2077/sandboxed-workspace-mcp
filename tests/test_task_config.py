@@ -8,13 +8,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sandboxed_workspace_mcp.cli import parse_runtime
-from sandboxed_workspace_mcp.task_config import (
+from workspace_guard_mcp.cli import parse_runtime
+from workspace_guard_mcp.task_config import (
     TaskConfigurationError,
     load_task_config,
 )
 
-PINNED_IMAGE = "example.invalid/sandboxed-workspace-mcp@sha256:" + "a" * 64
+PINNED_IMAGE = "example.invalid/workspace-guard-mcp@sha256:" + "a" * 64
 
 
 class TaskConfigurationTests(unittest.TestCase):
@@ -126,8 +126,8 @@ class TaskConfigurationTests(unittest.TestCase):
         runtime = parse_runtime(
             [],
             {
-                "SANDBOXED_WORKSPACE_MCP_ROOT": str(self.workspace),
-                "SANDBOXED_WORKSPACE_MCP_TASK_CONFIG": str(self.config_path),
+                "WORKSPACE_GUARD_MCP_ROOT": str(self.workspace),
+                "WORKSPACE_GUARD_MCP_TASK_CONFIG": str(self.config_path),
             },
         )
         self.assertIsNotNone(runtime.task_configuration)

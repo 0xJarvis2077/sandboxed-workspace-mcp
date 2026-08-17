@@ -13,10 +13,10 @@ from unittest.mock import Mock, patch
 
 from _mcp_assertions import require_call_tool_result, require_text_content
 
-from sandboxed_workspace_mcp.config import Settings
-from sandboxed_workspace_mcp.git_reader import GitError, GitReader
-from sandboxed_workspace_mcp.server import create_server
-from sandboxed_workspace_mcp.service import CommandError, SandboxedWorkspace
+from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.git_reader import GitError, GitReader
+from workspace_guard_mcp.server import create_server
+from workspace_guard_mcp.service import CommandError, SandboxedWorkspace
 
 
 @unittest.skipUnless(shutil.which("git"), "git is not installed")
@@ -26,7 +26,7 @@ class GitAndServiceTests(unittest.TestCase):
         self.root = Path(self.temporary_directory.name)
         self._git("init", "-q")
         self._git("config", "user.email", "tests@example.invalid")
-        self._git("config", "user.name", "Sandboxed Workspace MCP Tests")
+        self._git("config", "user.name", "WorkspaceGuard MCP Tests")
         (self.root / "tracked.txt").write_text("before\n", encoding="utf-8")
         self._git("add", "tracked.txt")
         self._git("commit", "-qm", "initial")
@@ -274,7 +274,7 @@ class GitAndServiceTests(unittest.TestCase):
     def test_git_start_failure_and_timeout_have_distinct_errors(self) -> None:
         with (
             patch(
-                "sandboxed_workspace_mcp.git_reader.subprocess.Popen",
+                "workspace_guard_mcp.git_reader.subprocess.Popen",
                 side_effect=FileNotFoundError("missing executable"),
             ),
             self.assertRaisesRegex(GitError, "failed to start"),
@@ -292,7 +292,7 @@ class GitAndServiceTests(unittest.TestCase):
         settings = Settings.create(self.root, git_timeout=0.01)
         with (
             patch(
-                "sandboxed_workspace_mcp.git_reader.subprocess.Popen",
+                "workspace_guard_mcp.git_reader.subprocess.Popen",
                 return_value=process,
             ),
             self.assertRaisesRegex(GitError, "timed out") as raised,

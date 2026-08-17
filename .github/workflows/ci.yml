@@ -33,9 +33,9 @@ jobs:
       - run: >-
           docker build
           --file examples/Dockerfile.task
-          --tag sandboxed-workspace-mcp-execution:ci
+          --tag workspace-guard-mcp-execution:ci
           .
       - run: >-
           docker run --rm --network none
-          sandboxed-workspace-mcp-execution:ci
+          workspace-guard-mcp-execution:ci
           python -m mypy --version

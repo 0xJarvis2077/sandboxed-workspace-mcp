@@ -19,17 +19,17 @@ from mcp.client.stdio import stdio_client
 from mcp.server.mcpserver.exceptions import ResourceNotFoundError
 from mcp.types import TextResourceContents
 
-from sandboxed_workspace_mcp import resources
-from sandboxed_workspace_mcp.config import Settings
-from sandboxed_workspace_mcp.result_cache import RESULT_TEXT_MIME, ResultCache
-from sandboxed_workspace_mcp.server import create_server
-from sandboxed_workspace_mcp.task_config import (
+from workspace_guard_mcp import resources
+from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.result_cache import RESULT_TEXT_MIME, ResultCache
+from workspace_guard_mcp.server import create_server
+from workspace_guard_mcp.task_config import (
     ExecutionProfile,
     TaskConfiguration,
     TaskLimits,
 )
-from sandboxed_workspace_mcp.task_manager import TaskManager
-from sandboxed_workspace_mcp.tool_contracts import TOOL_CONTRACTS
+from workspace_guard_mcp.task_manager import TaskManager
+from workspace_guard_mcp.tool_contracts import TOOL_CONTRACTS
 
 
 class _UnusedBackend:
@@ -160,7 +160,7 @@ class SelfDescriptionResourceTests(unittest.TestCase):
                     {template.uri_template for template in templates},
                     {
                         "internal://tool-info/{name}",
-                        "sandboxed-workspace://result/{id}",
+                        "workspaceguard://result/{id}",
                     },
                 )
 
@@ -500,12 +500,12 @@ class SelfDescriptionResourceTests(unittest.TestCase):
 
             async def exercise() -> None:
                 invalid_uris = (
-                    "sandboxed-workspace://result/../secret",
-                    "sandboxed-workspace://result/%2e%2e",
-                    "sandboxed-workspace://result/foo/bar",
-                    "sandboxed-workspace://result/foo%5Cbar",
-                    "sandboxed-workspace://result/" + "a" * 80,
-                    "sandboxed-workspace://result/a%E2%88%95b",
+                    "workspaceguard://result/../secret",
+                    "workspaceguard://result/%2e%2e",
+                    "workspaceguard://result/foo/bar",
+                    "workspaceguard://result/foo%5Cbar",
+                    "workspaceguard://result/" + "a" * 80,
+                    "workspaceguard://result/a%E2%88%95b",
                 )
                 for uri in invalid_uris:
                     with self.subTest(uri=uri):
@@ -551,7 +551,7 @@ class SelfDescriptionResourceTests(unittest.TestCase):
                     template_uris,
                     {
                         "internal://tool-info/{name}",
-                        "sandboxed-workspace://result/{id}",
+                        "workspaceguard://result/{id}",
                     },
                 )
                 self.assertEqual(len(catalog.contents), 1)

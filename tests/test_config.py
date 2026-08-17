@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sandboxed_workspace_mcp.access_policy import DEFAULT_BLOCKED_PATTERNS, AccessPolicy
-from sandboxed_workspace_mcp.config import ConfigurationError, Settings
+from workspace_guard_mcp.access_policy import DEFAULT_BLOCKED_PATTERNS, AccessPolicy
+from workspace_guard_mcp.config import ConfigurationError, Settings
 
 
 class SettingsTests(unittest.TestCase):

@@ -3,9 +3,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sandboxed-workspace-mcp"
+name = "workspace-guard-mcp"
 dynamic = ["version"]
-description = "A capability-bounded MCP server for safe workspace editing and isolated code execution"
+description = "A capability-bounded security layer between AI coding agents and real developer workspaces"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -28,29 +28,30 @@ dev = [
   "build>=1.2,<2",
   "coverage[toml]>=7.6,<8",
   "mypy==1.20.2",
+  "pytest>=9.1.1",
   "ruff>=0.9,<1",
 ]
 
 [project.scripts]
-sandboxed-workspace-mcp = "sandboxed_workspace_mcp.cli:main"
+workspace-guard-mcp = "workspace_guard_mcp.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/0xJarvis2077/sandboxed-workspace-mcp"
-Repository = "https://github.com/0xJarvis2077/sandboxed-workspace-mcp"
-Issues = "https://github.com/0xJarvis2077/sandboxed-workspace-mcp/issues"
+Homepage = "https://github.com/0xJarvis2077/workspace-guard-mcp"
+Repository = "https://github.com/0xJarvis2077/workspace-guard-mcp"
+Issues = "https://github.com/0xJarvis2077/workspace-guard-mcp/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.dynamic]
-version = {attr = "sandboxed_workspace_mcp.__version__"}
+version = {attr = "workspace_guard_mcp.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["sandboxed_workspace_mcp*"]
+include = ["workspace_guard_mcp*"]
 
 [tool.setuptools.package-data]
-sandboxed_workspace_mcp = ["py.typed"]
+workspace_guard_mcp = ["py.typed"]
 
 [tool.ruff]
 line-length = 88
@@ -61,7 +62,7 @@ select = ["B", "E", "F", "I", "UP"]
 
 [tool.coverage.run]
 branch = true
-source = ["sandboxed_workspace_mcp"]
+source = ["workspace_guard_mcp"]
 
 [tool.coverage.report]
 fail_under = 85

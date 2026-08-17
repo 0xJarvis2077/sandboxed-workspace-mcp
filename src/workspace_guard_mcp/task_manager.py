@@ -664,7 +664,7 @@ class TaskManager:
             monitor = threading.Thread(
                 target=self._monitor_service,
                 args=(record,),
-                name=f"sandboxed-workspace-mcp-service-{task_id[:8]}",
+                name=f"workspace-guard-mcp-service-{task_id[:8]}",
                 daemon=True,
             )
             monitor.start()
@@ -901,7 +901,7 @@ class TaskManager:
         )
 
     def _container_name(self) -> str:
-        return f"sandboxed-workspace-mcp-{self._instance_token}-{secrets.token_hex(8)}"
+        return f"workspace-guard-mcp-{self._instance_token}-{secrets.token_hex(8)}"
 
     def _monitor_service(self, record: _ServiceRecord) -> None:
         try:

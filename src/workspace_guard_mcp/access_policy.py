@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import PurePosixPath, PureWindowsPath
 
-TRASH_DIRECTORY_NAME = ".sandboxed_workspace_mcp_trash"
+TRASH_DIRECTORY_NAME = ".workspace_guard_mcp_trash"
 
 DEFAULT_GIT_BASELINE_IGNORE_RULES = (
     ".DS_Store",
@@ -24,10 +24,8 @@ DEFAULT_GIT_BASELINE_IGNORE_RULES = (
     ".coverage.*",
 )
 
-GIT_BASELINE_NOISE_MANAGED_BLOCK_BEGIN = (
-    "# BEGIN sandboxed-workspace-mcp baseline noise"
-)
-GIT_BASELINE_NOISE_MANAGED_BLOCK_END = "# END sandboxed-workspace-mcp baseline noise"
+GIT_BASELINE_NOISE_MANAGED_BLOCK_BEGIN = "# BEGIN workspace-guard-mcp baseline noise"
+GIT_BASELINE_NOISE_MANAGED_BLOCK_END = "# END workspace-guard-mcp baseline noise"
 GIT_BASELINE_NOISE_MANAGED_BLOCK_LINES = (
     GIT_BASELINE_NOISE_MANAGED_BLOCK_BEGIN,
     *DEFAULT_GIT_BASELINE_IGNORE_RULES,

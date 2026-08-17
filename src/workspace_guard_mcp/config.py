@@ -1,4 +1,4 @@
-"""Validated runtime configuration for Sandboxed Workspace MCP."""
+"""Validated runtime configuration for WorkspaceGuard MCP."""
 
 from __future__ import annotations
 

@@ -17,18 +17,18 @@ from _mcp_assertions import (
     require_text_content,
 )
 
-from sandboxed_workspace_mcp.access_policy import (
+from workspace_guard_mcp.access_policy import (
     DEFAULT_GIT_BASELINE_IGNORE_RULES,
     GIT_BASELINE_NOISE_MANAGED_BLOCK_BEGIN,
     GIT_BASELINE_NOISE_MANAGED_BLOCK_END,
     GIT_BASELINE_NOISE_MANAGED_BLOCK_LINES,
     is_git_baseline_noise,
 )
-from sandboxed_workspace_mcp.config import ConfigurationError, Settings
-from sandboxed_workspace_mcp.git_reader import GitError, GitReader
-from sandboxed_workspace_mcp.git_writer import GitWriter
-from sandboxed_workspace_mcp.server import create_server
-from sandboxed_workspace_mcp.workspace import Workspace
+from workspace_guard_mcp.config import ConfigurationError, Settings
+from workspace_guard_mcp.git_reader import GitError, GitReader
+from workspace_guard_mcp.git_writer import GitWriter
+from workspace_guard_mcp.server import create_server
+from workspace_guard_mcp.workspace import Workspace
 
 
 @unittest.skipUnless(shutil.which("git"), "git is not installed")
@@ -72,9 +72,7 @@ class GitWriterTests(unittest.TestCase):
         self.assertEqual(baseline["branch"], "main")
         self.assertEqual(baseline["files"], 1)
         self.assertEqual(baseline["bytes"], len(b"baseline\n"))
-        self.assertIn(
-            "sandboxed-workspace-mcp baseline", GitReader(self.settings).log()
-        )
+        self.assertIn("workspace-guard-mcp baseline", GitReader(self.settings).log())
         self.assertEqual(GitReader(self.settings).diff(), "(no output)")
 
         workspace = Workspace(self.settings)
@@ -127,7 +125,7 @@ class GitWriterTests(unittest.TestCase):
             )
             self.assertTrue(log_result.content)
             self.assertIn(
-                "sandboxed-workspace-mcp baseline",
+                "workspace-guard-mcp baseline",
                 require_text_content(log_result.content[0]).text,
             )
             clean_diff = require_call_tool_result(
@@ -428,8 +426,8 @@ class GitWriterTests(unittest.TestCase):
 
     def test_exclude_atomic_write_failures_preserve_data_and_clean_temps(self) -> None:
         failures = (
-            ("replace", "sandboxed_workspace_mcp.git_writer.os.replace"),
-            ("fsync", "sandboxed_workspace_mcp.git_writer.os.fsync"),
+            ("replace", "workspace_guard_mcp.git_writer.os.replace"),
+            ("fsync", "workspace_guard_mcp.git_writer.os.fsync"),
         )
         for name, target in failures:
             with self.subTest(name=name):
@@ -460,7 +458,7 @@ class GitWriterTests(unittest.TestCase):
             (root / "source.py").write_text("source\n", encoding="utf-8")
             writer = GitWriter(Settings.create(root, allow_git_writes=True))
             with patch(
-                "sandboxed_workspace_mcp.git_writer.os.link",
+                "workspace_guard_mcp.git_writer.os.link",
                 side_effect=FileExistsError("simulated create race"),
             ):
                 with self.assertRaisesRegex(GitError, "appeared before"):
@@ -476,7 +474,7 @@ class GitWriterTests(unittest.TestCase):
         exclude = self.root / ".git" / "info" / "exclude"
         exclude.write_bytes(b"user-rule/\n")
         with patch(
-            "sandboxed_workspace_mcp.git_writer.os.open",
+            "workspace_guard_mcp.git_writer.os.open",
             side_effect=OSError("simulated read failure"),
         ):
             with self.assertRaisesRegex(GitError, "simulated read failure"):
@@ -532,8 +530,8 @@ class GitWriterTests(unittest.TestCase):
             "ascii"
         )
         malformed = (
-            b"# BEGIN sandboxed-workspace-mcp baseline noise\n",
-            b"# END sandboxed-workspace-mcp baseline noise\n",
+            b"# BEGIN workspace-guard-mcp baseline noise\n",
+            b"# END workspace-guard-mcp baseline noise\n",
             block + block,
             block.replace(b"*.pyc\n", b"*.txt\n"),
         )

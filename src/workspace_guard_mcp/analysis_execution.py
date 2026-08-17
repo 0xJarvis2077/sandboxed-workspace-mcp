@@ -39,7 +39,7 @@ finally:
 summary = {}
 if coverage_error is None:
     try:
-        report_path = pathlib.Path("/tmp/sandboxed-workspace-mcp-coverage.json")
+        report_path = pathlib.Path("/tmp/workspace-guard-mcp-coverage.json")
         cov.json_report(outfile=str(report_path))
         report = json.loads(report_path.read_text(encoding="utf-8"))
         totals = report.get("totals", {})

@@ -9,9 +9,9 @@ import unittest
 from pathlib import Path
 from typing import TypedDict
 
-from sandboxed_workspace_mcp.analysis_execution import coverage_harness
-from sandboxed_workspace_mcp.config import Settings
-from sandboxed_workspace_mcp.diagnostics import (
+from workspace_guard_mcp.analysis_execution import coverage_harness
+from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.diagnostics import (
     adapt_coverage_result,
     adapt_mypy_result,
     adapt_pytest_result,
@@ -19,7 +19,7 @@ from sandboxed_workspace_mcp.diagnostics import (
     parse_mypy_diagnostics,
     parse_ruff_diagnostics,
 )
-from sandboxed_workspace_mcp.python_execution import PythonCommandCompiler
+from workspace_guard_mcp.python_execution import PythonCommandCompiler
 
 
 class _BranchCoverage(TypedDict):
@@ -56,7 +56,7 @@ class ExecutionCompilerTests(unittest.TestCase):
             max_failures=3,
             include_failure_plugin=True,
         )
-        self.assertIn("sandboxed_workspace_mcp_debug_plugin", pytest_argv)
+        self.assertIn("workspace_guard_mcp_debug_plugin", pytest_argv)
         self.assertIn("--showlocals", pytest_argv)
         self.assertIn("--maxfail=3", pytest_argv)
 

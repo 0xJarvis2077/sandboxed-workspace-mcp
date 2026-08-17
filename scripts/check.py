@@ -58,7 +58,7 @@ def run_full_checks() -> None:
     """Run the complete quality gate used by CI."""
 
     run_fast_checks()
-    with tempfile.TemporaryDirectory(prefix="sandboxed-workspace-mcp-check-") as temp:
+    with tempfile.TemporaryDirectory(prefix="workspace-guard-mcp-check-") as temp:
         temp_dir = Path(temp)
         environment = {
             "COVERAGE_FILE": str(temp_dir / ".coverage"),

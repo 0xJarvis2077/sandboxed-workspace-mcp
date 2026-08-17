@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from sandboxed_workspace_mcp.result_cache import ResultCache
-from sandboxed_workspace_mcp.result_presentation import (
+from workspace_guard_mcp.result_cache import ResultCache
+from workspace_guard_mcp.result_presentation import (
     externalize_text,
     externalize_tool_payload,
     preview_utf8,
 )
-from sandboxed_workspace_mcp.workspace import TRUNCATION_MARKER
+from workspace_guard_mcp.workspace import TRUNCATION_MARKER
 
 
 class ResultPresentationTests(unittest.TestCase):

@@ -9,9 +9,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sandboxed_workspace_mcp.config import Settings
-from sandboxed_workspace_mcp.task_config import TaskLimits
-from sandboxed_workspace_mcp.task_snapshot import SnapshotBuilder, SnapshotError
+from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.task_config import TaskLimits
+from workspace_guard_mcp.task_snapshot import SnapshotBuilder, SnapshotError
 
 
 class TaskSnapshotTests(unittest.TestCase):
@@ -145,10 +145,10 @@ class TaskSnapshotTests(unittest.TestCase):
                 cancellation.set()
             return data
 
-        before = set(Path(tempfile.gettempdir()).glob("sandboxed-workspace-mcp-task-*"))
+        before = set(Path(tempfile.gettempdir()).glob("workspace-guard-mcp-task-*"))
         with (
             patch(
-                "sandboxed_workspace_mcp.task_snapshot.os.read",
+                "workspace_guard_mcp.task_snapshot.os.read",
                 side_effect=cancelling_read,
             ),
             self.assertRaisesRegex(SnapshotError, "cancelled"),
@@ -156,13 +156,13 @@ class TaskSnapshotTests(unittest.TestCase):
             self._builder(max_snapshot_bytes=256 * 1024).create(
                 cancellation_event=cancellation
             )
-        after = set(Path(tempfile.gettempdir()).glob("sandboxed-workspace-mcp-task-*"))
+        after = set(Path(tempfile.gettempdir()).glob("workspace-guard-mcp-task-*"))
         self.assertEqual(after, before)
 
         moments = iter((0.0, 2.0))
         with (
             patch(
-                "sandboxed_workspace_mcp.task_snapshot.time.monotonic",
+                "workspace_guard_mcp.task_snapshot.time.monotonic",
                 side_effect=lambda: next(moments, 2.0),
             ),
             self.assertRaisesRegex(SnapshotError, "timed out"),
@@ -220,7 +220,7 @@ class TaskSnapshotTests(unittest.TestCase):
         try:
             with (
                 patch(
-                    "sandboxed_workspace_mcp.task_snapshot.os.open",
+                    "workspace_guard_mcp.task_snapshot.os.open",
                     side_effect=racing_open,
                 ),
                 self.assertRaisesRegex(SnapshotError, "changed"),

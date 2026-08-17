@@ -218,7 +218,7 @@ def build_instructions(tool_names: Iterable[str]) -> str:
             "",
             (
                 "Large human-readable text may be returned as a bounded inline preview "
-                "plus an ephemeral `sandboxed-workspace://result/...` resource URI. "
+                "plus an ephemeral `workspaceguard://result/...` resource URI. "
                 "Follow that URI only when the complete bounded result is necessary. "
                 "The resource contains only content already admitted by the server's "
                 "existing safety and output bounds; it never exposes discarded raw "
