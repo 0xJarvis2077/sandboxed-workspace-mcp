@@ -60,7 +60,22 @@ TRASH_RESTORE = ToolAnnotations(
     idempotentHint=False,
     openWorldHint=False,
 )
+GIT_INIT = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+GIT_BASELINE = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=False,
+)
 _STRICT_TOOL_ARGUMENTS = {
+    "git_init": frozenset(),
+    "git_create_baseline": frozenset(),
+    "git_read_file_at_revision": frozenset({"path", "commit"}),
     "git_status": frozenset({"style"}),
     "git_diff": frozenset({"staged", "path"}),
     "git_log": frozenset({"count", "oneline"}),
@@ -113,6 +128,9 @@ _TOOL_SCOPES: dict[str, frozenset[str]] = {
     "git_branch": frozenset({"workspace.read"}),
     "git_rev_parse": frozenset({"workspace.read"}),
     "git_ls_files": frozenset({"workspace.read"}),
+    "git_read_file_at_revision": frozenset({"workspace.read"}),
+    "git_init": frozenset({"workspace.git.write"}),
+    "git_create_baseline": frozenset({"workspace.git.write"}),
     "run_shell": frozenset({"workspace.read"}),
     "create_directory": frozenset({"workspace.write"}),
     "write_file": frozenset({"workspace.write"}),
@@ -284,6 +302,8 @@ def create_server(
         required_scopes = {"workspace.read"}
         if settings.allow_writes:
             required_scopes.add("workspace.write")
+        if settings.allow_git_writes:
+            required_scopes.add("workspace.git.write")
         if settings.allow_trash:
             required_scopes.add("workspace.delete")
         if settings.allow_trash_purge:
@@ -495,6 +515,26 @@ def create_server(
         """Show bounded Git status in the selected stable allowlisted form."""
 
         return computer.git.status(style)
+
+    @server.tool(annotations=READ_ONLY, structured_output=True)
+    def git_read_file_at_revision(path: str, commit: str = "HEAD") -> dict[str, object]:
+        """Read one policy-approved UTF-8 regular file from a safe Git revision."""
+
+        return computer.git_writer.read_file_at_revision(path, commit)
+
+    if settings.allow_git_writes:
+
+        @server.tool(annotations=GIT_INIT, structured_output=True)
+        def git_init() -> dict[str, object]:
+            """Initialize the configured workspace root as a Git main repository."""
+
+            return computer.git_writer.init()
+
+        @server.tool(annotations=GIT_BASELINE, structured_output=True)
+        def git_create_baseline() -> dict[str, object]:
+            """Create the server-owned first baseline commit, never a general commit."""
+
+            return computer.git_writer.create_baseline()
 
     @server.tool(annotations=READ_ONLY)
     def git_diff(staged: bool = False, path: str | None = None) -> str:

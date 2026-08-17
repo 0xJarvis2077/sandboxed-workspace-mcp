@@ -9,6 +9,7 @@
 - 一个服务实例只负责一个 `--root`。需要多个项目时，启动多个实例。
 - 默认工作区工具可写；生产或只读场景应显式传 `--read-only`。
 - `--read-only` 只关闭工作区写工具；已授权的任务仍在一次性快照中运行，不会写回真实工作区。
+- Git 初始化和首次基线提交默认关闭；`--allow-git-writes` 只能在可写模式下开启，并需要额外的 `workspace.git.write` OAuth scope。
 - 回收站默认关闭；`--allow-trash` 需要同时允许写入，提供单文件回收、原路径恢复和安全备用路径恢复。不可恢复的单项 purge 还需要单独的 `--allow-trash-purge`。
 - 容器任务是可选能力，必须通过工作区外的可信 JSON 显式开启；配置文件中的 image 必须是完整 digest 或完整本地 `sha256` ID。
 
@@ -69,7 +70,8 @@ python -m venv .venv
 | 写入 | `create_directory`, `write_file`, `replace_text`, `append_file` | 原子写入；需要非只读模式 |
 | 回收站（可选） | `trash_file`, `list_trashed_files`, `restore_trashed_file`, `restore_trashed_file_to` | 默认不注册；受限单文件回收和不覆盖恢复 |
 | 永久清理（可选） | `purge_trashed_file` | 仅单独开启 purge 时注册；必须 SHA 校验，不可恢复 |
-| Git | `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_rev_parse`, `git_ls_files` | 固定的只读 Git 查询 |
+| Git 只读 | `git_status`, `git_diff`, `git_log`, `git_show`, `git_branch`, `git_rev_parse`, `git_ls_files`, `git_read_file_at_revision` | 固定参数、有界的 Git 查询和 HEAD 历史文件读取 |
+| Git 写入（可选） | `git_init`, `git_create_baseline` | 仅配置 root、main 分支和服务器固定首次基线；默认不注册 |
 | 兼容命令 | `run_shell` | 只解析封闭的只读语法，从不启动 Shell |
 | 固定任务 | `list_tasks`, `run_task` | 操作者预定义的同步任务 |
 | 长任务 | `start_task`, `task_status`, `task_logs`, `stop_task` | 有界 stdout/stderr 和 cursor 日志 |
@@ -78,6 +80,12 @@ python -m venv .venv
 没有提供 task config 时，任务管理器、容器后端和动态执行工具都不会创建或注册。
 
 `run_shell` 只接受 `pwd`、`ls`、`cat`、`head`、`tail`、`tree`、`grep`、受限 `rg`、`find`、`wc`、`sed` 以及固定 Git 查询。管道、重定向、命令替换、环境变量展开和未列出的参数都会被拒绝。
+
+### 使用受控 Git 基线
+
+启用 `--allow-git-writes`（或 `SANDBOXED_WORKSPACE_MCP_ALLOW_GIT_WRITES=true`）后，服务才注册 `git_init` 和 `git_create_baseline`。它们没有调用方参数：`git_init` 只在当前配置的 workspace root 创建普通、非 bare 的 `main` 仓库，并对已存在的有效 root 仓库幂等返回；不支持 `repo_path`、子目录仓库、template、separate-git-dir、bare 或任意 Git argv。`git_create_baseline` 只能执行一次首次基线，使用固定消息和身份，不是通用 commit；blocked 文件、`.git`、回收站、ignored 目录、symlink 和特殊文件不会进入基线。
+
+恢复历史内容时，先用 `read_file_versioned` 取得当前 SHA，再用 `git_read_file_at_revision(path, "HEAD")` 读取基线内容，最后使用现有 `write_file(overwrite=true, expected_sha256=...)` 写回。`run_shell` 仍然只读；task snapshot 仍排除 `.git`，`run_command` 即使在 writable profile 中运行也不会写回真实 workspace。Git 写入能力不属于默认 OAuth scope，HTTP 调用必须同时拥有 `workspace.git.write`。
 
 ## 常见工作流
 
@@ -173,6 +181,9 @@ stop_task(started["task_id"])
 | --- | --- |
 | `--root` / `SANDBOXED_WORKSPACE_MCP_ROOT` | 唯一 workspace 根目录 |
 | `--read-only` / `SANDBOXED_WORKSPACE_MCP_READ_ONLY` | 关闭所有工作区写工具 |
+| `--allow-git-writes` / `SANDBOXED_WORKSPACE_MCP_ALLOW_GIT_WRITES` | 开启受控 Git 初始化和首次基线；要求可写模式，且不支持任意 Git 参数 |
+| `--max-git-baseline-files` / `SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_FILES` | 首次基线允许的普通文件数上限 |
+| `--max-git-baseline-bytes` / `SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_BYTES` | 首次基线 payload 总字节上限 |
 | `--allow-trash` / `SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH` | 开启受限、可恢复的单文件回收站 |
 | `--allow-trash-purge` / `SANDBOXED_WORKSPACE_MCP_ALLOW_TRASH_PURGE` | 单独开启经过 SHA 校验的不可恢复单项 purge |
 | `--max-trash-items` / `SANDBOXED_WORKSPACE_MCP_MAX_TRASH_ITEMS` | 回收站最多保留的条目数（默认 200） |
@@ -192,6 +203,7 @@ src/sandboxed_workspace_mcp/
   access_policy.py      # blocked glob 和 Git 排除策略
   trash.py              # 受保护回收站元数据、事务和恢复
   git_reader.py         # 有界只读 Git 适配器
+  git_writer.py         # 受控初始化、首次基线和 revision blob 读取
   service.py            # run_shell 语法和应用编排
   server.py             # MCP 工具注册、scope 检查和认证 challenge
   cli.py                # stdio/HTTP 启动和 OAuth 配置

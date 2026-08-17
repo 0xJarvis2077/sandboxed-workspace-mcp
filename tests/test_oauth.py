@@ -15,7 +15,11 @@ from jwt.algorithms import ECAlgorithm, RSAAlgorithm
 from mcp.server.auth.provider import AccessToken
 
 from sandboxed_workspace_mcp.config import Settings
-from sandboxed_workspace_mcp.oauth import JWTTokenVerifier, OAuthSettings
+from sandboxed_workspace_mcp.oauth import (
+    DEFAULT_OAUTH_SCOPES,
+    JWTTokenVerifier,
+    OAuthSettings,
+)
 from sandboxed_workspace_mcp.server import create_server
 from sandboxed_workspace_mcp.task_config import (
     ExecutionProfile,
@@ -398,6 +402,49 @@ class OAuthServerTests(unittest.TestCase):
         asyncio.run(exercise())
         self.assertEqual(len(backend.requests), 3)
         manager.shutdown()
+
+    def test_git_write_scope_is_opt_in_and_not_replaced_by_workspace_write(
+        self,
+    ) -> None:
+        self.assertNotIn("workspace.git.write", DEFAULT_OAUTH_SCOPES)
+        enabled = Settings.create(self.root, allow_git_writes=True)
+        with self.assertRaisesRegex(ValueError, "workspace.git.write"):
+            create_server(enabled, oauth=_oauth())
+
+        git_oauth = OAuthSettings(
+            issuer=ISSUER,
+            audience=RESOURCE,
+            public_origin=RESOURCE,
+            jwks_uri=JWKS_URI,
+            scopes=(*DEFAULT_OAUTH_SCOPES, "workspace.git.write"),
+        )
+        server = create_server(enabled, oauth=git_oauth)
+        tools = asyncio.run(server.list_tools())
+        by_name = {tool.name: tool for tool in tools}
+        self.assertEqual(
+            by_name["git_init"].meta["securitySchemes"],
+            [{"type": "oauth2", "scopes": ["workspace.git.write"]}],
+        )
+        write = AccessToken(token="", client_id="client", scopes=["workspace.write"])
+        git_write = AccessToken(
+            token="", client_id="client", scopes=["workspace.git.write"]
+        )
+
+        async def exercise() -> None:
+            with patch(
+                "sandboxed_workspace_mcp.server.get_access_token", return_value=write
+            ):
+                denied = await server.call_tool("git_init", {})
+                self.assertTrue(denied.is_error)
+                self.assertIn("insufficient_scope", repr(denied.meta))
+            with patch(
+                "sandboxed_workspace_mcp.server.get_access_token",
+                return_value=git_write,
+            ):
+                allowed = await server.call_tool("git_init", {})
+                self.assertFalse(allowed.is_error)
+
+        asyncio.run(exercise())
 
     def test_resource_metadata_and_http_challenge_trigger_oauth_discovery(self) -> None:
         verifier = JWTTokenVerifier(_oauth())

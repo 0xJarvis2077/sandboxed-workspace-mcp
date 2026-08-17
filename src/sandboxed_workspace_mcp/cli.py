@@ -83,6 +83,14 @@ def build_parser(
         help="disable every mutating tool",
     )
     parser.add_argument(
+        "--allow-git-writes",
+        action=argparse.BooleanOptionalAction,
+        default=_parser_environment_bool(
+            parser, env, "SANDBOXED_WORKSPACE_MCP_ALLOW_GIT_WRITES", False
+        ),
+        help="enable controlled Git initialization and first-baseline tools",
+    )
+    parser.add_argument(
         "--allow-trash",
         action=argparse.BooleanOptionalAction,
         default=_parser_environment_bool(
@@ -224,6 +232,21 @@ def build_parser(
         metavar="SECONDS",
     )
     parser.add_argument(
+        "--max-git-baseline-files",
+        type=int,
+        default=env.get("SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_FILES", "10000"),
+        help="maximum policy-approved files in the first Git baseline",
+    )
+    parser.add_argument(
+        "--max-git-baseline-bytes",
+        type=int,
+        default=env.get(
+            "SANDBOXED_WORKSPACE_MCP_MAX_GIT_BASELINE_BYTES", str(256 * 1024 * 1024)
+        ),
+        metavar="BYTES",
+        help="maximum aggregate bytes in the first Git baseline",
+    )
+    parser.add_argument(
         "--max-trash-items",
         type=int,
         default=env.get("SANDBOXED_WORKSPACE_MCP_MAX_TRASH_ITEMS", "200"),
@@ -317,7 +340,10 @@ def parse_runtime(
             search_timeout_seconds=args.search_timeout,
             max_concurrent_searches=args.max_concurrent_searches,
             git_timeout=args.git_timeout,
+            max_git_baseline_files=args.max_git_baseline_files,
+            max_git_baseline_bytes=args.max_git_baseline_bytes,
             allow_writes=not args.read_only,
+            allow_git_writes=args.allow_git_writes,
             allow_trash=args.allow_trash,
             allow_trash_purge=args.allow_trash_purge,
             max_trash_items=args.max_trash_items,
@@ -380,6 +406,8 @@ def parse_runtime(
         required_scopes = {"workspace.read"}
         if settings.allow_writes:
             required_scopes.add("workspace.write")
+        if settings.allow_git_writes:
+            required_scopes.add("workspace.git.write")
         if settings.allow_trash:
             required_scopes.add("workspace.delete")
         if settings.allow_trash_purge:
