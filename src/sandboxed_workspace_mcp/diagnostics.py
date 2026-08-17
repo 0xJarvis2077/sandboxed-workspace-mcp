@@ -340,9 +340,7 @@ def _coverage_number(value: object, *, integer: bool) -> float | int:
     return int(value) if integer else float(value)
 
 
-def _coverage_totals(
-    value: dict[str, object], error_message: str
-) -> dict[str, object]:
+def _coverage_totals(value: dict[str, object], error_message: str) -> dict[str, object]:
     try:
         return {
             "percent": _coverage_number(value.get("percent", 0.0), integer=False),
