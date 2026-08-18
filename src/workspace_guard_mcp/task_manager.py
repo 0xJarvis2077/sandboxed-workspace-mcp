@@ -32,6 +32,7 @@ from .execution import (
     ExecutionMode,
     ExecutionReason,
     ExecutionRecord,
+    ExecutionResources,
     ExecutionState,
     legacy_execution_status,
 )
@@ -61,6 +62,7 @@ from .task_runner import (
     ContainerHandle,
     ContainerRequest,
     WorkspaceGrowthMonitor,
+    measure_workspace_usage,
     run_container_task,
 )
 from .task_snapshot import SnapshotBuilder, WorkspaceSnapshot
@@ -82,7 +84,7 @@ class _LogChunk:
 
 
 class TaskLogBuffer:
-    """A thread-safe byte-bounded ring with absolute cursors."""
+    """A thread-safe byte-bounded ring with lifetime runtime byte counters."""
 
     def __init__(self, capacity: int) -> None:
         if type(capacity) is not int or capacity <= 0:
@@ -93,18 +95,28 @@ class TaskLogBuffer:
         self._next_cursor = 0
         self._size = 0
         self._dropped = False
+        self._runtime_stdout_bytes = 0
+        self._runtime_stderr_bytes = 0
         self._lock = threading.Lock()
 
     def append_stdout(self, data: bytes) -> None:
-        self._append("stdout", data)
+        self._append("stdout", data, runtime=True)
 
     def append_stderr(self, data: bytes) -> None:
-        self._append("stderr", data)
+        self._append("stderr", data, runtime=True)
 
-    def _append(self, stream: str, data: bytes) -> None:
+    def append_diagnostic_stderr(self, data: bytes) -> None:
+        self._append("stderr", data, runtime=False)
+
+    def _append(self, stream: str, data: bytes, *, runtime: bool) -> None:
         if not data:
             return
         with self._lock:
+            if runtime:
+                if stream == "stdout":
+                    self._runtime_stdout_bytes += len(data)
+                else:
+                    self._runtime_stderr_bytes += len(data)
             original_start = self._next_cursor
             self._next_cursor += len(data)
             if len(data) >= self.capacity:
@@ -182,6 +194,16 @@ class TaskLogBuffer:
         with self._lock:
             return self._dropped
 
+    @property
+    def runtime_stdout_bytes(self) -> int:
+        with self._lock:
+            return self._runtime_stdout_bytes
+
+    @property
+    def runtime_stderr_bytes(self) -> int:
+        with self._lock:
+            return self._runtime_stderr_bytes
+
 
 @dataclass(slots=True)
 class _ServiceSession:
@@ -192,6 +214,8 @@ class _ServiceSession:
     artifact_staging: ArtifactStaging
     logs: TaskLogBuffer
     deadline: float
+    created_monotonic: float
+    initial_workspace_bytes: int
     workspace_monitor: WorkspaceGrowthMonitor
     artifact_monitor: ArtifactGrowthMonitor
     owner_scope: str | None
@@ -202,6 +226,7 @@ class _ServiceSession:
 @dataclass(slots=True)
 class _ExecutionLease:
     execution_id: str
+    created_monotonic: float
     owner_scope: str | None = None
     cancellation: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
@@ -614,6 +639,8 @@ class TaskManager:
         cancellation = _CombinedCancellation(lease.cancellation, cancellation_event)
         snapshot: WorkspaceSnapshot | None = None
         artifact_staging: ArtifactStaging | None = None
+        initial_workspace_bytes: int | None = None
+        final_workspace_bytes: int | None = None
         try:
             try:
                 snapshot = self._create_snapshot(
@@ -622,6 +649,7 @@ class TaskManager:
                 )
                 if snapshot_initializer is not None:
                     snapshot_initializer(snapshot.path)
+                initial_workspace_bytes = self._measure_workspace_baseline(snapshot)
                 artifact_staging = ArtifactStaging.create()
             except Exception as exc:
                 self._finish_prestart_failure(
@@ -630,9 +658,11 @@ class TaskManager:
                     cancellation_event=cancellation_event,
                     deadline=deadline,
                     error_summary=str(exc),
+                    workspace_initial_bytes=initial_workspace_bytes,
                 )
                 raise
 
+            assert initial_workspace_bytes is not None
             request = ContainerRequest(
                 container_name=self._container_name(),
                 snapshot_path=snapshot.path,
@@ -640,7 +670,7 @@ class TaskManager:
                 limits=self.configuration.limits,
                 artifact_path=artifact_staging.path,
                 container_workdir=container_workdir,
-                initial_workspace_bytes=snapshot.total_bytes,
+                initial_workspace_bytes=initial_workspace_bytes,
                 started_at=started,
                 deadline=deadline,
             )
@@ -665,6 +695,9 @@ class TaskManager:
             )
             if state is ExecutionState.CANCELLED:
                 reason = self._cancellation_reason(lease, cancellation_event)
+            final_workspace_bytes = self._measure_final_workspace(
+                task, snapshot, initial_workspace_bytes
+            )
             artifacts: list[ArtifactRecord] = []
             try:
                 artifacts = self.artifact_store.collect(
@@ -694,18 +727,31 @@ class TaskManager:
                 state = ExecutionState.CRASHED
                 reason = ExecutionReason.CLEANUP_FAILED
                 error_summary = "execution temporary cleanup failed"
-            self._complete_execution(
+            resources = self._build_execution_resources(
+                created_monotonic=lease.created_monotonic,
+                workspace_initial_bytes=initial_workspace_bytes,
+                workspace_final_bytes=final_workspace_bytes,
+                stdout_bytes=task_result.stdout_bytes,
+                stderr_bytes=task_result.stderr_bytes,
+            )
+            completed = self._complete_execution(
                 lease.execution_id,
                 state,
                 reason=reason,
                 exit_code=task_result.exit_code,
                 error_summary=error_summary,
+                resources=resources,
             )
             result = task_result.as_dict()
             if state is not task_result.state:
                 result["status"] = legacy_execution_status(state, reason)
                 result["timed_out"] = state is ExecutionState.TIMED_OUT
             result["execution_id"] = lease.execution_id
+            result["resources"] = (
+                completed.resources.model_dump(mode="json")
+                if completed.resources is not None
+                else None
+            )
             result["artifacts"] = [_artifact_payload(item) for item in artifacts]
             return result
         finally:
@@ -761,11 +807,13 @@ class TaskManager:
         workspace_monitor: WorkspaceGrowthMonitor | None = None
         artifact_monitor: ArtifactGrowthMonitor | None = None
         session: _ServiceSession | None = None
+        initial_workspace_bytes: int | None = None
         try:
             snapshot = self._create_snapshot(
                 deadline=deadline,
                 cancellation_event=cancellation,  # type: ignore[arg-type]
             )
+            initial_workspace_bytes = self._measure_workspace_baseline(snapshot)
             artifact_staging = ArtifactStaging.create()
             logs = TaskLogBuffer(self.configuration.limits.max_output_bytes)
             request = ContainerRequest(
@@ -775,7 +823,7 @@ class TaskManager:
                 limits=self.configuration.limits,
                 artifact_path=artifact_staging.path,
                 container_workdir=container_workdir,
-                initial_workspace_bytes=snapshot.total_bytes,
+                initial_workspace_bytes=initial_workspace_bytes,
                 started_at=started,
                 deadline=deadline,
             )
@@ -793,6 +841,8 @@ class TaskManager:
                 artifact_staging=artifact_staging,
                 logs=logs,
                 deadline=deadline,
+                created_monotonic=lease.created_monotonic,
+                initial_workspace_bytes=initial_workspace_bytes,
                 workspace_monitor=workspace_monitor,
                 artifact_monitor=artifact_monitor,
                 owner_scope=lease.owner_scope,
@@ -844,6 +894,7 @@ class TaskManager:
                         cancellation_event=cancellation_event,
                         deadline=deadline,
                         error_summary=str(exc),
+                        workspace_initial_bytes=initial_workspace_bytes,
                     )
             finally:
                 self._finish_lease(lease)
@@ -918,6 +969,11 @@ class TaskManager:
             "timed_out": record.state is ExecutionState.TIMED_OUT,
             "truncated": truncated,
             "duration_ms": max(0, int((ended - started) * 1000)),
+            "resources": (
+                record.resources.model_dump(mode="json")
+                if record.resources is not None
+                else None
+            ),
         }
 
     def task_logs(self, task_id: str, cursor: int = 0) -> dict[str, object]:
@@ -1071,6 +1127,7 @@ class TaskManager:
         owner_scope: str | None = None,
     ) -> _ExecutionLease:
         execution_id = secrets.token_urlsafe(24)
+        created_monotonic = time.monotonic()
         now = time.time()
         try:
             record = ExecutionRecord(
@@ -1087,7 +1144,11 @@ class TaskManager:
         except (ValueError, ExecutionStoreError) as exc:
             self._capacity.release()
             raise TaskManagerError(f"failed to create execution record: {exc}") from exc
-        lease = _ExecutionLease(execution_id, owner_scope=owner_scope)
+        lease = _ExecutionLease(
+            execution_id,
+            created_monotonic=created_monotonic,
+            owner_scope=owner_scope,
+        )
         self._starting[execution_id] = lease
         return lease
 
@@ -1157,6 +1218,11 @@ class TaskManager:
             session.artifact_monitor.stop_and_join()
         except Exception:
             pass
+        final_workspace_bytes = self._measure_final_workspace(
+            session.task,
+            session.snapshot,
+            session.initial_workspace_bytes,
+        )
         try:
             session.handle.close()
         except Exception:
@@ -1165,10 +1231,18 @@ class TaskManager:
             session.artifact_staging.cleanup()
             session.snapshot.cleanup()
         finally:
+            resources = self._build_execution_resources(
+                created_monotonic=session.created_monotonic,
+                workspace_initial_bytes=session.initial_workspace_bytes,
+                workspace_final_bytes=final_workspace_bytes,
+                stdout_bytes=session.logs.runtime_stdout_bytes,
+                stderr_bytes=session.logs.runtime_stderr_bytes,
+            )
             self._crash_if_unfinished(
                 session.execution_id,
                 ExecutionReason.RUNTIME_MONITOR_FAILED,
                 "service monitor failed to start",
+                resources=resources,
             )
             if release_capacity:
                 self._capacity.release()
@@ -1213,6 +1287,7 @@ class TaskManager:
         reason: ExecutionReason | None = None,
         exit_code: int | None = None,
         error_summary: str | None = None,
+        resources: ExecutionResources | None = None,
     ) -> ExecutionRecord:
         record = self._execution_record(execution_id)
         if record.terminal:
@@ -1231,6 +1306,7 @@ class TaskManager:
                 reason=reason,
                 exit_code=exit_code,
                 error_summary=_bounded_error_summary(error_summary),
+                resources=resources,
                 finished_at=time.time(),
             )
         except ExecutionConflictError as conflict:
@@ -1244,6 +1320,7 @@ class TaskManager:
                     ExecutionState.CANCELLED,
                     reason=current.reason or reason,
                     exit_code=exit_code,
+                    resources=resources,
                     finished_at=time.time(),
                 )
             raise TaskManagerError(
@@ -1251,6 +1328,56 @@ class TaskManager:
             ) from conflict
         except ExecutionStoreError as exc:
             raise TaskManagerError(f"failed to complete execution: {exc}") from exc
+
+    def _build_execution_resources(
+        self,
+        *,
+        created_monotonic: float,
+        workspace_initial_bytes: int | None,
+        workspace_final_bytes: int | None,
+        stdout_bytes: int,
+        stderr_bytes: int,
+    ) -> ExecutionResources:
+        growth = (
+            None
+            if workspace_final_bytes is None or workspace_initial_bytes is None
+            else max(0, workspace_final_bytes - workspace_initial_bytes)
+        )
+        return ExecutionResources(
+            wall_time_ms=max(0, int((time.monotonic() - created_monotonic) * 1000)),
+            cpu_time_ms=None,
+            peak_memory_bytes=None,
+            workspace_initial_bytes=workspace_initial_bytes,
+            workspace_final_bytes=workspace_final_bytes,
+            workspace_growth_bytes=growth,
+            stdout_bytes=stdout_bytes,
+            stderr_bytes=stderr_bytes,
+            output_bytes=stdout_bytes + stderr_bytes,
+        )
+
+    def _measure_workspace_baseline(self, snapshot: WorkspaceSnapshot) -> int:
+        return measure_workspace_usage(
+            snapshot.path,
+            initial_workspace_bytes=snapshot.total_bytes,
+            limits=self.configuration.limits,
+        ).total_bytes
+
+    def _measure_final_workspace(
+        self,
+        task: TaskDefinition,
+        snapshot: WorkspaceSnapshot,
+        initial_workspace_bytes: int,
+    ) -> int | None:
+        if task.workspace_access != "writable":
+            return initial_workspace_bytes
+        try:
+            return measure_workspace_usage(
+                snapshot.path,
+                initial_workspace_bytes=initial_workspace_bytes,
+                limits=self.configuration.limits,
+            ).total_bytes
+        except OSError:
+            return None
 
     def _finish_prestart_failure(
         self,
@@ -1260,13 +1387,22 @@ class TaskManager:
         cancellation_event: threading.Event | None,
         deadline: float,
         error_summary: str,
+        workspace_initial_bytes: int | None,
     ) -> None:
+        resources = self._build_execution_resources(
+            created_monotonic=lease.created_monotonic,
+            workspace_initial_bytes=workspace_initial_bytes,
+            workspace_final_bytes=None,
+            stdout_bytes=0,
+            stderr_bytes=0,
+        )
         if lease.cancellation.is_set() or self._shutdown:
             self._request_cancellation(execution_id, ExecutionReason.SERVER_SHUTDOWN)
             self._complete_execution(
                 execution_id,
                 ExecutionState.CANCELLED,
                 reason=ExecutionReason.SERVER_SHUTDOWN,
+                resources=resources,
             )
             return
         if cancellation_event is not None and cancellation_event.is_set():
@@ -1275,6 +1411,7 @@ class TaskManager:
                 execution_id,
                 ExecutionState.CANCELLED,
                 reason=ExecutionReason.CLIENT_CANCELLED,
+                resources=resources,
             )
             return
         if time.monotonic() >= deadline:
@@ -1282,6 +1419,7 @@ class TaskManager:
                 execution_id,
                 ExecutionState.TIMED_OUT,
                 reason=ExecutionReason.TIMEOUT,
+                resources=resources,
             )
             return
         self._complete_execution(
@@ -1289,6 +1427,7 @@ class TaskManager:
             ExecutionState.CRASHED,
             reason=ExecutionReason.RUNTIME_START_FAILED,
             error_summary=error_summary,
+            resources=resources,
         )
 
     def _cancellation_reason(
@@ -1307,6 +1446,8 @@ class TaskManager:
         execution_id: str,
         reason: ExecutionReason,
         error_summary: str,
+        *,
+        resources: ExecutionResources | None = None,
     ) -> None:
         record = self._execution_record(execution_id)
         if record.terminal:
@@ -1316,6 +1457,7 @@ class TaskManager:
             ExecutionState.CRASHED,
             reason=reason,
             error_summary=error_summary,
+            resources=resources,
         )
 
     def _create_snapshot(
@@ -1373,7 +1515,7 @@ class TaskManager:
                 session.handle.stop()
             except Exception:
                 pass
-            session.logs.append_stderr(
+            session.logs.append_diagnostic_stderr(
                 f"container monitor failure: {exc}".encode("utf-8", errors="replace")
             )
             state = ExecutionState.CRASHED
@@ -1389,7 +1531,7 @@ class TaskManager:
                     monitor.stop_and_join()
                 except Exception as exc:
                     cleanup_failed = True
-                    session.logs.append_stderr(
+                    session.logs.append_diagnostic_stderr(
                         f"{label} monitor cleanup failure: {exc}".encode(
                             "utf-8", errors="replace"
                         )
@@ -1398,11 +1540,16 @@ class TaskManager:
                 session.handle.close()
             except Exception as exc:
                 cleanup_failed = True
-                session.logs.append_stderr(
+                session.logs.append_diagnostic_stderr(
                     f"container cleanup failure: {exc}".encode(
                         "utf-8", errors="replace"
                     )
                 )
+            final_workspace_bytes = self._measure_final_workspace(
+                session.task,
+                session.snapshot,
+                session.initial_workspace_bytes,
+            )
             try:
                 self.artifact_store.collect(
                     session.execution_id,
@@ -1427,7 +1574,7 @@ class TaskManager:
                 session.snapshot.cleanup()
             except Exception as exc:
                 cleanup_failed = True
-                session.logs.append_stderr(
+                session.logs.append_diagnostic_stderr(
                     f"execution temporary cleanup failure: {exc}".encode(
                         "utf-8", errors="replace"
                     )
@@ -1436,6 +1583,13 @@ class TaskManager:
                 state = ExecutionState.CRASHED
                 reason = ExecutionReason.CLEANUP_FAILED
                 error_summary = "service execution cleanup failed"
+            resources = self._build_execution_resources(
+                created_monotonic=session.created_monotonic,
+                workspace_initial_bytes=session.initial_workspace_bytes,
+                workspace_final_bytes=final_workspace_bytes,
+                stdout_bytes=session.logs.runtime_stdout_bytes,
+                stderr_bytes=session.logs.runtime_stderr_bytes,
+            )
             try:
                 self._complete_execution(
                     session.execution_id,
@@ -1443,6 +1597,7 @@ class TaskManager:
                     reason=reason,
                     exit_code=exit_code,
                     error_summary=error_summary,
+                    resources=resources,
                 )
             finally:
                 with self._lock:

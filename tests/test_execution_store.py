@@ -12,6 +12,7 @@ from workspace_guard_mcp.execution import (
     ExecutionMode,
     ExecutionReason,
     ExecutionRecord,
+    ExecutionResources,
     ExecutionState,
 )
 from workspace_guard_mcp.execution_store import (
@@ -59,6 +60,20 @@ def record(
     )
 
 
+def resources() -> ExecutionResources:
+    return ExecutionResources(
+        wall_time_ms=25,
+        cpu_time_ms=None,
+        peak_memory_bytes=None,
+        workspace_initial_bytes=100,
+        workspace_final_bytes=125,
+        workspace_growth_bytes=25,
+        stdout_bytes=7,
+        stderr_bytes=3,
+        output_bytes=10,
+    )
+
+
 class InMemoryExecutionStoreTests(unittest.TestCase):
     def test_create_get_duplicate_transition_cas_and_unknown(self) -> None:
         store = InMemoryExecutionStore()
@@ -89,6 +104,19 @@ class InMemoryExecutionStoreTests(unittest.TestCase):
             )
         with self.assertRaises(UnknownExecutionError):
             store.get("missing")
+
+    def test_terminal_transition_persists_resources(self) -> None:
+        store = InMemoryExecutionStore()
+        store.create(record())
+        store.transition("exec-test", {ExecutionState.STARTING}, ExecutionState.RUNNING)
+        completed = store.transition(
+            "exec-test",
+            {ExecutionState.RUNNING},
+            ExecutionState.SUCCEEDED,
+            resources=resources(),
+        )
+        self.assertEqual(completed.resources, resources())
+        self.assertEqual(store.get("exec-test").resources, resources())
 
     def test_starting_to_cancelling_initializes_started_at(self) -> None:
         store = InMemoryExecutionStore()
@@ -163,17 +191,18 @@ class SqliteExecutionStoreTests(unittest.TestCase):
             {ExecutionState.RUNNING},
             ExecutionState.SUCCEEDED,
             exit_code=0,
+            resources=resources(),
         )
         self.assertEqual(running.state, ExecutionState.RUNNING)
         self.assertEqual(succeeded.state, ExecutionState.SUCCEEDED)
+        self.assertEqual(succeeded.resources, resources())
 
         reopened = SqliteExecutionStore(self.path)
-        self.assertEqual(
-            reopened.get(original.execution_id).state,
-            ExecutionState.SUCCEEDED,
-        )
+        reopened_record = reopened.get(original.execution_id)
+        self.assertEqual(reopened_record.state, ExecutionState.SUCCEEDED)
+        self.assertEqual(reopened_record.resources, resources())
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertEqual(
                 connection.execute("PRAGMA journal_mode").fetchone()[0], "wal"
             )
@@ -189,7 +218,7 @@ class SqliteExecutionStoreTests(unittest.TestCase):
 
     def test_newer_schema_and_invalid_persisted_record_fail_closed(self) -> None:
         with sqlite3.connect(self.path) as connection:
-            connection.execute("PRAGMA user_version=3")
+            connection.execute("PRAGMA user_version=4")
         with self.assertRaises(ExecutionStoreError):
             SqliteExecutionStore(self.path)
 
@@ -211,6 +240,24 @@ class SqliteExecutionStoreTests(unittest.TestCase):
             connection.execute(
                 "UPDATE executions SET state = 'succeeded', finished_at = NULL "
                 "WHERE execution_id = ?",
+                ("exec-test",),
+            )
+        with self.assertRaises(ExecutionStoreError):
+            store.get("exec-test")
+
+    def test_invalid_persisted_resource_record_fails_closed(self) -> None:
+        store = SqliteExecutionStore(self.path)
+        store.create(record())
+        store.transition("exec-test", {ExecutionState.STARTING}, ExecutionState.RUNNING)
+        store.transition(
+            "exec-test",
+            {ExecutionState.RUNNING},
+            ExecutionState.SUCCEEDED,
+            resources=resources(),
+        )
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "UPDATE executions SET output_bytes = 999 WHERE execution_id = ?",
                 ("exec-test",),
             )
         with self.assertRaises(ExecutionStoreError):
@@ -361,6 +408,62 @@ class SqliteExecutionStoreTests(unittest.TestCase):
         self.assertEqual(page.events[0].sequence, 1)
         self.assertEqual(page.events[0].from_state, ExecutionState.STARTING)
         self.assertFalse(page.history_complete)
+        self.assertIsNone(store.get("legacy").resources)
+
+    def test_v2_migration_preserves_records_events_and_missing_resources(self) -> None:
+        old = record("legacy-v2")
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "CREATE TABLE executions ("
+                "execution_id TEXT PRIMARY KEY, kind TEXT NOT NULL, "
+                "name TEXT NOT NULL, tool TEXT, mode TEXT NOT NULL, "
+                "state TEXT NOT NULL, created_at REAL NOT NULL, "
+                "updated_at REAL NOT NULL, started_at REAL, finished_at REAL, "
+                "exit_code INTEGER, reason TEXT, error_summary TEXT)"
+            )
+            connection.execute(
+                "CREATE INDEX executions_state_created ON executions(state, created_at)"
+            )
+            connection.execute(
+                "CREATE TABLE execution_events ("
+                "execution_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
+                "event_type TEXT NOT NULL, timestamp REAL NOT NULL, from_state TEXT, "
+                "to_state TEXT NOT NULL, reason TEXT, error_summary TEXT, "
+                "PRIMARY KEY (execution_id, sequence), "
+                "FOREIGN KEY (execution_id) REFERENCES executions(execution_id))"
+            )
+            connection.execute(
+                "INSERT INTO executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    old.execution_id,
+                    old.kind.value,
+                    old.name,
+                    old.tool,
+                    old.mode.value,
+                    old.state.value,
+                    old.created_at,
+                    old.updated_at,
+                    old.started_at,
+                    old.finished_at,
+                    old.exit_code,
+                    None,
+                    old.error_summary,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO execution_events VALUES "
+                "(?, 1, 'created', ?, NULL, ?, NULL, NULL)",
+                (old.execution_id, old.created_at, old.state.value),
+            )
+            connection.execute("PRAGMA user_version=2")
+
+        migrated = SqliteExecutionStore(self.path)
+        migrated_record = migrated.get("legacy-v2")
+        self.assertEqual(migrated_record, old)
+        self.assertIsNone(migrated_record.resources)
+        self.assertEqual(len(migrated.list_events("legacy-v2").events), 1)
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
 
     def test_restart_reconciliation_crashes_only_unfinished_records(self) -> None:
         store = SqliteExecutionStore(self.path)

@@ -255,6 +255,8 @@ class ArtifactLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(result["artifacts"], [])
         self.assertEqual(artifacts["artifacts"], [])
+        self.assertEqual(result["resources"], record["resources"])
+        self.assertIsNotNone(record["resources"])
 
     def test_service_artifacts_are_hidden_until_terminal_then_admitted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

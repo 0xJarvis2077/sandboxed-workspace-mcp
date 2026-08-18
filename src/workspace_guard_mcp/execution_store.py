@@ -19,11 +19,12 @@ from .execution import (
     ExecutionEventType,
     ExecutionReason,
     ExecutionRecord,
+    ExecutionResources,
     ExecutionState,
     ensure_execution_transition,
 )
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _MAX_EVENT_PAGE_SIZE = 100
 _UNFINISHED_STATES = frozenset(
     {
@@ -46,6 +47,15 @@ _EXECUTION_COLUMNS = (
     "exit_code",
     "reason",
     "error_summary",
+    "wall_time_ms",
+    "cpu_time_ms",
+    "peak_memory_bytes",
+    "workspace_initial_bytes",
+    "workspace_final_bytes",
+    "workspace_growth_bytes",
+    "stdout_bytes",
+    "stderr_bytes",
+    "output_bytes",
 )
 _EVENT_COLUMNS = (
     "execution_id",
@@ -99,6 +109,7 @@ class ExecutionStore(Protocol):
         reason: ExecutionReason | None = None,
         exit_code: int | None = None,
         error_summary: str | None = None,
+        resources: ExecutionResources | None = None,
         started_at: float | None = None,
         finished_at: float | None = None,
         updated_at: float | None = None,
@@ -147,6 +158,7 @@ class InMemoryExecutionStore:
         reason: ExecutionReason | None = None,
         exit_code: int | None = None,
         error_summary: str | None = None,
+        resources: ExecutionResources | None = None,
         started_at: float | None = None,
         finished_at: float | None = None,
         updated_at: float | None = None,
@@ -173,6 +185,7 @@ class InMemoryExecutionStore:
                 reason=reason,
                 exit_code=exit_code,
                 error_summary=error_summary,
+                resources=resources,
                 started_at=started_at,
                 finished_at=finished_at,
                 updated_at=updated_at,
@@ -273,6 +286,7 @@ class SqliteExecutionStore:
         reason: ExecutionReason | None = None,
         exit_code: int | None = None,
         error_summary: str | None = None,
+        resources: ExecutionResources | None = None,
         started_at: float | None = None,
         finished_at: float | None = None,
         updated_at: float | None = None,
@@ -304,6 +318,7 @@ class SqliteExecutionStore:
                     reason=reason,
                     exit_code=exit_code,
                     error_summary=error_summary,
+                    resources=resources,
                     started_at=started_at,
                     finished_at=finished_at,
                     updated_at=updated_at,
@@ -320,7 +335,11 @@ class SqliteExecutionStore:
                 cursor = connection.execute(
                     "UPDATE executions SET "
                     "state = ?, updated_at = ?, started_at = ?, finished_at = ?, "
-                    "exit_code = ?, reason = ?, error_summary = ? "
+                    "exit_code = ?, reason = ?, error_summary = ?, "
+                    "wall_time_ms = ?, cpu_time_ms = ?, peak_memory_bytes = ?, "
+                    "workspace_initial_bytes = ?, workspace_final_bytes = ?, "
+                    "workspace_growth_bytes = ?, stdout_bytes = ?, stderr_bytes = ?, "
+                    "output_bytes = ? "
                     f"WHERE execution_id = ? AND state IN ({placeholders})",
                     (
                         updated.state.value,
@@ -330,6 +349,7 @@ class SqliteExecutionStore:
                         updated.exit_code,
                         updated.reason.value if updated.reason is not None else None,
                         updated.error_summary,
+                        *_resource_values(updated.resources),
                         execution_id,
                         *expected_values,
                     ),
@@ -437,12 +457,19 @@ class SqliteExecutionStore:
                     connection.execute("BEGIN IMMEDIATE")
                     _create_v1_schema(connection)
                     _create_event_schema(connection)
-                    connection.execute("PRAGMA user_version=2")
+                    _add_resource_columns(connection)
+                    connection.execute("PRAGMA user_version=3")
                     connection.commit()
                 elif version == 1:
                     connection.execute("BEGIN IMMEDIATE")
                     _create_event_schema(connection)
-                    connection.execute("PRAGMA user_version=2")
+                    _add_resource_columns(connection)
+                    connection.execute("PRAGMA user_version=3")
+                    connection.commit()
+                elif version == 2:
+                    connection.execute("BEGIN IMMEDIATE")
+                    _add_resource_columns(connection)
+                    connection.execute("PRAGMA user_version=3")
                     connection.commit()
                 self._validate_schema(connection)
         except ExecutionStoreError:
@@ -574,6 +601,7 @@ def _transitioned_record(
     reason: ExecutionReason | None,
     exit_code: int | None,
     error_summary: str | None,
+    resources: ExecutionResources | None,
     started_at: float | None,
     finished_at: float | None,
     updated_at: float | None,
@@ -608,6 +636,7 @@ def _transitioned_record(
             "exit_code": exit_code,
             "reason": reason,
             "error_summary": error_summary,
+            "resources": resources,
         }
     )
     return ExecutionRecord.model_validate(values)
@@ -638,6 +667,37 @@ def _create_event_schema(connection: sqlite3.Connection) -> None:
     )
 
 
+def _add_resource_columns(connection: sqlite3.Connection) -> None:
+    for name in (
+        "wall_time_ms",
+        "cpu_time_ms",
+        "peak_memory_bytes",
+        "workspace_initial_bytes",
+        "workspace_final_bytes",
+        "workspace_growth_bytes",
+        "stdout_bytes",
+        "stderr_bytes",
+        "output_bytes",
+    ):
+        connection.execute(f"ALTER TABLE executions ADD COLUMN {name} INTEGER")
+
+
+def _resource_values(resources: ExecutionResources | None) -> tuple[object, ...]:
+    if resources is None:
+        return (None,) * 9
+    return (
+        resources.wall_time_ms,
+        resources.cpu_time_ms,
+        resources.peak_memory_bytes,
+        resources.workspace_initial_bytes,
+        resources.workspace_final_bytes,
+        resources.workspace_growth_bytes,
+        resources.stdout_bytes,
+        resources.stderr_bytes,
+        resources.output_bytes,
+    )
+
+
 def _record_values(record: ExecutionRecord) -> tuple[object, ...]:
     return (
         record.execution_id,
@@ -653,6 +713,7 @@ def _record_values(record: ExecutionRecord) -> tuple[object, ...]:
         record.exit_code,
         record.reason.value if record.reason is not None else None,
         record.error_summary,
+        *_resource_values(record.resources),
     )
 
 
@@ -670,9 +731,31 @@ def _event_values(event: ExecutionEvent) -> tuple[object, ...]:
 
 
 def _record_from_row(row: sqlite3.Row) -> ExecutionRecord:
+    values = dict(row)
+    resource_values = {
+        name: values.pop(name)
+        for name in (
+            "wall_time_ms",
+            "cpu_time_ms",
+            "peak_memory_bytes",
+            "workspace_initial_bytes",
+            "workspace_final_bytes",
+            "workspace_growth_bytes",
+            "stdout_bytes",
+            "stderr_bytes",
+            "output_bytes",
+        )
+    }
     try:
-        return ExecutionRecord.model_validate(dict(row))
-    except ValidationError as exc:
+        if resource_values["wall_time_ms"] is None:
+            if any(value is not None for value in resource_values.values()):
+                raise ValueError("partial resource accounting record")
+            resources = None
+        else:
+            resources = ExecutionResources.model_validate(resource_values)
+        values["resources"] = resources
+        return ExecutionRecord.model_validate(values)
+    except (ValidationError, ValueError) as exc:
         raise ExecutionStoreError(
             "execution database contains an invalid record"
         ) from exc

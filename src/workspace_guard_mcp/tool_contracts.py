@@ -321,6 +321,18 @@ class ExecutionArtifactsResult(PublicResultModel):
     artifacts: list[ArtifactResult] = Field(max_length=100)
 
 
+class ExecutionResourcesResult(PublicResultModel):
+    wall_time_ms: int
+    cpu_time_ms: int | None
+    peak_memory_bytes: int | None
+    workspace_initial_bytes: int | None
+    workspace_final_bytes: int | None
+    workspace_growth_bytes: int | None
+    stdout_bytes: int
+    stderr_bytes: int
+    output_bytes: int
+
+
 class CommandExecutionResult(PublicResultModel):
     execution_id: str
     status: str
@@ -339,6 +351,7 @@ class CommandExecutionResult(PublicResultModel):
     stderr_resource_uri: str | None = None
     timed_out: bool
     duration_ms: int
+    resources: ExecutionResourcesResult | None
     artifacts: list[ArtifactResult] = Field(default_factory=list, max_length=100)
     capability_error: str | None = None
 
@@ -450,6 +463,7 @@ class TaskStatusResult(PublicResultModel):
     timed_out: bool
     truncated: bool
     duration_ms: int
+    resources: ExecutionResourcesResult | None
 
 
 class ExecutionStatusResult(PublicResultModel):
@@ -466,6 +480,7 @@ class ExecutionStatusResult(PublicResultModel):
     exit_code: int | None
     reason: ExecutionReason | None
     error_summary: str | None
+    resources: ExecutionResourcesResult | None
 
 
 class ExecutionEventResult(PublicResultModel):
