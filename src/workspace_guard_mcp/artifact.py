@@ -94,4 +94,6 @@ def is_safe_artifact_name(value: object) -> bool:
         return False
     if value in {".", ".."} or "/" in value or "\\" in value or "\x00" in value:
         return False
-    return not any(unicodedata.category(character) == "Cc" for character in value)
+    return not any(
+        unicodedata.category(character) in {"Cc", "Cf"} for character in value
+    )

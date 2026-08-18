@@ -6,13 +6,14 @@ import secrets
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .artifact import ArtifactRecord, ArtifactStaging
 from .artifact_store import (
     ARTIFACT_URI_PREFIX,
+    MAX_ARTIFACT_RESOURCE_BYTES,
     ArtifactCollectionError,
     ArtifactLimitExceeded,
     ArtifactPolicyViolation,
@@ -651,13 +652,12 @@ class TaskManager:
                     snapshot_initializer(snapshot.path)
                 initial_workspace_bytes = self._measure_workspace_baseline(snapshot)
                 artifact_staging = ArtifactStaging.create()
-            except Exception as exc:
+            except Exception:
                 self._finish_prestart_failure(
                     lease.execution_id,
                     lease=lease,
                     cancellation_event=cancellation_event,
                     deadline=deadline,
-                    error_summary=str(exc),
                     workspace_initial_bytes=initial_workspace_bytes,
                 )
                 raise
@@ -688,17 +688,15 @@ class TaskManager:
                 on_started=lambda: self._mark_running(lease.execution_id),
                 on_cancelling=mark_cancelling,
             )
-            state = task_result.state
-            reason = task_result.reason
-            error_summary = (
-                task_result.stderr if state is ExecutionState.CRASHED else None
-            )
-            if state is ExecutionState.CANCELLED:
-                reason = self._cancellation_reason(lease, cancellation_event)
+            runtime_state = task_result.state
+            runtime_reason = task_result.reason
+            if runtime_state is ExecutionState.CANCELLED:
+                runtime_reason = self._cancellation_reason(lease, cancellation_event)
             final_workspace_bytes = self._measure_final_workspace(
                 task, snapshot, initial_workspace_bytes
             )
             artifacts: list[ArtifactRecord] = []
+            artifact_failure: ExecutionReason | None = None
             try:
                 artifacts = self.artifact_store.collect(
                     lease.execution_id,
@@ -707,26 +705,25 @@ class TaskManager:
                     owner_scope=lease.owner_scope,
                 )
             except ArtifactLimitExceeded:
-                state = ExecutionState.FAILED
-                reason = ExecutionReason.ARTIFACT_LIMIT_EXCEEDED
-                error_summary = None
+                artifact_failure = ExecutionReason.ARTIFACT_LIMIT_EXCEEDED
             except ArtifactPolicyViolation:
-                state = ExecutionState.FAILED
-                reason = ExecutionReason.ARTIFACT_POLICY_VIOLATION
-                error_summary = None
+                artifact_failure = ExecutionReason.ARTIFACT_POLICY_VIOLATION
             except ArtifactCollectionError:
-                state = ExecutionState.CRASHED
-                reason = ExecutionReason.ARTIFACT_COLLECTION_FAILED
-                error_summary = "artifact collection failed"
+                artifact_failure = ExecutionReason.ARTIFACT_COLLECTION_FAILED
+            cleanup_failed = False
             try:
                 artifact_staging.cleanup()
                 artifact_staging = None
                 snapshot.cleanup()
                 snapshot = None
             except Exception:
-                state = ExecutionState.CRASHED
-                reason = ExecutionReason.CLEANUP_FAILED
-                error_summary = "execution temporary cleanup failed"
+                cleanup_failed = True
+            state, reason = _resolve_terminal_outcome(
+                runtime_state,
+                runtime_reason,
+                artifact_failure=artifact_failure,
+                cleanup_failed=cleanup_failed,
+            )
             resources = self._build_execution_resources(
                 created_monotonic=lease.created_monotonic,
                 workspace_initial_bytes=initial_workspace_bytes,
@@ -739,8 +736,8 @@ class TaskManager:
                 state,
                 reason=reason,
                 exit_code=task_result.exit_code,
-                error_summary=error_summary,
                 resources=resources,
+                artifact_manifest=artifacts,
             )
             result = task_result.as_dict()
             if state is not task_result.state:
@@ -764,7 +761,6 @@ class TaskManager:
                 self._crash_if_unfinished(
                     lease.execution_id,
                     ExecutionReason.CLEANUP_FAILED,
-                    "snapshot cleanup failed",
                 )
             finally:
                 self._finish_lease(lease)
@@ -893,7 +889,6 @@ class TaskManager:
                         lease=lease,
                         cancellation_event=cancellation_event,
                         deadline=deadline,
-                        error_summary=str(exc),
                         workspace_initial_bytes=initial_workspace_bytes,
                     )
             finally:
@@ -943,12 +938,30 @@ class TaskManager:
             raise TaskManagerError(
                 "artifacts are available only after execution is terminal"
             )
-        artifacts = self.artifact_store.list_execution(
-            execution_id, owner_scope=owner_scope
-        )
+        try:
+            manifest = self.execution_store.list_artifacts(execution_id)
+        except UnknownExecutionError as exc:
+            raise TaskManagerError(
+                "unknown execution_id for this server instance"
+            ) from exc
+        except ExecutionStoreError as exc:
+            raise TaskManagerError(f"failed to read artifact manifest: {exc}") from exc
+        live_artifact_ids = {
+            item.artifact_id
+            for item in self.artifact_store.list_execution(
+                execution_id, owner_scope=owner_scope
+            )
+        }
         return {
             "execution_id": execution_id,
-            "artifacts": [_artifact_payload(item) for item in artifacts],
+            "manifest_complete": manifest.manifest_complete,
+            "artifacts": [
+                _artifact_payload(
+                    item,
+                    content_available=item.artifact_id in live_artifact_ids,
+                )
+                for item in manifest.artifacts
+            ],
         }
 
     def task_status(self, task_id: str) -> dict[str, object]:
@@ -1241,7 +1254,6 @@ class TaskManager:
             self._crash_if_unfinished(
                 session.execution_id,
                 ExecutionReason.RUNTIME_MONITOR_FAILED,
-                "service monitor failed to start",
                 resources=resources,
             )
             if release_capacity:
@@ -1268,11 +1280,10 @@ class TaskManager:
         if record.state not in {ExecutionState.STARTING, ExecutionState.RUNNING}:
             return record
         try:
-            return self.execution_store.transition(
+            return self.execution_store.request_cancellation(
                 execution_id,
                 {record.state},
-                ExecutionState.CANCELLING,
-                reason=reason,
+                reason,
             )
         except ExecutionConflictError:
             return self._execution_record(execution_id)
@@ -1286,8 +1297,8 @@ class TaskManager:
         *,
         reason: ExecutionReason | None = None,
         exit_code: int | None = None,
-        error_summary: str | None = None,
         resources: ExecutionResources | None = None,
+        artifact_manifest: Iterable[ArtifactRecord] = (),
     ) -> ExecutionRecord:
         record = self._execution_record(execution_id)
         if record.terminal:
@@ -1305,8 +1316,8 @@ class TaskManager:
                 state,
                 reason=reason,
                 exit_code=exit_code,
-                error_summary=_bounded_error_summary(error_summary),
                 resources=resources,
+                artifact_manifest=artifact_manifest,
                 finished_at=time.time(),
             )
         except ExecutionConflictError as conflict:
@@ -1321,6 +1332,7 @@ class TaskManager:
                     reason=current.reason or reason,
                     exit_code=exit_code,
                     resources=resources,
+                    artifact_manifest=artifact_manifest,
                     finished_at=time.time(),
                 )
             raise TaskManagerError(
@@ -1386,7 +1398,6 @@ class TaskManager:
         lease: _ExecutionLease,
         cancellation_event: threading.Event | None,
         deadline: float,
-        error_summary: str,
         workspace_initial_bytes: int | None,
     ) -> None:
         resources = self._build_execution_resources(
@@ -1426,7 +1437,6 @@ class TaskManager:
             execution_id,
             ExecutionState.CRASHED,
             reason=ExecutionReason.RUNTIME_START_FAILED,
-            error_summary=error_summary,
             resources=resources,
         )
 
@@ -1445,7 +1455,6 @@ class TaskManager:
         self,
         execution_id: str,
         reason: ExecutionReason,
-        error_summary: str,
         *,
         resources: ExecutionResources | None = None,
     ) -> None:
@@ -1456,7 +1465,6 @@ class TaskManager:
             execution_id,
             ExecutionState.CRASHED,
             reason=reason,
-            error_summary=error_summary,
             resources=resources,
         )
 
@@ -1477,7 +1485,6 @@ class TaskManager:
         exit_code: int | None = None
         state = ExecutionState.FAILED
         reason: ExecutionReason | None = None
-        error_summary: str | None = None
         timed_out = False
         try:
             try:
@@ -1520,8 +1527,9 @@ class TaskManager:
             )
             state = ExecutionState.CRASHED
             reason = ExecutionReason.RUNTIME_MONITOR_FAILED
-            error_summary = str(exc)
         finally:
+            runtime_state = state
+            runtime_reason = reason
             cleanup_failed = False
             for label, monitor in (
                 ("workspace", session.workspace_monitor),
@@ -1550,25 +1558,21 @@ class TaskManager:
                 session.snapshot,
                 session.initial_workspace_bytes,
             )
+            artifacts: list[ArtifactRecord] = []
+            artifact_failure: ExecutionReason | None = None
             try:
-                self.artifact_store.collect(
+                artifacts = self.artifact_store.collect(
                     session.execution_id,
                     session.artifact_staging.path,
                     self.configuration.limits,
                     owner_scope=session.owner_scope,
                 )
             except ArtifactLimitExceeded:
-                state = ExecutionState.FAILED
-                reason = ExecutionReason.ARTIFACT_LIMIT_EXCEEDED
-                error_summary = None
+                artifact_failure = ExecutionReason.ARTIFACT_LIMIT_EXCEEDED
             except ArtifactPolicyViolation:
-                state = ExecutionState.FAILED
-                reason = ExecutionReason.ARTIFACT_POLICY_VIOLATION
-                error_summary = None
+                artifact_failure = ExecutionReason.ARTIFACT_POLICY_VIOLATION
             except ArtifactCollectionError:
-                state = ExecutionState.CRASHED
-                reason = ExecutionReason.ARTIFACT_COLLECTION_FAILED
-                error_summary = "artifact collection failed"
+                artifact_failure = ExecutionReason.ARTIFACT_COLLECTION_FAILED
             try:
                 session.artifact_staging.cleanup()
                 session.snapshot.cleanup()
@@ -1579,10 +1583,12 @@ class TaskManager:
                         "utf-8", errors="replace"
                     )
                 )
-            if cleanup_failed:
-                state = ExecutionState.CRASHED
-                reason = ExecutionReason.CLEANUP_FAILED
-                error_summary = "service execution cleanup failed"
+            state, reason = _resolve_terminal_outcome(
+                runtime_state,
+                runtime_reason,
+                artifact_failure=artifact_failure,
+                cleanup_failed=cleanup_failed,
+            )
             resources = self._build_execution_resources(
                 created_monotonic=session.created_monotonic,
                 workspace_initial_bytes=session.initial_workspace_bytes,
@@ -1596,8 +1602,8 @@ class TaskManager:
                     state,
                     reason=reason,
                     exit_code=exit_code,
-                    error_summary=error_summary,
                     resources=resources,
+                    artifact_manifest=artifacts,
                 )
             finally:
                 with self._lock:
@@ -1618,17 +1624,39 @@ class TaskManager:
             self._sessions.pop(execution_id, None)
 
 
-def _artifact_payload(record: ArtifactRecord) -> dict[str, object]:
+def _artifact_payload(
+    record: ArtifactRecord,
+    *,
+    content_available: bool = True,
+) -> dict[str, object]:
     payload = record.model_dump(mode="json")
-    payload["resource_uri"] = ARTIFACT_URI_PREFIX + record.artifact_id
+    payload["content_available"] = content_available
+    payload["resource_uri"] = (
+        ARTIFACT_URI_PREFIX + record.artifact_id
+        if content_available and record.size_bytes <= MAX_ARTIFACT_RESOURCE_BYTES
+        else None
+    )
     return payload
 
 
-def _bounded_error_summary(value: str | None) -> str | None:
-    if value is None:
-        return None
-    encoded = value.encode("utf-8", errors="replace")[: 16 * 1024]
-    return encoded.decode("utf-8", errors="ignore")[:4096]
+def _resolve_terminal_outcome(
+    runtime_state: ExecutionState,
+    runtime_reason: ExecutionReason | None,
+    *,
+    artifact_failure: ExecutionReason | None,
+    cleanup_failed: bool,
+) -> tuple[ExecutionState, ExecutionReason | None]:
+    """Preserve a primary runtime outcome unless successful finalization fails."""
+
+    if runtime_state is not ExecutionState.SUCCEEDED:
+        return runtime_state, runtime_reason
+    if cleanup_failed:
+        return ExecutionState.CRASHED, ExecutionReason.CLEANUP_FAILED
+    if artifact_failure is ExecutionReason.ARTIFACT_COLLECTION_FAILED:
+        return ExecutionState.CRASHED, artifact_failure
+    if artifact_failure is not None:
+        return ExecutionState.FAILED, artifact_failure
+    return runtime_state, runtime_reason
 
 
 def _decode_bounded(data: bytes, limit: int) -> str:

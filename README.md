@@ -120,9 +120,15 @@ Result Resource 仅保存在当前进程内存中，固定 TTL 为 15 分钟，S
 
 ## Execution Artifacts
 
-Execution snapshot 仍只挂载到 `/workspace`；每次 execution 另外获得独立、可写的 `/artifacts`，并通过 `WORKSPACEGUARD_ARTIFACT_DIR=/artifacts` 显式发现这个输出通道。Server 不扫描 workspace 猜测输出。Round 3 只接纳 `/artifacts` 下 bounded top-level regular files，symlink、directory 和 special file fail closed。
+Execution snapshot 仍只挂载到 `/workspace`；每次 execution 另外获得独立、可写的 `/artifacts`，并通过 `WORKSPACEGUARD_ARTIFACT_DIR=/artifacts` 显式发现这个输出通道。Server 不扫描 workspace 猜测输出。只接纳 `/artifacts` 下 bounded top-level regular files，symlink、directory、special file、控制字符和 Unicode format controls 会 fail closed。
 
-Execution 终止后，Server 才会重新验证 staging，按限额 streaming copy、计算 SHA-256，并发布到 execution 无法写入的 private ArtifactStore。Artifact metadata 会作为同步 execution result 的 `artifacts[]` 返回，也可在 terminal 后通过 `execution_artifacts` 查询；binary bytes 不 inline、不进入 ResultCache，也不进入 Execution SQLite，而是通过统一按 `application/octet-stream` 交付的 `workspaceguard://artifact/{id}` resource 读取。当前 ArtifactStore 是 process-local、ephemeral、bounded 的，按 TTL、retained execution 数量和总字节做 whole-execution eviction。
+Artifact 有两层 truth。Execution 终止后，Server 重新验证 staging，按限额 streaming copy、计算 SHA-256，并把被接纳 artifact 的 bounded manifest metadata（ID、execution ID、name、media type、size、SHA-256、created time）与 terminal `ExecutionRecord`、`ExecutionResources`、state-transition event 在同一 persistence transaction 中提交。SQLite v4 持久化这个 manifest，但不持久化 binary bytes、host path、resource URI 或 owner token。`execution_artifacts` 以 durable manifest 为 truth，并通过 `manifest_complete` 区分新 execution 的 known manifest 与旧数据库迁移后缺失的历史；每个条目的 `content_available` / nullable `resource_uri` 只表示当前进程内 content 是否仍可用。
+
+Artifact bytes 仍保存在 process-local、ephemeral、bounded 的 private ArtifactStore，按 TTL、retained execution 数量和总字节做 whole-execution eviction；server restart 同样会丢失 bytes，但不会删除 durable manifest。直接 MCP Resource delivery 额外受 16 MiB 上界限制，超出时 metadata/availability 仍可查询，但不会把大对象一次性读入 Server RAM。Final collector 的 per-file、count 与 total-byte admission limits 对**已发布 artifacts 是 hard boundary**；runtime `ArtifactGrowthMonitor` 只是 sampled best-effort early enforcement，不是 kernel filesystem quota，deleted-open files、rename/concurrent mutation race 与 same-user host interference 仍是 residual risk。
+
+Canonical terminal outcome 保留 primary runtime truth：已有 `TIMED_OUT`、`CANCELLED`、`CRASHED` 或 runtime `FAILED` 不会被后续 artifact finalization failure 覆盖；只有 runtime 原本 `SUCCEEDED` 时，artifact policy/admission/collection 或 cleanup failure 才会使整体 execution 降级。
+
+从 audit 角度，一次 execution 的持久化模型是：`ExecutionRecord` 保存 current state 与 terminal `ExecutionResources`，`ExecutionEvent` 保存 lifecycle history，Artifact Manifest 保存 durable artifact metadata truth；Ephemeral Artifact Content 只是 manifest 上当前仍可读取的 byte availability。
 
 ## Resource Accounting
 
@@ -310,10 +316,12 @@ CI 会实际构建该 Dockerfile，并在 `--network none` 的运行容器中执
 | `--block-path` | 追加 root-relative blocked glob |
 | `--ignore-dir` | 追加不主动扫描的目录 basename |
 | `--task-config` / `WORKSPACE_GUARD_MCP_TASK_CONFIG` | 工作区外的可信任务 JSON |
-| `--execution-db` / `WORKSPACE_GUARD_MCP_EXECUTION_DB` | 可选的工作区外 ExecutionRecord + ExecutionEvent SQLite 数据库 |
+| `--execution-db` / `WORKSPACE_GUARD_MCP_EXECUTION_DB` | 可选的工作区外 ExecutionRecord + ExecutionEvent + Artifact Manifest SQLite 数据库 |
 | `--transport` | `stdio` 或 `streamable-http` |
 
-WorkspaceGuard 可选地把有界、public-safe 的 `ExecutionRecord` current truth 与 `ExecutionEvent` lifecycle history 持久化到 operator 控制且位于 workspace 外的 SQLite 数据库。Record transition 与 Event append 在同一 durable transaction 中完成。未配置 `--execution-db` 时，两者仅保存在 process-local InMemory store；配置后可跨 server restart 持久化。v1 execution database 会自动升级到 v2，升级前已有 record 不会被伪造历史，`execution_events` 会通过 `history_complete=false` 明确表示这类 partial history。持久化不会扫描、重新连接或接管之前仍在运行的 container；旧进程留下的未完成 execution 会在启动时标记为 `CRASHED / SERVER_RESTARTED`。
+WorkspaceGuard 可选地把有界、public-safe 的 `ExecutionRecord` current truth、`ExecutionEvent` lifecycle history 和 bounded Artifact Manifest 持久化到 operator 控制且位于 workspace 外的 SQLite 数据库。Terminal record/resources、state-transition event 与新 execution 的 artifact manifest 在同一 durable transaction 中提交；`CANCELLATION_REQUESTED` 作为独立 audit fact 与进入 `CANCELLING` 的 transition 原子记录。现代 history 会验证 CREATED 起点、连续 sequence、state chain、合法 transition、state-compatible reason/error metadata、单调 timestamp，以及最终 event 的 state/timestamp/reason/error metadata 与 current record 完全一致；检测到断链或矛盾时 fail closed，而 v1 legacy history 因没有 CREATED event 继续明确返回 `history_complete=false`。
+
+未配置 `--execution-db` 时使用 process-local InMemory store；它默认最多保留 1024 个 terminal executions，并按 oldest whole-execution eviction 同时删除 record、events 与 manifest，unfinished executions 永不因 retention 被淘汰。显式配置 SQLite 表示 operator 选择 durable audit database，WorkspaceGuard 默认不会按数量静默删除其 audit history，数据库 rotation/retention 由 operator 管理。SQLite schema 当前为 v4；v1/v2/v3 会事务性迁移到 v4，并在迁移时 scrub 旧 schema 中可能由 caller/runtime 写入的 `error_summary`。旧 execution 的 artifact manifest 标记为 `manifest_complete=false`，不会把“历史不可知”伪造成“确定没有 artifact”；v4 也会对“incomplete manifest 却存在 artifact rows”或“unfinished execution 却宣称 manifest complete”这类矛盾状态 fail closed。持久化不会扫描、重新连接或接管旧进程 container；未完成 execution 在启动时标记为 `CRASHED / SERVER_RESTARTED`。
 
 `stdio` 适合本机连接。Streamable HTTP 默认只监听 `127.0.0.1:3001/mcp`；非回环或公开部署需要明确的网络开关、Host/Origin 配置、HTTPS 和外部 OAuth/OIDC。`--allow-unauthenticated-http` 仅用于临时开发，不应作为部署方案。完整 OAuth 拓扑和 RFC 9728 细节见 [SECURITY.md](SECURITY.md)。
 

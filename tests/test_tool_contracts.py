@@ -92,6 +92,12 @@ class ToolContractTests(unittest.TestCase):
                 "has_more",
                 "history_complete",
             },
+            "execution_artifacts": {
+                "manifest_complete",
+                "artifacts",
+                "content_available",
+                "resource_uri",
+            },
         }
         for name, required_names in expectations.items():
             with self.subTest(tool=name):

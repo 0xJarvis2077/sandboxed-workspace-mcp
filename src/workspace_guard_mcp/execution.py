@@ -62,6 +62,7 @@ class ExecutionMode(StrEnum):
 
 class ExecutionEventType(StrEnum):
     CREATED = "created"
+    CANCELLATION_REQUESTED = "cancellation_requested"
     STATE_TRANSITION = "state_transition"
 
 
@@ -81,6 +82,80 @@ _CANCELLATION_REASONS = frozenset(
         ExecutionReason.SERVER_SHUTDOWN,
     }
 )
+_FAILED_REASONS = frozenset(
+    {
+        ExecutionReason.WORKSPACE_LIMIT_EXCEEDED,
+        ExecutionReason.ARTIFACT_LIMIT_EXCEEDED,
+        ExecutionReason.ARTIFACT_POLICY_VIOLATION,
+        ExecutionReason.OUTPUT_LIMIT_EXCEEDED,
+    }
+)
+_CRASH_REASONS = frozenset(
+    {
+        ExecutionReason.ARTIFACT_COLLECTION_FAILED,
+        ExecutionReason.RUNTIME_START_FAILED,
+        ExecutionReason.RUNTIME_MONITOR_FAILED,
+        ExecutionReason.CLEANUP_FAILED,
+        ExecutionReason.SERVER_RESTARTED,
+    }
+)
+_PUBLIC_EXECUTION_ERROR_SUMMARIES: Mapping[ExecutionReason, str] = {
+    ExecutionReason.RUNTIME_START_FAILED: "execution runtime failed to start",
+    ExecutionReason.RUNTIME_MONITOR_FAILED: "execution runtime monitor failed",
+    ExecutionReason.ARTIFACT_COLLECTION_FAILED: "artifact collection failed",
+    ExecutionReason.CLEANUP_FAILED: "execution runtime cleanup failed",
+    ExecutionReason.SERVER_RESTARTED: "execution interrupted by server restart",
+}
+
+
+def public_execution_error_summary(
+    state: ExecutionState,
+    reason: ExecutionReason | None,
+) -> str | None:
+    """Return canonical server-authored control-plane diagnostic metadata."""
+
+    if state is not ExecutionState.CRASHED or reason is None:
+        return None
+    return _PUBLIC_EXECUTION_ERROR_SUMMARIES.get(reason)
+
+
+def _validate_public_error_summary(
+    state: ExecutionState,
+    reason: ExecutionReason | None,
+    error_summary: str | None,
+) -> None:
+    if error_summary is None:
+        return
+    if error_summary != public_execution_error_summary(state, reason):
+        raise ValueError("error_summary must be a canonical server-authored summary")
+
+
+def _validate_event_state_metadata(
+    state: ExecutionState,
+    reason: ExecutionReason | None,
+    error_summary: str | None,
+) -> None:
+    if state in {
+        ExecutionState.STARTING,
+        ExecutionState.RUNNING,
+        ExecutionState.SUCCEEDED,
+    }:
+        if reason is not None:
+            raise ValueError(f"{state.value} event must not have a reason")
+    elif state in {ExecutionState.CANCELLING, ExecutionState.CANCELLED}:
+        if reason not in _CANCELLATION_REASONS:
+            raise ValueError(f"{state.value} event requires a cancellation reason")
+    elif state is ExecutionState.FAILED:
+        if reason is not None and reason not in _FAILED_REASONS:
+            raise ValueError("failed event has an incompatible reason")
+    elif state is ExecutionState.TIMED_OUT:
+        if reason is not ExecutionReason.TIMEOUT:
+            raise ValueError("timed_out event requires timeout reason")
+    elif state is ExecutionState.CRASHED:
+        if reason not in _CRASH_REASONS:
+            raise ValueError("crashed event requires a crash reason")
+    _validate_public_error_summary(state, reason, error_summary)
+
 
 _ALLOWED_TRANSITIONS: Mapping[ExecutionState, frozenset[ExecutionState]] = {
     ExecutionState.STARTING: frozenset(
@@ -205,8 +280,11 @@ class ExecutionRecord(BaseModel):
     def _validate_lifecycle(self) -> ExecutionRecord:
         if self.updated_at < self.created_at:
             raise ValueError("updated_at must not be earlier than created_at")
-        if self.started_at is not None and self.started_at < self.created_at:
-            raise ValueError("started_at must not be earlier than created_at")
+        if self.started_at is not None:
+            if self.started_at < self.created_at:
+                raise ValueError("started_at must not be earlier than created_at")
+            if self.updated_at < self.started_at:
+                raise ValueError("updated_at must not be earlier than started_at")
         if self.finished_at is not None:
             lower_bound = (
                 self.started_at if self.started_at is not None else self.created_at
@@ -214,33 +292,71 @@ class ExecutionRecord(BaseModel):
             if self.finished_at < lower_bound:
                 label = "started_at" if self.started_at is not None else "created_at"
                 raise ValueError(f"finished_at must not be earlier than {label}")
+            if self.updated_at < self.finished_at:
+                raise ValueError("updated_at must not be earlier than finished_at")
 
-        if (
-            self.state in {ExecutionState.RUNNING, ExecutionState.CANCELLING}
-            and self.started_at is None
-        ):
-            raise ValueError(f"{self.state.value} execution requires started_at")
         if is_terminal_state(self.state):
             if self.finished_at is None:
                 raise ValueError("terminal execution requires finished_at")
         else:
             if self.finished_at is not None:
                 raise ValueError("non-terminal execution must not have finished_at")
+            if self.exit_code is not None:
+                raise ValueError("non-terminal execution must not have exit_code")
             if self.resources is not None:
                 raise ValueError("non-terminal execution must not have resources")
 
-        if (
-            self.state is ExecutionState.TIMED_OUT
-            and self.reason is not ExecutionReason.TIMEOUT
-        ):
-            raise ValueError("timed_out execution requires timeout reason")
-        if (
-            self.state is ExecutionState.CANCELLED
-            and self.reason not in _CANCELLATION_REASONS
-        ):
-            raise ValueError("cancelled execution requires a cancellation reason")
-        if self.state is ExecutionState.SUCCEEDED and self.reason is not None:
-            raise ValueError("succeeded execution must not have a reason")
+        if self.state is ExecutionState.STARTING:
+            if self.started_at is not None:
+                raise ValueError("starting execution must not have started_at")
+            if self.reason is not None:
+                raise ValueError("starting execution must not have a reason")
+        elif self.state is ExecutionState.RUNNING:
+            if self.started_at is None:
+                raise ValueError("running execution requires started_at")
+            if self.reason is not None:
+                raise ValueError("running execution must not have a reason")
+        elif self.state is ExecutionState.CANCELLING:
+            if self.started_at is None:
+                raise ValueError("cancelling execution requires started_at")
+            if self.reason not in _CANCELLATION_REASONS:
+                raise ValueError("cancelling execution requires a cancellation reason")
+        elif self.state is ExecutionState.SUCCEEDED:
+            if self.started_at is None:
+                raise ValueError("succeeded execution requires started_at")
+            if self.reason is not None:
+                raise ValueError("succeeded execution must not have a reason")
+            if self.exit_code != 0:
+                raise ValueError("succeeded execution requires exit_code=0")
+        elif self.state is ExecutionState.FAILED:
+            if self.started_at is None:
+                raise ValueError("failed execution requires started_at")
+            if self.reason is None:
+                if self.exit_code is None or self.exit_code == 0:
+                    raise ValueError(
+                        "failed execution without a reason requires nonzero exit_code"
+                    )
+            elif self.reason not in _FAILED_REASONS:
+                raise ValueError("failed execution has an incompatible reason")
+        elif self.state is ExecutionState.CANCELLED:
+            if self.started_at is None:
+                raise ValueError("cancelled execution requires started_at")
+            if self.reason not in _CANCELLATION_REASONS:
+                raise ValueError("cancelled execution requires a cancellation reason")
+        elif self.state is ExecutionState.TIMED_OUT:
+            if self.reason is not ExecutionReason.TIMEOUT:
+                raise ValueError("timed_out execution requires timeout reason")
+        elif self.state is ExecutionState.CRASHED:
+            if self.reason not in _CRASH_REASONS:
+                raise ValueError("crashed execution requires a crash reason")
+            if self.started_at is None and self.reason not in {
+                ExecutionReason.RUNTIME_START_FAILED,
+                ExecutionReason.SERVER_RESTARTED,
+            }:
+                raise ValueError(
+                    "crashed execution reason requires an execution that started"
+                )
+        _validate_public_error_summary(self.state, self.reason, self.error_summary)
         return self
 
     @property
@@ -284,10 +400,31 @@ class ExecutionEvent(BaseModel):
         if self.event_type is ExecutionEventType.CREATED:
             if self.from_state is not None:
                 raise ValueError("created event requires from_state=None")
+            if self.to_state is not ExecutionState.STARTING:
+                raise ValueError("created event requires to_state=starting")
+            if self.reason is not None or self.error_summary is not None:
+                raise ValueError("created event must not carry failure metadata")
             return self
         if self.from_state is None:
-            raise ValueError("state_transition event requires from_state")
+            raise ValueError("execution event requires from_state")
+        if self.event_type is ExecutionEventType.CANCELLATION_REQUESTED:
+            if self.from_state is not self.to_state:
+                raise ValueError("cancellation_requested event must not change state")
+            if self.from_state not in {ExecutionState.STARTING, ExecutionState.RUNNING}:
+                raise ValueError(
+                    "cancellation_requested event requires a cancellable state"
+                )
+            if self.reason not in _CANCELLATION_REASONS:
+                raise ValueError(
+                    "cancellation_requested event requires a cancellation reason"
+                )
+            if self.error_summary is not None:
+                raise ValueError(
+                    "cancellation_requested event must not carry error_summary"
+                )
+            return self
         ensure_execution_transition(self.from_state, self.to_state)
+        _validate_event_state_metadata(self.to_state, self.reason, self.error_summary)
         return self
 
 

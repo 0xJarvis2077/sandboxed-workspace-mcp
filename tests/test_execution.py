@@ -17,6 +17,7 @@ from workspace_guard_mcp.execution import (
     ensure_execution_transition,
     is_terminal_state,
     legacy_execution_status,
+    public_execution_error_summary,
 )
 
 
@@ -93,14 +94,18 @@ class ExecutionDomainTests(unittest.TestCase):
         terminal = self.record(
             state=ExecutionState.SUCCEEDED,
             updated_at=2.0,
+            started_at=1.5,
             finished_at=2.0,
+            exit_code=0,
             resources=resources,
         )
         self.assertEqual(terminal.resources, resources)
         legacy = self.record(
             state=ExecutionState.SUCCEEDED,
             updated_at=2.0,
+            started_at=1.5,
             finished_at=2.0,
+            exit_code=0,
         )
         self.assertIsNone(legacy.resources)
 
@@ -119,6 +124,32 @@ class ExecutionDomainTests(unittest.TestCase):
             self.record(state="unknown")
         with self.assertRaises(ValidationError):
             self.record(error_summary="x" * 4097)
+
+    def test_error_summary_is_canonical_server_authored_metadata(self) -> None:
+        with self.assertRaises(ValidationError):
+            self.record(error_summary="HOST=/private/secret")
+
+        summary = public_execution_error_summary(
+            ExecutionState.CRASHED,
+            ExecutionReason.RUNTIME_START_FAILED,
+        )
+        self.assertEqual(summary, "execution runtime failed to start")
+        crashed = self.record(
+            state=ExecutionState.CRASHED,
+            updated_at=2.0,
+            finished_at=2.0,
+            reason=ExecutionReason.RUNTIME_START_FAILED,
+            error_summary=summary,
+        )
+        self.assertEqual(crashed.error_summary, summary)
+        with self.assertRaises(ValidationError):
+            self.record(
+                state=ExecutionState.CRASHED,
+                updated_at=2.0,
+                finished_at=2.0,
+                reason=ExecutionReason.RUNTIME_START_FAILED,
+                error_summary="SECRET runtime details",
+            )
 
     def test_execution_events_enforce_canonical_history_shape(self) -> None:
         created = ExecutionEvent(
@@ -143,8 +174,19 @@ class ExecutionDomainTests(unittest.TestCase):
             error_summary=None,
         )
         self.assertEqual(transition.to_state, ExecutionState.RUNNING)
+        cancellation = ExecutionEvent(
+            execution_id="exec-test",
+            sequence=3,
+            timestamp=2.5,
+            event_type=ExecutionEventType.CANCELLATION_REQUESTED,
+            from_state=ExecutionState.RUNNING,
+            to_state=ExecutionState.RUNNING,
+            reason=ExecutionReason.CLIENT_CANCELLED,
+            error_summary=None,
+        )
+        self.assertEqual(cancellation.reason, ExecutionReason.CLIENT_CANCELLED)
 
-        invalid_updates = (
+        invalid_updates: tuple[dict[str, object], ...] = (
             {
                 "event_type": ExecutionEventType.CREATED,
                 "from_state": ExecutionState.STARTING,
@@ -154,6 +196,18 @@ class ExecutionDomainTests(unittest.TestCase):
                 "event_type": ExecutionEventType.STATE_TRANSITION,
                 "from_state": ExecutionState.STARTING,
                 "to_state": ExecutionState.SUCCEEDED,
+            },
+            {"reason": ExecutionReason.TIMEOUT},
+            {
+                "from_state": ExecutionState.RUNNING,
+                "to_state": ExecutionState.SUCCEEDED,
+                "reason": ExecutionReason.TIMEOUT,
+            },
+            {
+                "from_state": ExecutionState.RUNNING,
+                "to_state": ExecutionState.CRASHED,
+                "reason": ExecutionReason.RUNTIME_MONITOR_FAILED,
+                "error_summary": "SECRET runtime details",
             },
             {"sequence": 0},
             {"sequence": True},
@@ -176,6 +230,29 @@ class ExecutionDomainTests(unittest.TestCase):
         for updates in invalid_updates:
             with self.subTest(updates=updates), self.assertRaises(ValidationError):
                 ExecutionEvent.model_validate({**base, **updates})
+
+        cancellation_base: dict[str, object] = {
+            "execution_id": "exec-test",
+            "sequence": 3,
+            "timestamp": 2.5,
+            "event_type": ExecutionEventType.CANCELLATION_REQUESTED,
+            "from_state": ExecutionState.RUNNING,
+            "to_state": ExecutionState.RUNNING,
+            "reason": ExecutionReason.CLIENT_CANCELLED,
+            "error_summary": None,
+        }
+        cancellation_invalid_updates: tuple[dict[str, object], ...] = (
+            {"to_state": ExecutionState.CANCELLING},
+            {
+                "from_state": ExecutionState.CANCELLING,
+                "to_state": ExecutionState.CANCELLING,
+            },
+            {"reason": ExecutionReason.TIMEOUT},
+            {"error_summary": "not allowed"},
+        )
+        for updates in cancellation_invalid_updates:
+            with self.subTest(updates=updates), self.assertRaises(ValidationError):
+                ExecutionEvent.model_validate({**cancellation_base, **updates})
 
     def test_terminal_states_are_exact(self) -> None:
         terminal = {
@@ -278,7 +355,7 @@ class ExecutionDomainTests(unittest.TestCase):
             with self.subTest(state=state), self.assertRaises(ValidationError):
                 self.record(**updates)
 
-    def test_terminal_reason_invariants(self) -> None:
+    def test_terminal_reason_and_exit_code_invariants(self) -> None:
         self.record(
             state=ExecutionState.TIMED_OUT,
             updated_at=2.0,
@@ -302,6 +379,7 @@ class ExecutionDomainTests(unittest.TestCase):
             self.record(
                 state=ExecutionState.CANCELLED,
                 updated_at=2.0,
+                started_at=1.5,
                 finished_at=2.0,
                 reason=reason,
             )
@@ -314,6 +392,7 @@ class ExecutionDomainTests(unittest.TestCase):
                 self.record(
                     state=ExecutionState.CANCELLED,
                     updated_at=2.0,
+                    started_at=1.5,
                     finished_at=2.0,
                     reason=reason,
                 )
@@ -321,15 +400,192 @@ class ExecutionDomainTests(unittest.TestCase):
         self.record(
             state=ExecutionState.SUCCEEDED,
             updated_at=2.0,
+            started_at=1.5,
             finished_at=2.0,
+            exit_code=0,
         )
-        with self.assertRaises(ValidationError):
-            self.record(
-                state=ExecutionState.SUCCEEDED,
-                updated_at=2.0,
-                finished_at=2.0,
-                reason=ExecutionReason.TIMEOUT,
-            )
+        for exit_code in (None, 1):
+            with self.subTest(exit_code=exit_code), self.assertRaises(ValidationError):
+                self.record(
+                    state=ExecutionState.SUCCEEDED,
+                    updated_at=2.0,
+                    started_at=1.5,
+                    finished_at=2.0,
+                    exit_code=exit_code,
+                )
+
+        self.record(
+            state=ExecutionState.FAILED,
+            updated_at=2.0,
+            started_at=1.5,
+            finished_at=2.0,
+            exit_code=2,
+        )
+        self.record(
+            state=ExecutionState.FAILED,
+            updated_at=2.0,
+            started_at=1.5,
+            finished_at=2.0,
+            exit_code=0,
+            reason=ExecutionReason.OUTPUT_LIMIT_EXCEEDED,
+        )
+        for exit_code in (None, 0):
+            with self.subTest(exit_code=exit_code), self.assertRaises(ValidationError):
+                self.record(
+                    state=ExecutionState.FAILED,
+                    updated_at=2.0,
+                    started_at=1.5,
+                    finished_at=2.0,
+                    exit_code=exit_code,
+                )
+
+    def test_every_execution_reason_has_one_terminal_reason_category(self) -> None:
+        expected_state = {
+            ExecutionReason.USER_CANCELLED: ExecutionState.CANCELLED,
+            ExecutionReason.CLIENT_CANCELLED: ExecutionState.CANCELLED,
+            ExecutionReason.SERVER_SHUTDOWN: ExecutionState.CANCELLED,
+            ExecutionReason.TIMEOUT: ExecutionState.TIMED_OUT,
+            ExecutionReason.WORKSPACE_LIMIT_EXCEEDED: ExecutionState.FAILED,
+            ExecutionReason.ARTIFACT_LIMIT_EXCEEDED: ExecutionState.FAILED,
+            ExecutionReason.ARTIFACT_POLICY_VIOLATION: ExecutionState.FAILED,
+            ExecutionReason.OUTPUT_LIMIT_EXCEEDED: ExecutionState.FAILED,
+            ExecutionReason.ARTIFACT_COLLECTION_FAILED: ExecutionState.CRASHED,
+            ExecutionReason.RUNTIME_START_FAILED: ExecutionState.CRASHED,
+            ExecutionReason.RUNTIME_MONITOR_FAILED: ExecutionState.CRASHED,
+            ExecutionReason.CLEANUP_FAILED: ExecutionState.CRASHED,
+            ExecutionReason.SERVER_RESTARTED: ExecutionState.CRASHED,
+        }
+        self.assertEqual(set(expected_state), set(ExecutionReason))
+        terminal_states = (
+            ExecutionState.FAILED,
+            ExecutionState.CANCELLED,
+            ExecutionState.TIMED_OUT,
+            ExecutionState.CRASHED,
+        )
+        for reason, accepted_state in expected_state.items():
+            for state in terminal_states:
+                updates: dict[str, object] = {
+                    "state": state,
+                    "updated_at": 2.0,
+                    "started_at": 1.5,
+                    "finished_at": 2.0,
+                    "reason": reason,
+                }
+                if state is ExecutionState.FAILED:
+                    updates["exit_code"] = 2
+                if state is accepted_state:
+                    with self.subTest(reason=reason, state=state):
+                        self.record(**updates)
+                else:
+                    with (
+                        self.subTest(reason=reason, state=state),
+                        self.assertRaises(ValidationError),
+                    ):
+                        self.record(**updates)
+
+    def test_valid_state_matrix_preserves_pre_runtime_terminal_paths(self) -> None:
+        cases = (
+            {"state": ExecutionState.STARTING},
+            {
+                "state": ExecutionState.RUNNING,
+                "updated_at": 1.5,
+                "started_at": 1.5,
+            },
+            {
+                "state": ExecutionState.CANCELLING,
+                "updated_at": 1.5,
+                "started_at": 1.5,
+                "reason": ExecutionReason.CLIENT_CANCELLED,
+            },
+            {
+                "state": ExecutionState.SUCCEEDED,
+                "updated_at": 2.0,
+                "started_at": 1.5,
+                "finished_at": 2.0,
+                "exit_code": 0,
+            },
+            {
+                "state": ExecutionState.FAILED,
+                "updated_at": 2.0,
+                "started_at": 1.5,
+                "finished_at": 2.0,
+                "exit_code": 2,
+            },
+            {
+                "state": ExecutionState.CANCELLED,
+                "updated_at": 2.0,
+                "started_at": 1.5,
+                "finished_at": 2.0,
+                "reason": ExecutionReason.USER_CANCELLED,
+            },
+            {
+                "state": ExecutionState.TIMED_OUT,
+                "updated_at": 2.0,
+                "finished_at": 2.0,
+                "reason": ExecutionReason.TIMEOUT,
+            },
+            {
+                "state": ExecutionState.CRASHED,
+                "updated_at": 2.0,
+                "finished_at": 2.0,
+                "reason": ExecutionReason.RUNTIME_START_FAILED,
+            },
+            {
+                "state": ExecutionState.CRASHED,
+                "updated_at": 2.0,
+                "started_at": 1.5,
+                "finished_at": 2.0,
+                "reason": ExecutionReason.RUNTIME_MONITOR_FAILED,
+            },
+        )
+        for updates in cases:
+            with self.subTest(state=updates["state"], reason=updates.get("reason")):
+                self.record(**updates)
+
+    def test_invalid_state_reason_and_chronology_combinations_fail_closed(self) -> None:
+        invalid = (
+            {"state": ExecutionState.STARTING, "started_at": 1.0},
+            {
+                "state": ExecutionState.RUNNING,
+                "updated_at": 1.5,
+                "started_at": 1.5,
+                "reason": ExecutionReason.TIMEOUT,
+            },
+            {
+                "state": ExecutionState.CANCELLING,
+                "updated_at": 1.5,
+                "started_at": 1.5,
+                "reason": ExecutionReason.TIMEOUT,
+            },
+            {
+                "state": ExecutionState.FAILED,
+                "updated_at": 2.0,
+                "started_at": 1.5,
+                "finished_at": 2.0,
+                "reason": ExecutionReason.RUNTIME_MONITOR_FAILED,
+            },
+            {
+                "state": ExecutionState.CRASHED,
+                "updated_at": 2.0,
+                "finished_at": 2.0,
+                "reason": ExecutionReason.RUNTIME_MONITOR_FAILED,
+            },
+            {
+                "state": ExecutionState.RUNNING,
+                "updated_at": 1.25,
+                "started_at": 1.5,
+            },
+            {
+                "state": ExecutionState.SUCCEEDED,
+                "updated_at": 1.75,
+                "started_at": 1.5,
+                "finished_at": 2.0,
+                "exit_code": 0,
+            },
+        )
+        for updates in invalid:
+            with self.subTest(updates=updates), self.assertRaises(ValidationError):
+                self.record(**updates)
 
     def test_legacy_status_mapping_keeps_reason_out_of_public_state(self) -> None:
         self.assertEqual(

@@ -24,7 +24,10 @@ from workspace_guard_mcp.execution import (
     ExecutionRecord,
     ExecutionState,
 )
-from workspace_guard_mcp.execution_store import InMemoryExecutionStore
+from workspace_guard_mcp.execution_store import (
+    InMemoryExecutionStore,
+    SqliteExecutionStore,
+)
 from workspace_guard_mcp.server import create_server
 from workspace_guard_mcp.task_config import (
     ExecutionProfile,
@@ -1808,15 +1811,30 @@ class TaskManagerTests(unittest.TestCase):
         events = manager.execution_events(execution_id)["events"]
         assert isinstance(events, list)
         self.assertEqual(
+            [event["event_type"] for event in events],
+            [
+                "created",
+                "state_transition",
+                "cancellation_requested",
+                "state_transition",
+                "state_transition",
+            ],
+        )
+        self.assertEqual(
             [(event["from_state"], event["to_state"]) for event in events],
             [
                 (None, "starting"),
                 ("starting", "running"),
+                ("running", "running"),
                 ("running", "cancelling"),
                 ("cancelling", "cancelled"),
             ],
         )
+        self.assertEqual(events[2]["reason"], "user_cancelled")
         self.assertEqual(events[-1]["reason"], "user_cancelled")
+        repeated = manager.stop_task(execution_id)
+        self.assertEqual(repeated["status"], "stopped")
+        self.assertEqual(manager.execution_events(execution_id)["events"], events)
 
     def test_failed_and_crashed_execution_semantics_are_distinct(self) -> None:
         failed_store = InMemoryExecutionStore()
@@ -1849,6 +1867,49 @@ class TaskManagerTests(unittest.TestCase):
             crashed_record.reason,
             ExecutionReason.RUNTIME_START_FAILED,
         )
+
+    def test_crash_runtime_details_never_cross_durable_error_boundary(self) -> None:
+        marker = "TOPSECRET-RUNTIME-STDERR"
+        host_path = "/Users/operator/private/runtime.sock"
+        db_path = self.base / "execution-audit.sqlite3"
+        store = SqliteExecutionStore(db_path)
+        manager = TaskManager(
+            self.settings,
+            configuration(self.base),
+            backend=FakeBackend(start_error=OSError(f"{marker} failed at {host_path}")),
+            execution_store=store,
+        )
+
+        result = manager.run_task("test")
+        execution_id = result["execution_id"]
+        stderr = result["stderr"]
+        assert isinstance(execution_id, str)
+        assert isinstance(stderr, str)
+        self.assertIn(marker, stderr)
+        self.assertIn(host_path, stderr)
+
+        status = manager.execution_status(execution_id)
+        self.assertEqual(status["reason"], "runtime_start_failed")
+        self.assertEqual(status["error_summary"], "execution runtime failed to start")
+        self.assertNotIn(marker, str(status))
+        self.assertNotIn(host_path, str(status))
+
+        events = manager.execution_events(execution_id)["events"]
+        assert isinstance(events, list)
+        last_event = events[-1]
+        assert isinstance(last_event, dict)
+        self.assertNotIn(marker, str(events))
+        self.assertNotIn(host_path, str(events))
+        self.assertEqual(
+            last_event["error_summary"], "execution runtime failed to start"
+        )
+
+        reopened = SqliteExecutionStore(db_path)
+        persisted = reopened.get(execution_id)
+        self.assertEqual(persisted.error_summary, "execution runtime failed to start")
+        self.assertNotIn(marker, str(persisted))
+        self.assertNotIn(host_path, str(persisted))
+        self.assertEqual(persisted.resources.stderr_bytes, 0)  # type: ignore[union-attr]
 
     def test_server_conditionally_registers_narrow_task_schemas(self) -> None:
         default_server = create_server(self.settings)
