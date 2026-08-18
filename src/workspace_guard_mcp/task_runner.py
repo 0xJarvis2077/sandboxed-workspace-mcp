@@ -226,9 +226,7 @@ def build_container_argv(executable: str, request: ContainerRequest) -> list[str
     artifact_mount: str | None = None
     if request.artifact_path is not None:
         artifact_path = request.artifact_path.resolve(strict=True)
-        artifact_mount = (
-            f"type=bind,source={artifact_path},destination=/artifacts"
-        )
+        artifact_mount = f"type=bind,source={artifact_path},destination=/artifacts"
     argv = [
         executable,
         "run",
@@ -691,9 +689,7 @@ def run_container_task(
             try:
                 monitor.stop_and_join()
             except Exception as cleanup_exc:
-                record_cleanup_failure(
-                    f"{label} monitor cleanup failure", cleanup_exc
-                )
+                record_cleanup_failure(f"{label} monitor cleanup failure", cleanup_exc)
         close_handle()
         stdout, stderr = capture.text()
         return TaskRunResult(

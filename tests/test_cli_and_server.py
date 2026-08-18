@@ -142,7 +142,7 @@ class CliTests(unittest.TestCase):
                     "WORKSPACE_GUARD_MCP_EXECUTION_DB": str(database),
                 },
             )
-            self.assertEqual(runtime.execution_db, database)
+            self.assertEqual(runtime.execution_db, database.resolve(strict=False))
 
             for unsafe in ("relative.sqlite3", str(root / "executions.sqlite3")):
                 with (

@@ -6,9 +6,8 @@ import unittest
 from pathlib import Path
 from types import MappingProxyType
 
-from mcp.server.mcpserver.exceptions import ResourceNotFoundError
-
 from _mcp_assertions import require_resource_contents
+from mcp.server.mcpserver.exceptions import ResourceNotFoundError
 
 from workspace_guard_mcp.config import Settings
 from workspace_guard_mcp.server import create_server
@@ -18,7 +17,10 @@ from workspace_guard_mcp.task_manager import TaskManager
 
 class ArtifactServerTests(unittest.TestCase):
     def test_binary_artifact_resource_round_trips_as_opaque_blob(self) -> None:
-        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as staging_dir:
+        with (
+            tempfile.TemporaryDirectory() as root,
+            tempfile.TemporaryDirectory() as staging_dir,
+        ):
             workspace = Path(root)
             settings = Settings.create(workspace, allow_writes=False)
             configuration = TaskConfiguration(

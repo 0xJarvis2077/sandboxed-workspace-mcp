@@ -258,9 +258,10 @@ class EphemeralArtifactStore:
                     raise ArtifactCollectionError(
                         "artifact ID generator returned an invalid token"
                     )
-                if artifact_id not in self._artifact_index and not (
-                    self._root / artifact_id
-                ).exists():
+                if (
+                    artifact_id not in self._artifact_index
+                    and not (self._root / artifact_id).exists()
+                ):
                     return artifact_id
         raise ArtifactCollectionError("artifact ID collision retry limit exceeded")
 
@@ -324,7 +325,9 @@ class EphemeralArtifactStore:
         try:
             directory_fd = os.open(staging_path, directory_flags)
         except OSError as exc:
-            raise ArtifactCollectionError("cannot open artifact staging safely") from exc
+            raise ArtifactCollectionError(
+                "cannot open artifact staging safely"
+            ) from exc
         descriptor = -1
         output = -1
         size_bytes = 0

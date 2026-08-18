@@ -95,12 +95,20 @@ class ArtifactWritingBackend:
         return handle
 
 
-def _configuration(base: Path, *, limits: TaskLimits | None = None) -> TaskConfiguration:
+def _configuration(
+    base: Path,
+    *,
+    limits: TaskLimits | None = None,
+) -> TaskConfiguration:
     tasks = {
         "run": TaskDefinition("run", "run", PINNED_IMAGE, ("python",)),
         "service": TaskDefinition("service", "service", PINNED_IMAGE, ("python",)),
         "readonly": TaskDefinition(
-            "readonly", "run", PINNED_IMAGE, ("python",), workspace_access="read-only"
+            "readonly",
+            "run",
+            PINNED_IMAGE,
+            ("python",),
+            workspace_access="read-only",
         ),
     }
     return TaskConfiguration(
@@ -117,7 +125,10 @@ def _settings(base: Path) -> Settings:
 
 class ArtifactContainerContractTests(unittest.TestCase):
     def test_readonly_workspace_gets_independent_writable_artifact_mount(self) -> None:
-        with tempfile.TemporaryDirectory() as workspace_dir, tempfile.TemporaryDirectory() as artifact_dir:
+        with (
+            tempfile.TemporaryDirectory() as workspace_dir,
+            tempfile.TemporaryDirectory() as artifact_dir,
+        ):
             workspace = Path(workspace_dir)
             artifacts = Path(artifact_dir)
             request = ContainerRequest(
@@ -145,7 +156,10 @@ class ArtifactContainerContractTests(unittest.TestCase):
         self.assertIn("--security-opt=no-new-privileges", argv)
 
     def test_writable_workspace_and_artifact_mount_are_both_writable(self) -> None:
-        with tempfile.TemporaryDirectory() as workspace_dir, tempfile.TemporaryDirectory() as artifact_dir:
+        with (
+            tempfile.TemporaryDirectory() as workspace_dir,
+            tempfile.TemporaryDirectory() as artifact_dir,
+        ):
             request = ContainerRequest(
                 "container",
                 Path(workspace_dir),
@@ -171,7 +185,11 @@ class ArtifactLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             backend = ArtifactWritingBackend({"result.csv": b"a,b\n1,2\n"})
-            manager = TaskManager(_settings(root), _configuration(root), backend=backend)
+            manager = TaskManager(
+                _settings(root),
+                _configuration(root),
+                backend=backend,
+            )
             result = manager.run_task("run", owner_scope="owner-a")
             request = backend.requests[0]
 
@@ -180,7 +198,8 @@ class ArtifactLifecycleTests(unittest.TestCase):
         self.assertIsInstance(artifacts, list)
         artifact = artifacts[0]  # type: ignore[index]
         self.assertEqual(artifact["name"], "result.csv")  # type: ignore[index]
-        self.assertTrue(str(artifact["resource_uri"]).startswith("workspaceguard://artifact/"))  # type: ignore[index]
+        resource_uri = str(artifact["resource_uri"])  # type: ignore[index]
+        self.assertTrue(resource_uri.startswith("workspaceguard://artifact/"))
         self.assertFalse(request.artifact_path.exists())  # type: ignore[union-attr]
         listed = manager.execution_artifacts(
             str(result["execution_id"]), owner_scope="owner-a"
@@ -196,13 +215,22 @@ class ArtifactLifecycleTests(unittest.TestCase):
     def test_failed_execution_can_retain_safe_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            backend = ArtifactWritingBackend({"junit.xml": b"<testsuite/>"}, exit_code=2)
-            manager = TaskManager(_settings(root), _configuration(root), backend=backend)
+            backend = ArtifactWritingBackend(
+                {"junit.xml": b"<testsuite/>"},
+                exit_code=2,
+            )
+            manager = TaskManager(
+                _settings(root),
+                _configuration(root),
+                backend=backend,
+            )
             result = manager.run_task("run")
         self.assertEqual(result["status"], "failed")
         self.assertEqual(len(result["artifacts"]), 1)  # type: ignore[arg-type]
 
-    def test_final_collector_rejects_oversized_artifact_without_partial_publish(self) -> None:
+    def test_final_collector_rejects_oversized_artifact_without_partial_publish(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             limits = TaskLimits(
@@ -213,21 +241,33 @@ class ArtifactLifecycleTests(unittest.TestCase):
             )
             backend = ArtifactWritingBackend({"good.bin": b"ok", "large.bin": b"12345"})
             manager = TaskManager(
-                _settings(root), _configuration(root, limits=limits), backend=backend
+                _settings(root),
+                _configuration(root, limits=limits),
+                backend=backend,
             )
             result = manager.run_task("run")
             record = manager.execution_status(str(result["execution_id"]))
             artifacts = manager.execution_artifacts(str(result["execution_id"]))
         self.assertEqual(record["state"], ExecutionState.FAILED.value)
-        self.assertEqual(record["reason"], ExecutionReason.ARTIFACT_LIMIT_EXCEEDED.value)
+        self.assertEqual(
+            record["reason"],
+            ExecutionReason.ARTIFACT_LIMIT_EXCEEDED.value,
+        )
         self.assertEqual(result["artifacts"], [])
         self.assertEqual(artifacts["artifacts"], [])
 
     def test_service_artifacts_are_hidden_until_terminal_then_admitted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            backend = ArtifactWritingBackend({"partial.json": b"{}"}, blocking=True)
-            manager = TaskManager(_settings(root), _configuration(root), backend=backend)
+            backend = ArtifactWritingBackend(
+                {"partial.json": b"{}"},
+                blocking=True,
+            )
+            manager = TaskManager(
+                _settings(root),
+                _configuration(root),
+                backend=backend,
+            )
             started = manager.start_task("service", owner_scope="owner-a")
             execution_id = str(started["execution_id"])
             with self.assertRaisesRegex(
@@ -243,12 +283,19 @@ class ArtifactLifecycleTests(unittest.TestCase):
                 if manager.execution_status(execution_id)["state"] == "succeeded":
                     break
                 time.sleep(0.01)
-            listed = manager.execution_artifacts(execution_id, owner_scope="owner-a")
+            listed = manager.execution_artifacts(
+                execution_id,
+                owner_scope="owner-a",
+            )
         self.assertEqual(len(listed["artifacts"]), 1)  # type: ignore[arg-type]
-        self.assertEqual(listed["artifacts"][0]["name"], "partial.json")  # type: ignore[index]
+        artifact = listed["artifacts"][0]  # type: ignore[index]
+        self.assertEqual(artifact["name"], "partial.json")
 
     def test_runtime_artifact_monitor_stops_on_policy_violation(self) -> None:
-        with tempfile.TemporaryDirectory() as workspace_dir, tempfile.TemporaryDirectory() as artifact_dir:
+        with (
+            tempfile.TemporaryDirectory() as workspace_dir,
+            tempfile.TemporaryDirectory() as artifact_dir,
+        ):
             artifacts = Path(artifact_dir)
             (artifacts / "nested").mkdir()
             handle = BlockingHandle()
@@ -267,7 +314,10 @@ class ArtifactLifecycleTests(unittest.TestCase):
         self.assertTrue(monitor.policy_violation.is_set())
 
     def test_runtime_artifact_monitor_stops_on_limit(self) -> None:
-        with tempfile.TemporaryDirectory() as workspace_dir, tempfile.TemporaryDirectory() as artifact_dir:
+        with (
+            tempfile.TemporaryDirectory() as workspace_dir,
+            tempfile.TemporaryDirectory() as artifact_dir,
+        ):
             artifacts = Path(artifact_dir)
             (artifacts / "big.bin").write_bytes(b"12345")
             handle = BlockingHandle()
@@ -275,7 +325,10 @@ class ArtifactLifecycleTests(unittest.TestCase):
                 "container",
                 Path(workspace_dir),
                 TaskDefinition("run", "run", PINNED_IMAGE, ("python",)),
-                TaskLimits(max_artifact_bytes=4, max_total_artifact_bytes=8),
+                TaskLimits(
+                    max_artifact_bytes=4,
+                    max_total_artifact_bytes=8,
+                ),
                 artifact_path=artifacts,
             )
             monitor = ArtifactGrowthMonitor(request, handle)
