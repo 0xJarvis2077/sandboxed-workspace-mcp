@@ -119,6 +119,43 @@ class ExecutionTransitionError(ValueError):
     """Raised when a canonical execution state transition is not permitted."""
 
 
+class ExecutionResources(BaseModel):
+    """Immutable aggregate resource accounting for one terminal execution."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    wall_time_ms: int = Field(ge=0, strict=True)
+    cpu_time_ms: int | None = Field(default=None, ge=0, strict=True)
+    peak_memory_bytes: int | None = Field(default=None, ge=0, strict=True)
+    workspace_initial_bytes: int | None = Field(default=None, ge=0, strict=True)
+    workspace_final_bytes: int | None = Field(default=None, ge=0, strict=True)
+    workspace_growth_bytes: int | None = Field(default=None, ge=0, strict=True)
+    stdout_bytes: int = Field(ge=0, strict=True)
+    stderr_bytes: int = Field(ge=0, strict=True)
+    output_bytes: int = Field(ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def _validate_accounting(self) -> ExecutionResources:
+        if self.output_bytes != self.stdout_bytes + self.stderr_bytes:
+            raise ValueError("output_bytes must equal stdout_bytes + stderr_bytes")
+        if self.workspace_final_bytes is None:
+            if self.workspace_growth_bytes is not None:
+                raise ValueError(
+                    "workspace_growth_bytes requires workspace_final_bytes"
+                )
+            return self
+        if self.workspace_initial_bytes is None:
+            raise ValueError("workspace_final_bytes requires workspace_initial_bytes")
+        expected_growth = max(
+            0, self.workspace_final_bytes - self.workspace_initial_bytes
+        )
+        if self.workspace_growth_bytes != expected_growth:
+            raise ValueError(
+                "workspace_growth_bytes must equal max(0, final - initial)"
+            )
+        return self
+
+
 class ExecutionRecord(BaseModel):
     """Bounded public-safe metadata for exactly one authorized execution."""
 
@@ -137,6 +174,7 @@ class ExecutionRecord(BaseModel):
     exit_code: int | None = None
     reason: ExecutionReason | None = None
     error_summary: str | None = Field(default=None, max_length=4096)
+    resources: ExecutionResources | None = None
 
     @field_validator(
         "execution_id",
@@ -185,8 +223,11 @@ class ExecutionRecord(BaseModel):
         if is_terminal_state(self.state):
             if self.finished_at is None:
                 raise ValueError("terminal execution requires finished_at")
-        elif self.finished_at is not None:
-            raise ValueError("non-terminal execution must not have finished_at")
+        else:
+            if self.finished_at is not None:
+                raise ValueError("non-terminal execution must not have finished_at")
+            if self.resources is not None:
+                raise ValueError("non-terminal execution must not have resources")
 
         if (
             self.state is ExecutionState.TIMED_OUT

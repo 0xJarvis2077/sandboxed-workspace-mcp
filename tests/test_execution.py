@@ -11,6 +11,7 @@ from workspace_guard_mcp.execution import (
     ExecutionMode,
     ExecutionReason,
     ExecutionRecord,
+    ExecutionResources,
     ExecutionState,
     ExecutionTransitionError,
     ensure_execution_transition,
@@ -38,6 +39,70 @@ class ExecutionDomainTests(unittest.TestCase):
         }
         values.update(updates)
         return ExecutionRecord.model_validate(values)
+
+    def resources(self, **updates: object) -> ExecutionResources:
+        values: dict[str, object] = {
+            "wall_time_ms": 100,
+            "cpu_time_ms": None,
+            "peak_memory_bytes": None,
+            "workspace_initial_bytes": 1000,
+            "workspace_final_bytes": 1010,
+            "workspace_growth_bytes": 10,
+            "stdout_bytes": 7,
+            "stderr_bytes": 3,
+            "output_bytes": 10,
+        }
+        values.update(updates)
+        return ExecutionResources.model_validate(values)
+
+    def test_execution_resources_validate_accounting_invariants(self) -> None:
+        all_known = self.resources(cpu_time_ms=20, peak_memory_bytes=4096)
+        self.assertEqual(all_known.output_bytes, 10)
+        unavailable = self.resources(
+            workspace_final_bytes=None,
+            workspace_growth_bytes=None,
+        )
+        self.assertIsNone(unavailable.workspace_final_bytes)
+        zero = self.resources(
+            workspace_final_bytes=1000,
+            workspace_growth_bytes=0,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            output_bytes=0,
+        )
+        self.assertEqual(zero.workspace_growth_bytes, 0)
+
+        invalid_updates = (
+            {"wall_time_ms": -1},
+            {"stdout_bytes": -1},
+            {"wall_time_ms": True},
+            {"output_bytes": 11},
+            {"workspace_growth_bytes": 9},
+            {"workspace_final_bytes": None, "workspace_growth_bytes": 0},
+            {"workspace_initial_bytes": None},
+            {"unexpected": 1},
+        )
+        for updates in invalid_updates:
+            with self.subTest(updates=updates), self.assertRaises(ValidationError):
+                self.resources(**updates)
+
+    def test_execution_record_resources_follow_lifecycle(self) -> None:
+        resources = self.resources()
+        with self.assertRaises(ValidationError):
+            self.record(resources=resources)
+        terminal = self.record(
+            state=ExecutionState.SUCCEEDED,
+            updated_at=2.0,
+            finished_at=2.0,
+            resources=resources,
+        )
+        self.assertEqual(terminal.resources, resources)
+        legacy = self.record(
+            state=ExecutionState.SUCCEEDED,
+            updated_at=2.0,
+            finished_at=2.0,
+        )
+        self.assertIsNone(legacy.resources)
 
     def test_valid_record_is_frozen_and_rejects_extra_fields(self) -> None:
         record = self.record()

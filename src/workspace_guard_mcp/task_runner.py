@@ -389,6 +389,90 @@ class _ArtifactUsage:
     pressure: float
 
 
+@dataclass(frozen=True, slots=True)
+class WorkspaceUsage:
+    """One bounded snapshot measurement shared by enforcement and accounting."""
+
+    total_bytes: int
+    largest_file_bytes: int
+    growth_bytes: int
+    exceeded: bool
+    pressure: float
+
+
+_WorkspaceUsage = WorkspaceUsage
+
+
+def measure_workspace_usage(
+    snapshot_path: Path,
+    *,
+    initial_workspace_bytes: int,
+    limits: TaskLimits,
+    stop_event: threading.Event | None = None,
+    stop_on_exceeded: bool = False,
+) -> WorkspaceUsage:
+    """Measure snapshot usage, optionally stopping as soon as a limit is exceeded."""
+
+    total = 0
+    largest_file = 0
+    pending = [snapshot_path]
+    while pending:
+        if stop_event is not None and stop_event.is_set():
+            break
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                metadata = entry.stat(follow_symlinks=False)
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    largest_file = max(largest_file, metadata.st_size)
+                    total += metadata.st_size
+                    if stop_on_exceeded:
+                        pressure = _workspace_pressure(
+                            largest_file,
+                            total,
+                            initial_workspace_bytes,
+                            limits.max_workspace_file_bytes,
+                            limits.max_workspace_growth_bytes,
+                        )
+                        if pressure > 1.0:
+                            return WorkspaceUsage(
+                                total_bytes=total,
+                                largest_file_bytes=largest_file,
+                                growth_bytes=max(0, total - initial_workspace_bytes),
+                                exceeded=True,
+                                pressure=pressure,
+                            )
+    if stop_event is not None and stop_event.is_set():
+        return WorkspaceUsage(
+            total_bytes=0,
+            largest_file_bytes=0,
+            growth_bytes=0,
+            exceeded=False,
+            pressure=0.0,
+        )
+    growth = max(0, total - initial_workspace_bytes)
+    pressure = _workspace_pressure(
+        largest_file,
+        total,
+        initial_workspace_bytes,
+        limits.max_workspace_file_bytes,
+        limits.max_workspace_growth_bytes,
+    )
+    return WorkspaceUsage(
+        total_bytes=total,
+        largest_file_bytes=largest_file,
+        growth_bytes=growth,
+        exceeded=pressure > 1.0,
+        pressure=pressure,
+    )
+
+
 class WorkspaceGrowthMonitor:
     """Best-effort host-side monitor for writable snapshot growth."""
 
@@ -425,8 +509,7 @@ class WorkspaceGrowthMonitor:
                     self.handle.stop()
                     return
             except OSError:
-                # Aggregate accounting is explicitly best effort. A later pass may
-                # observe entries that were concurrently renamed or removed.
+                # Aggregate enforcement is best effort while the runtime mutates files.
                 pressure = 0.0
             else:
                 pressure = usage.pressure
@@ -438,51 +521,14 @@ class WorkspaceGrowthMonitor:
     def _limit_exceeded(self) -> bool:
         return self._measure_usage().exceeded
 
-    def _measure_usage(self) -> _WorkspaceUsage:
-        total = 0
-        largest_file = 0
-        pending = [self.request.snapshot_path]
-        while pending and not self._stop.is_set():
-            directory = pending.pop()
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    if self._stop.is_set():
-                        return _WorkspaceUsage(False, 0.0)
-                    metadata = entry.stat(follow_symlinks=False)
-                    if entry.is_symlink():
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        pending.append(Path(entry.path))
-                    elif entry.is_file(follow_symlinks=False):
-                        largest_file = max(largest_file, metadata.st_size)
-                        total += metadata.st_size
-                        pressure = _workspace_pressure(
-                            largest_file,
-                            total,
-                            self.request.initial_workspace_bytes,
-                            self.request.limits.max_workspace_file_bytes,
-                            self.request.limits.max_workspace_growth_bytes,
-                        )
-                        if pressure > 1.0:
-                            return _WorkspaceUsage(True, pressure)
-        if self._stop.is_set():
-            return _WorkspaceUsage(False, 0.0)
-        return _WorkspaceUsage(
-            False,
-            _workspace_pressure(
-                largest_file,
-                total,
-                self.request.initial_workspace_bytes,
-                self.request.limits.max_workspace_file_bytes,
-                self.request.limits.max_workspace_growth_bytes,
-            ),
+    def _measure_usage(self) -> WorkspaceUsage:
+        return measure_workspace_usage(
+            self.request.snapshot_path,
+            initial_workspace_bytes=self.request.initial_workspace_bytes,
+            limits=self.request.limits,
+            stop_event=self._stop,
+            stop_on_exceeded=True,
         )
-
-
-@dataclass(frozen=True, slots=True)
-class _WorkspaceUsage:
-    exceeded: bool
-    pressure: float
 
 
 def _workspace_pressure(
@@ -508,7 +554,7 @@ def _next_workspace_scan_delay(scan_duration: float, pressure: float) -> float:
 
 @dataclass(frozen=True, slots=True)
 class TaskRunResult:
-    """Canonical synchronous execution result with a legacy public projection."""
+    """Canonical synchronous execution result with runtime observations."""
 
     state: ExecutionState
     reason: ExecutionReason | None
@@ -517,6 +563,8 @@ class TaskRunResult:
     stderr: str
     truncated: bool
     duration_ms: int
+    stdout_bytes: int = 0
+    stderr_bytes: int = 0
 
     @property
     def status(self) -> str:
@@ -539,7 +587,7 @@ class TaskRunResult:
 
 
 class BoundedOutput:
-    """Thread-safe bounded capture shared by stdout and stderr."""
+    """Thread-safe bounded capture with lifetime runtime byte counters."""
 
     def __init__(self, limit: int) -> None:
         self.limit = limit
@@ -547,16 +595,30 @@ class BoundedOutput:
         self._stderr = bytearray()
         self._size = 0
         self._truncated = False
+        self._observed_stdout_bytes = 0
+        self._observed_stderr_bytes = 0
         self._lock = threading.Lock()
 
     def stdout(self, data: bytes) -> None:
-        self._append(self._stdout, data)
+        self._append(self._stdout, data, stream="stdout", observed=True)
 
     def stderr(self, data: bytes) -> None:
-        self._append(self._stderr, data)
+        self._append(self._stderr, data, stream="stderr", observed=True)
 
-    def _append(self, target: bytearray, data: bytes) -> None:
+    def diagnostic_stderr(self, data: bytes) -> None:
+        """Retain server diagnostics without counting them as runtime stderr."""
+
+        self._append(self._stderr, data, stream="stderr", observed=False)
+
+    def _append(
+        self, target: bytearray, data: bytes, *, stream: str, observed: bool
+    ) -> None:
         with self._lock:
+            if observed:
+                if stream == "stdout":
+                    self._observed_stdout_bytes += len(data)
+                else:
+                    self._observed_stderr_bytes += len(data)
             remaining = self.limit - self._size
             if remaining <= 0:
                 if data:
@@ -572,6 +634,16 @@ class BoundedOutput:
     def truncated(self) -> bool:
         with self._lock:
             return self._truncated
+
+    @property
+    def observed_stdout_bytes(self) -> int:
+        with self._lock:
+            return self._observed_stdout_bytes
+
+    @property
+    def observed_stderr_bytes(self) -> int:
+        with self._lock:
+            return self._observed_stderr_bytes
 
     def text(self) -> tuple[str, str]:
         with self._lock:
@@ -658,7 +730,7 @@ def run_container_task(
     def record_cleanup_failure(phase: str, exc: Exception) -> None:
         nonlocal cleanup_failed
         cleanup_failed = True
-        capture.stderr(f"{phase}: {exc}\n".encode("utf-8", errors="replace"))
+        capture.diagnostic_stderr(f"{phase}: {exc}\n".encode("utf-8", errors="replace"))
 
     def stop_handle() -> None:
         try:
@@ -676,7 +748,7 @@ def run_container_task(
         workspace_monitor.start()
         artifact_monitor.start()
     except Exception as exc:
-        capture.stderr(
+        capture.diagnostic_stderr(
             f"workspace monitor start failure: {exc}\n".encode(
                 "utf-8", errors="replace"
             )
@@ -700,6 +772,8 @@ def run_container_task(
             stderr=stderr,
             truncated=capture.truncated,
             duration_ms=_duration_ms(started),
+            stdout_bytes=capture.observed_stdout_bytes,
+            stderr_bytes=capture.observed_stderr_bytes,
         )
 
     try:
@@ -740,7 +814,7 @@ def run_container_task(
                 stop_handle()
     except Exception as exc:
         monitor_failed = True
-        capture.stderr(
+        capture.diagnostic_stderr(
             f"container monitor failure: {exc}\n".encode("utf-8", errors="replace")
         )
         stop_handle()
@@ -808,6 +882,8 @@ def run_container_task(
         stderr=stderr,
         truncated=capture.truncated,
         duration_ms=_duration_ms(started),
+        stdout_bytes=capture.observed_stdout_bytes,
+        stderr_bytes=capture.observed_stderr_bytes,
     )
 
 

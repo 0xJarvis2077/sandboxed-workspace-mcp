@@ -82,8 +82,10 @@ class ToolContractTests(unittest.TestCase):
             "trash_file": {"trash_id", "sha256"},
             "run_pytest": {"status", "failures"},
             "run_ruff": {"status", "diagnostics"},
-            "run_pytest_coverage": {"tests", "coverage"},
-            "execution_status": {"execution_id", "state", "reason"},
+            "run_pytest_coverage": {"tests", "coverage", "resources"},
+            "run_command": {"execution_id", "status", "resources"},
+            "task_status": {"task_id", "status", "resources"},
+            "execution_status": {"execution_id", "state", "reason", "resources"},
             "execution_events": {
                 "events",
                 "next_cursor",
@@ -96,6 +98,24 @@ class ToolContractTests(unittest.TestCase):
                 encoded = json.dumps(TOOL_CONTRACTS[name].output_schema)
                 for field in required_names:
                     self.assertIn(f'"{field}"', encoded)
+
+    def test_resource_accounting_schema_is_nested_and_nullable(self) -> None:
+        for name in ("execution_status", "run_command", "task_status"):
+            with self.subTest(tool=name):
+                encoded = json.dumps(TOOL_CONTRACTS[name].output_schema)
+                for field in (
+                    "wall_time_ms",
+                    "cpu_time_ms",
+                    "peak_memory_bytes",
+                    "workspace_initial_bytes",
+                    "workspace_final_bytes",
+                    "workspace_growth_bytes",
+                    "stdout_bytes",
+                    "stderr_bytes",
+                    "output_bytes",
+                ):
+                    self.assertIn(f'"{field}"', encoded)
+                self.assertIn('"null"', encoded)
 
     def test_every_server_tool_decorator_has_exactly_one_registry_contract(
         self,

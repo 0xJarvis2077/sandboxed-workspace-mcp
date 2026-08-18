@@ -92,7 +92,7 @@ The compatibility entrypoint remains available:
 | Compatibility commands | `run_shell` | Closed read-only grammar; never starts a shell |
 | Fixed tasks | `list_tasks`, `run_task` | Operator-defined synchronous tasks |
 | Long-running tasks | `start_task`, `task_status`, `task_logs`, `stop_task` | Bounded stdout/stderr with cursor-based logs; `task_status` retains service compatibility semantics |
-| Execution queries | `execution_status`, `execution_events`, `execution_artifacts` | Canonical current truth, bounded lifecycle history, and artifact metadata for terminal executions |
+| Execution queries | `execution_status`, `execution_events`, `execution_artifacts` | Canonical current truth including terminal resource accounting, bounded lifecycle history, and terminal artifact metadata |
 | Execution profiles | `list_execution_profiles`, `python_version`, `run_pytest`, `run_ruff`, `run_mypy`, `run_pytest_coverage`, `run_python_script`, `run_command`, `start_command` | Authorized execution and structured diagnostics in a pinned image and disposable snapshot |
 
 Without a task config, the task manager, container backend, and dynamic execution tools are not created or registered.
@@ -123,6 +123,31 @@ Result Resources live only in process memory, have a fixed 15-minute TTL, and di
 The execution snapshot remains mounted only at `/workspace`. Each execution also receives a separate writable `/artifacts` mount and discovers it through `WORKSPACEGUARD_ARTIFACT_DIR=/artifacts`; the server never scans the workspace to guess which files are outputs. Round 3 admits only bounded top-level regular files from `/artifacts`; symlinks, directories, and special files fail closed.
 
 After the execution is terminal, the server re-validates staging, streams admitted bytes into a private store while enforcing limits and computing SHA-256, and only then publishes immutable artifact metadata. Synchronous execution results include `artifacts[]`, and terminal executions can be queried with `execution_artifacts`. Artifact bytes are never inlined, never stored in ResultCache, and never written into the Execution SQLite database. They are exposed through `workspaceguard://artifact/{id}` as opaque `application/octet-stream` resources. The current ArtifactStore is process-local, ephemeral, and bounded by TTL, retained execution count, and total stored bytes, with whole-execution eviction.
+
+## Resource Accounting
+
+Resource Enforcement defines how much an execution is **allowed** to consume. Resource Accounting records the aggregate usage WorkspaceGuard **actually observed** for a terminal execution. Accounting is persisted as `ExecutionRecord.resources`; synchronous execution results, terminal `task_status`, and `execution_status` all project the same canonical truth. Running executions return `resources: null` rather than live partial metrics. The compatibility field `duration_ms` remains unchanged; adding `wall_time_ms` does not redefine its historical semantics.
+
+```json
+{
+  "execution_id": "...",
+  "resources": {
+    "wall_time_ms": 1834,
+    "cpu_time_ms": null,
+    "peak_memory_bytes": null,
+    "workspace_initial_bytes": 12873421,
+    "workspace_final_bytes": 12881692,
+    "workspace_growth_bytes": 8271,
+    "stdout_bytes": 15320,
+    "stderr_bytes": 3001,
+    "output_bytes": 18321
+  }
+}
+```
+
+`wall_time_ms` is monotonic elapsed time from canonical execution creation through terminal completion, including snapshot preparation, runtime execution, artifact collection, and temporary cleanup. The workspace baseline is measured after all server-side snapshot initialization and before runtime startup. Writable executions are measured again after runtime termination and before snapshot cleanup; deletion can reduce final size, but growth is floored at zero. `stdout_bytes` and `stderr_bytes` are lifetime bytes observed from runtime pipes, so they can exceed retained output; server-generated diagnostic stderr is not counted as runtime usage.
+
+The current CLI container backend has no reliable source for exact CPU time or true peak memory. Therefore `cpu_time_ms` and `peak_memory_bytes` are `null`. That means **unavailable**, not zero, and WorkspaceGuard does not substitute timeout, configured CPU/memory limits, or sampled estimates.
 
 ## Tool Annotations
 

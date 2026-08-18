@@ -92,7 +92,7 @@ python -m venv .venv
 | 兼容命令 | `run_shell` | 只解析封闭的只读语法，从不启动 Shell |
 | 固定任务 | `list_tasks`, `run_task` | 操作者预定义的同步任务 |
 | 长任务 | `start_task`, `task_status`, `task_logs`, `stop_task` | 有界 stdout/stderr 和 cursor 日志；`task_status` 保留 service 兼容语义 |
-| Execution 查询 | `execution_status`, `execution_events`, `execution_artifacts` | canonical current truth、有界 lifecycle history 与 terminal execution 的 artifact metadata |
+| Execution 查询 | `execution_status`, `execution_events`, `execution_artifacts` | canonical current truth（含 terminal resource accounting）、有界 lifecycle history 与 terminal artifact metadata |
 | Execution profile | `list_execution_profiles`, `python_version`, `run_pytest`, `run_ruff`, `run_mypy`, `run_pytest_coverage`, `run_python_script`, `run_command`, `start_command` | 固定镜像、一次性快照中的授权执行与结构化诊断 |
 
 没有提供 task config 时，任务管理器、容器后端和动态执行工具都不会创建或注册。
@@ -123,6 +123,31 @@ Result Resource 仅保存在当前进程内存中，固定 TTL 为 15 分钟，S
 Execution snapshot 仍只挂载到 `/workspace`；每次 execution 另外获得独立、可写的 `/artifacts`，并通过 `WORKSPACEGUARD_ARTIFACT_DIR=/artifacts` 显式发现这个输出通道。Server 不扫描 workspace 猜测输出。Round 3 只接纳 `/artifacts` 下 bounded top-level regular files，symlink、directory 和 special file fail closed。
 
 Execution 终止后，Server 才会重新验证 staging，按限额 streaming copy、计算 SHA-256，并发布到 execution 无法写入的 private ArtifactStore。Artifact metadata 会作为同步 execution result 的 `artifacts[]` 返回，也可在 terminal 后通过 `execution_artifacts` 查询；binary bytes 不 inline、不进入 ResultCache，也不进入 Execution SQLite，而是通过统一按 `application/octet-stream` 交付的 `workspaceguard://artifact/{id}` resource 读取。当前 ArtifactStore 是 process-local、ephemeral、bounded 的，按 TTL、retained execution 数量和总字节做 whole-execution eviction。
+
+## Resource Accounting
+
+Resource Enforcement 定义 execution **最多允许**使用多少资源；Resource Accounting 记录 WorkspaceGuard **实际观察到**的一次 terminal execution 聚合用量。Accounting 是持久化的 `ExecutionRecord.resources`，同步 execution result、terminal `task_status` 与 `execution_status` 都投影同一份 canonical truth；running execution 的 `resources` 为 `null`，不提供 live partial metrics。兼容字段 `duration_ms` 继续保留，其历史语义不因 `wall_time_ms` 的加入而改变。
+
+```json
+{
+  "execution_id": "...",
+  "resources": {
+    "wall_time_ms": 1834,
+    "cpu_time_ms": null,
+    "peak_memory_bytes": null,
+    "workspace_initial_bytes": 12873421,
+    "workspace_final_bytes": 12881692,
+    "workspace_growth_bytes": 8271,
+    "stdout_bytes": 15320,
+    "stderr_bytes": 3001,
+    "output_bytes": 18321
+  }
+}
+```
+
+`wall_time_ms` 使用 monotonic elapsed time，覆盖 WorkspaceGuard 从 canonical execution 创建到 terminal completion 前的 snapshot 准备、runtime、artifact collection 与临时清理。workspace baseline 在所有 Server-side snapshot initializer 完成后、runtime 启动前建立；writable execution 在 runtime 结束且 snapshot cleanup 前测量 final bytes，删除文件时 growth 下限为 0。`stdout_bytes` / `stderr_bytes` 是 runtime pipe 实际观察到的 lifetime bytes，可大于最终 retained output，Server 自己生成的 diagnostic stderr 不计入这些 counter。
+
+当前 CLI container backend 没有可靠的 CPU-time 与真正 peak-memory telemetry source，因此 `cpu_time_ms` 和 `peak_memory_bytes` 为 `null`。这表示 **unavailable**，不是 0，也不会用 timeout、CPU/memory limits 或采样估算值冒充 accounting。
 
 ## Tool Annotations
 

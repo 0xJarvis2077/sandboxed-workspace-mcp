@@ -12,7 +12,7 @@ import time
 import unittest
 from pathlib import Path
 from types import MappingProxyType
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from _mcp_assertions import require_call_tool_result, require_structured_content
 
@@ -38,6 +38,7 @@ from workspace_guard_mcp.task_manager import (
     TaskManagerError,
 )
 from workspace_guard_mcp.task_runner import (
+    BoundedOutput,
     CliContainerBackend,
     ContainerRequest,
     TaskExecutionError,
@@ -45,6 +46,7 @@ from workspace_guard_mcp.task_runner import (
     _next_workspace_scan_delay,
     _WorkspaceUsage,
     build_container_argv,
+    measure_workspace_usage,
     run_container_task,
 )
 
@@ -175,12 +177,14 @@ def profile_configuration(
         {"python_version", "run_pytest", "run_python_script"}
     ),
     limits: TaskLimits | None = None,
+    workspace_access: str = "read-only",
 ) -> TaskConfiguration:
     profiles = {
         "debug": ExecutionProfile(
             "debug",
             PINNED_IMAGE,
             tools,
+            workspace_access=workspace_access,
             allow_arbitrary_commands=bool(
                 {"run_command", "start_command"}.intersection(tools)
             ),
@@ -196,6 +200,95 @@ def profile_configuration(
 
 
 class ContainerRunnerTests(unittest.TestCase):
+    def test_bounded_output_counts_observed_bytes_beyond_retention(self) -> None:
+        capture = BoundedOutput(8)
+        capture.stdout(b"12345")
+        capture.stderr(b"abcdef")
+        capture.diagnostic_stderr(b"internal")
+
+        stdout, stderr = capture.text()
+        self.assertLessEqual(len(stdout.encode()) + len(stderr.encode()), 8)
+        self.assertTrue(capture.truncated)
+        self.assertEqual(capture.observed_stdout_bytes, 5)
+        self.assertEqual(capture.observed_stderr_bytes, 6)
+
+        threads = [
+            threading.Thread(target=capture.stdout, args=(b"xy",)) for _ in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(capture.observed_stdout_bytes, 21)
+
+        exact = BoundedOutput(4)
+        exact.stdout(b"1234")
+        self.assertFalse(exact.truncated)
+        self.assertEqual(exact.observed_stdout_bytes, 4)
+        self.assertEqual(exact.observed_stderr_bytes, 0)
+        exact.stderr(b"x")
+        self.assertTrue(exact.truncated)
+        self.assertEqual(exact.observed_stderr_bytes, 1)
+
+        large = BoundedOutput(3)
+        large.stderr(b"12345")
+        self.assertEqual(large.observed_stderr_bytes, 5)
+        self.assertEqual(large.text()[1], "123")
+
+    def test_workspace_measurement_reports_growth_and_shrink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory)
+            (snapshot / "base.bin").write_bytes(b"1234")
+            limits = TaskLimits(
+                max_workspace_file_bytes=1024,
+                max_workspace_growth_bytes=1024,
+            )
+            grown = measure_workspace_usage(
+                snapshot,
+                initial_workspace_bytes=2,
+                limits=limits,
+            )
+            shrunk = measure_workspace_usage(
+                snapshot,
+                initial_workspace_bytes=8,
+                limits=limits,
+            )
+        self.assertEqual(grown.total_bytes, 4)
+        self.assertEqual(grown.growth_bytes, 2)
+        self.assertEqual(shrunk.growth_bytes, 0)
+
+    def test_workspace_enforcement_measurement_stops_at_first_exceeded_limit(
+        self,
+    ) -> None:
+        first = MagicMock()
+        first.stat.return_value.st_size = 11
+        first.is_symlink.return_value = False
+        first.is_dir.return_value = False
+        first.is_file.return_value = True
+        second = MagicMock()
+        second.stat.side_effect = AssertionError("scan continued after limit exceeded")
+        scanner = MagicMock()
+        scanner.__enter__.return_value = iter((first, second))
+        limits = TaskLimits(
+            max_workspace_file_bytes=10,
+            max_workspace_growth_bytes=1024,
+        )
+
+        with patch(
+            "workspace_guard_mcp.task_runner.os.scandir",
+            return_value=scanner,
+        ):
+            usage = measure_workspace_usage(
+                Path("/snapshot"),
+                initial_workspace_bytes=0,
+                limits=limits,
+                stop_on_exceeded=True,
+            )
+
+        self.assertTrue(usage.exceeded)
+        self.assertEqual(usage.total_bytes, 11)
+        second.stat.assert_not_called()
+
     def test_container_argv_has_every_required_isolation_and_no_shell(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory)
@@ -700,6 +793,8 @@ class ContainerRunnerTests(unittest.TestCase):
         self.assertTrue(timeout_backend.handles[0].stopped)
         self.assertEqual(overflow.status, "output_limit_exceeded")
         self.assertTrue(overflow.truncated)
+        self.assertEqual(overflow.stdout_bytes, 1025)
+        self.assertEqual(overflow.stderr_bytes, 0)
         self.assertTrue(overflow_backend.handles[0].stopped)
         self.assertEqual(cancelled.status, "cancelled")
         self.assertTrue(cancelled_backend.handles[0].stopped)
@@ -742,6 +837,122 @@ class TaskManagerTests(unittest.TestCase):
             (self.root / "test_module.py").read_text(encoding="utf-8"),
             "value = 1\n",
         )
+
+    def test_final_accounting_failure_preserves_success(self) -> None:
+        limits = TaskLimits(
+            timeout_seconds=2,
+            max_output_bytes=4096,
+            max_workspace_file_bytes=1024 * 1024,
+            max_workspace_growth_bytes=1024 * 1024,
+            allow_best_effort_disk_limit=True,
+        )
+        configured = TaskConfiguration(
+            source=self.base / "writable.json",
+            runtime="docker",
+            limits=limits,
+            tasks=MappingProxyType(
+                {
+                    "write": TaskDefinition(
+                        "write",
+                        "run",
+                        PINNED_IMAGE,
+                        ("python",),
+                        workspace_access="writable",
+                    )
+                }
+            ),
+        )
+        manager = TaskManager(self.settings, configured, backend=FakeBackend())
+        baseline = _WorkspaceUsage(123, 10, 0, False, 0.0)
+        with patch(
+            "workspace_guard_mcp.task_manager.measure_workspace_usage",
+            side_effect=[baseline, OSError("final scan unavailable")],
+        ):
+            result = manager.run_task("write")
+
+        self.assertEqual(result["status"], "succeeded")
+        resources = result["resources"]
+        assert isinstance(resources, dict)
+        self.assertEqual(resources["workspace_initial_bytes"], 123)
+        self.assertIsNone(resources["workspace_final_bytes"])
+        self.assertIsNone(resources["workspace_growth_bytes"])
+
+    def test_snapshot_initializer_bytes_are_baseline_not_runtime_growth(self) -> None:
+        limits = TaskLimits(
+            timeout_seconds=2,
+            max_output_bytes=4096,
+            max_workspace_file_bytes=1024 * 1024,
+            max_workspace_growth_bytes=1024 * 1024,
+            allow_best_effort_disk_limit=True,
+        )
+        backend = FakeBackend()
+        manager = TaskManager(
+            self.settings,
+            profile_configuration(
+                self.base,
+                tools=frozenset({"run_pytest"}),
+                limits=limits,
+                workspace_access="writable",
+            ),
+            backend=backend,
+        )
+        source_bytes = sum(
+            path.stat().st_size for path in self.root.rglob("*") if path.is_file()
+        )
+        initializer_size = 137
+
+        def write_initializer(
+            path: Path,
+            *,
+            show_locals: bool,
+            output_limit: int,
+        ) -> None:
+            del show_locals, output_limit
+            (path / "server-initializer.bin").write_bytes(b"x" * initializer_size)
+
+        with patch(
+            "workspace_guard_mcp.task_manager._write_debug_plugin",
+            side_effect=write_initializer,
+        ):
+            result = manager.run_pytest("debug")
+
+        expected_baseline = source_bytes + initializer_size
+        self.assertEqual(backend.requests[0].initial_workspace_bytes, expected_baseline)
+        resources = result["resources"]
+        assert isinstance(resources, dict)
+        self.assertEqual(resources["workspace_initial_bytes"], expected_baseline)
+        self.assertEqual(resources["workspace_final_bytes"], expected_baseline)
+        self.assertEqual(resources["workspace_growth_bytes"], 0)
+
+    def test_prestart_failure_preserves_known_workspace_baseline(self) -> None:
+        configured = configuration(self.base)
+        store = InMemoryExecutionStore()
+        manager = TaskManager(
+            self.settings,
+            configured,
+            backend=FakeBackend(start_error=OSError("runtime denied")),
+            execution_store=store,
+        )
+        source_bytes = sum(
+            path.stat().st_size for path in self.root.rglob("*") if path.is_file()
+        )
+        execution_id = "prestart-accounting-test"
+
+        with (
+            patch(
+                "workspace_guard_mcp.task_manager.secrets.token_urlsafe",
+                return_value=execution_id,
+            ),
+            self.assertRaisesRegex(TaskManagerError, "failed to start"),
+        ):
+            manager.start_task("dev")
+
+        record = store.get(execution_id)
+        self.assertEqual(record.state, ExecutionState.CRASHED)
+        assert record.resources is not None
+        self.assertEqual(record.resources.workspace_initial_bytes, source_bytes)
+        self.assertIsNone(record.resources.workspace_final_bytes)
+        self.assertIsNone(record.resources.workspace_growth_bytes)
 
     def test_only_predefined_names_and_matching_modes_are_allowed(self) -> None:
         manager = TaskManager(
@@ -938,6 +1149,10 @@ class TaskManagerTests(unittest.TestCase):
             ),
         )
         self.assertEqual(backend.requests[3].task.argv, ("python", "--", "debug.py"))
+        self.assertGreater(
+            backend.requests[1].initial_workspace_bytes,
+            backend.requests[0].initial_workspace_bytes,
+        )
         self.assertTrue(
             all(not request.snapshot_path.exists() for request in backend.requests)
         )
@@ -1426,6 +1641,10 @@ class TaskManagerTests(unittest.TestCase):
             len(str(result["stdout"]).encode()) + len(str(result["stderr"]).encode()),
             8,
         )
+        self.assertEqual(logs.runtime_stdout_bytes, 5)
+        self.assertEqual(logs.runtime_stderr_bytes, 6)
+        logs.append_diagnostic_stderr(b"internal")
+        self.assertEqual(logs.runtime_stderr_bytes, 6)
         with self.assertRaisesRegex(TaskManagerError, "non-negative"):
             logs.read(-1)
         with self.assertRaisesRegex(TaskManagerError, "non-negative"):
@@ -1498,6 +1717,12 @@ class TaskManagerTests(unittest.TestCase):
         self.assertEqual(task_status["mode"], "run")
         self.assertEqual(task_status["tool"], "run_task")
         self.assertEqual(task_status["state"], "succeeded")
+        self.assertEqual(task_result["resources"], task_status["resources"])
+        resources = task_status["resources"]
+        assert isinstance(resources, dict)
+        self.assertIsNone(resources["cpu_time_ms"])
+        self.assertIsNone(resources["peak_memory_bytes"])
+        self.assertEqual(resources["output_bytes"], 0)
         task_events = task_manager.execution_events(task_execution_id)["events"]
         assert isinstance(task_events, list)
         self.assertEqual(
@@ -1555,7 +1780,7 @@ class TaskManagerTests(unittest.TestCase):
         manager = TaskManager(
             self.settings,
             configuration(self.base),
-            backend=FakeBackend(blocking=True),
+            backend=FakeBackend(stdout=b"ready", stderr=b"warn", blocking=True),
             execution_store=store,
         )
         started = manager.start_task("dev")
@@ -1563,6 +1788,8 @@ class TaskManagerTests(unittest.TestCase):
         execution_id = started["execution_id"]
         assert isinstance(execution_id, str)
         self.assertEqual(store.get(execution_id).state, ExecutionState.RUNNING)
+        self.assertIsNone(manager.task_status(execution_id)["resources"])
+        self.assertIsNone(manager.execution_status(execution_id)["resources"])
 
         stopped = manager.stop_task(execution_id)
         self.assertEqual(stopped["status"], "stopped")
@@ -1572,6 +1799,12 @@ class TaskManagerTests(unittest.TestCase):
         self.assertEqual(record.reason, ExecutionReason.USER_CANCELLED)
         status = manager.execution_status(execution_id)
         self.assertEqual(status["state"], "cancelled")
+        self.assertEqual(stopped["resources"], status["resources"])
+        service_resources = status["resources"]
+        assert isinstance(service_resources, dict)
+        self.assertEqual(service_resources["stdout_bytes"], 5)
+        self.assertEqual(service_resources["stderr_bytes"], 4)
+        self.assertEqual(service_resources["output_bytes"], 9)
         events = manager.execution_events(execution_id)["events"]
         assert isinstance(events, list)
         self.assertEqual(
