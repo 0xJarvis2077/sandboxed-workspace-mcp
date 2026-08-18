@@ -92,7 +92,7 @@ python -m venv .venv
 | 兼容命令 | `run_shell` | 只解析封闭的只读语法，从不启动 Shell |
 | 固定任务 | `list_tasks`, `run_task` | 操作者预定义的同步任务 |
 | 长任务 | `start_task`, `task_status`, `task_logs`, `stop_task` | 有界 stdout/stderr 和 cursor 日志；`task_status` 保留 service 兼容语义 |
-| Execution 查询 | `execution_status`, `execution_events` | canonical current truth 与有界、cursor-based append-only lifecycle history |
+| Execution 查询 | `execution_status`, `execution_events`, `execution_artifacts` | canonical current truth、有界 lifecycle history 与 terminal execution 的 artifact metadata |
 | Execution profile | `list_execution_profiles`, `python_version`, `run_pytest`, `run_ruff`, `run_mypy`, `run_pytest_coverage`, `run_python_script`, `run_command`, `start_command` | 固定镜像、一次性快照中的授权执行与结构化诊断 |
 
 没有提供 task config 时，任务管理器、容器后端和动态执行工具都不会创建或注册。
@@ -118,6 +118,12 @@ python -m venv .venv
 
 Result Resource 仅保存在当前进程内存中，固定 TTL 为 15 分钟，Server 重启、过期或容量淘汰后 URI 会失效。URI 不会作为动态条目出现在 `resources/list`；客户端只会发现 `workspaceguard://result/{id}` template。HTTP/OAuth 模式下结果还会绑定生成结果时的 authenticated owner；stdio/无 OAuth 模式依赖高熵、不可枚举的 ephemeral capability URI。
 
+## Execution Artifacts
+
+Execution snapshot 仍只挂载到 `/workspace`；每次 execution 另外获得独立、可写的 `/artifacts`，并通过 `WORKSPACEGUARD_ARTIFACT_DIR=/artifacts` 显式发现这个输出通道。Server 不扫描 workspace 猜测输出。Round 3 只接纳 `/artifacts` 下 bounded top-level regular files，symlink、directory 和 special file fail closed。
+
+Execution 终止后，Server 才会重新验证 staging，按限额 streaming copy、计算 SHA-256，并发布到 execution 无法写入的 private ArtifactStore。Artifact metadata 会作为同步 execution result 的 `artifacts[]` 返回，也可在 terminal 后通过 `execution_artifacts` 查询；binary bytes 不 inline、不进入 ResultCache，也不进入 Execution SQLite，而是通过统一按 `application/octet-stream` 交付的 `workspaceguard://artifact/{id}` resource 读取。当前 ArtifactStore 是 process-local、ephemeral、bounded 的，按 TTL、retained execution 数量和总字节做 whole-execution eviction。
+
 ## Tool Annotations
 
 每个公开工具都显式声明 `readOnlyHint`、`destructiveHint`、`idempotentHint` 和 `openWorldHint`，用于帮助 MCP client/agent 理解工具行为。它们只是行为提示，不是授权或安全机制；实际安全仍由 workspace policy、SHA/version checks、回收站事务、OAuth scopes、execution profiles 和 sandbox 强制执行。
@@ -130,6 +136,7 @@ Server 通过 MCP Resources 自描述当前可用能力和推荐工作流，Agen
 - `internal://tool-catalog`：机器可消费、按 tool name 稳定排序的当前 Tool 摘要。
 - `internal://tool-info/{name}`：一个当前已注册 Tool 的完整 input/output contract 与 annotations。
 - `workspaceguard://result/{id}`：按需读取当前进程中的 ephemeral bounded large result；具体 URI 不可枚举。
+- `workspaceguard://artifact/{id}`：按需读取 terminal execution 已接纳的 immutable binary artifact；默认作为 opaque binary 交付。
 - `internal://workflows/edit-file`、`debug-python`、`recover-file`、`review-changes`：面向 Agent 的紧凑工作流。
 
 README 只提供入口概览；详细 SOP 由这些 Resources 自己承担，并随当前实际 capability surface 生成。

@@ -92,7 +92,7 @@ The compatibility entrypoint remains available:
 | Compatibility commands | `run_shell` | Closed read-only grammar; never starts a shell |
 | Fixed tasks | `list_tasks`, `run_task` | Operator-defined synchronous tasks |
 | Long-running tasks | `start_task`, `task_status`, `task_logs`, `stop_task` | Bounded stdout/stderr with cursor-based logs; `task_status` retains service compatibility semantics |
-| Execution queries | `execution_status`, `execution_events` | Canonical current truth plus bounded, cursor-based append-only lifecycle history |
+| Execution queries | `execution_status`, `execution_events`, `execution_artifacts` | Canonical current truth, bounded lifecycle history, and artifact metadata for terminal executions |
 | Execution profiles | `list_execution_profiles`, `python_version`, `run_pytest`, `run_ruff`, `run_mypy`, `run_pytest_coverage`, `run_python_script`, `run_command`, `start_command` | Authorized execution and structured diagnostics in a pinned image and disposable snapshot |
 
 Without a task config, the task manager, container backend, and dynamic execution tools are not created or registered.
@@ -118,6 +118,12 @@ Small text results remain fully inline. Larger text that has already passed the 
 
 Result Resources live only in process memory, have a fixed 15-minute TTL, and disappear on server restart, expiration, or capacity eviction. Dynamic result URIs are never enumerated by `resources/list`; clients discover only the `workspaceguard://result/{id}` template. In HTTP/OAuth mode each result is also scoped to the authenticated owner that created it. In stdio/no-OAuth mode, access relies on the high-entropy, non-enumerable ephemeral capability URI.
 
+## Execution Artifacts
+
+The execution snapshot remains mounted only at `/workspace`. Each execution also receives a separate writable `/artifacts` mount and discovers it through `WORKSPACEGUARD_ARTIFACT_DIR=/artifacts`; the server never scans the workspace to guess which files are outputs. Round 3 admits only bounded top-level regular files from `/artifacts`; symlinks, directories, and special files fail closed.
+
+After the execution is terminal, the server re-validates staging, streams admitted bytes into a private store while enforcing limits and computing SHA-256, and only then publishes immutable artifact metadata. Synchronous execution results include `artifacts[]`, and terminal executions can be queried with `execution_artifacts`. Artifact bytes are never inlined, never stored in ResultCache, and never written into the Execution SQLite database. They are exposed through `workspaceguard://artifact/{id}` as opaque `application/octet-stream` resources. The current ArtifactStore is process-local, ephemeral, and bounded by TTL, retained execution count, and total stored bytes, with whole-execution eviction.
+
 ## Tool Annotations
 
 Every public tool explicitly declares `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint` so MCP clients and agents can reason about behavior. These values are hints, not authorization or security enforcement. The actual security boundary remains the workspace policy, SHA/version checks, recycle-bin transactions, OAuth scopes, execution profiles, and sandbox.
@@ -130,6 +136,7 @@ The server self-describes its currently available capabilities and recommended w
 - `internal://tool-catalog`: a machine-readable current Tool summary with stable tool-name ordering.
 - `internal://tool-info/{name}`: the full input/output contract and annotations for one currently registered Tool.
 - `workspaceguard://result/{id}`: on-demand access to an ephemeral bounded large result in the current process; concrete URIs are not enumerable.
+- `workspaceguard://artifact/{id}`: on-demand access to an immutable admitted binary artifact from a terminal execution, delivered as opaque binary by default.
 - `internal://workflows/edit-file`, `debug-python`, `recover-file`, and `review-changes`: compact agent workflows.
 
 The README remains an entry-point overview. Detailed agent SOPs live in these Resources and are generated against the current public capability surface.

@@ -53,6 +53,9 @@ class TaskLimits:
     max_concurrent_tasks: int = 1
     max_workspace_file_bytes: int = 16 * 1024 * 1024
     max_workspace_growth_bytes: int = 256 * 1024 * 1024
+    max_artifacts_per_execution: int = 32
+    max_artifact_bytes: int = 16 * 1024 * 1024
+    max_total_artifact_bytes: int = 64 * 1024 * 1024
     allow_best_effort_disk_limit: bool = False
 
 
@@ -281,6 +284,9 @@ def _validate_limits(raw: Any) -> TaskLimits:
         "max_concurrent_tasks",
         "max_workspace_file_bytes",
         "max_workspace_growth_bytes",
+        "max_artifacts_per_execution",
+        "max_artifact_bytes",
+        "max_total_artifact_bytes",
         "allow_best_effort_disk_limit",
     }
     _known_fields(values, known, "limits")
@@ -331,6 +337,28 @@ def _validate_limits(raw: Any) -> TaskLimits:
         minimum=1_024,
         maximum=100 * 1024 * 1024 * 1024,
     )
+    max_artifacts = _integer_in_range(
+        values.get("max_artifacts_per_execution", defaults.max_artifacts_per_execution),
+        "max_artifacts_per_execution",
+        minimum=1,
+        maximum=100,
+    )
+    max_artifact = _integer_in_range(
+        values.get("max_artifact_bytes", defaults.max_artifact_bytes),
+        "max_artifact_bytes",
+        minimum=1,
+        maximum=10 * 1024 * 1024 * 1024,
+    )
+    max_total_artifact = _integer_in_range(
+        values.get("max_total_artifact_bytes", defaults.max_total_artifact_bytes),
+        "max_total_artifact_bytes",
+        minimum=1,
+        maximum=100 * 1024 * 1024 * 1024,
+    )
+    if max_artifact > max_total_artifact:
+        raise TaskConfigurationError(
+            "max_artifact_bytes must not exceed max_total_artifact_bytes"
+        )
     allow_best_effort = values.get(
         "allow_best_effort_disk_limit", defaults.allow_best_effort_disk_limit
     )
@@ -363,6 +391,9 @@ def _validate_limits(raw: Any) -> TaskLimits:
         max_concurrent_tasks=concurrent,
         max_workspace_file_bytes=max_workspace_file,
         max_workspace_growth_bytes=max_workspace_growth,
+        max_artifacts_per_execution=max_artifacts,
+        max_artifact_bytes=max_artifact,
+        max_total_artifact_bytes=max_total_artifact,
         allow_best_effort_disk_limit=allow_best_effort,
     )
 

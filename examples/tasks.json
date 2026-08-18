@@ -12,6 +12,9 @@
     "max_concurrent_tasks": 1,
     "max_workspace_file_bytes": 16777216,
     "max_workspace_growth_bytes": 268435456,
+    "max_artifacts_per_execution": 32,
+    "max_artifact_bytes": 16777216,
+    "max_total_artifact_bytes": 67108864,
     "allow_best_effort_disk_limit": true
   },
   "tasks": {

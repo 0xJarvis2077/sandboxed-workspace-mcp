@@ -10,6 +10,14 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from .artifact import ArtifactRecord, ArtifactStaging
+from .artifact_store import (
+    ARTIFACT_URI_PREFIX,
+    ArtifactCollectionError,
+    ArtifactLimitExceeded,
+    ArtifactPolicyViolation,
+    EphemeralArtifactStore,
+)
 from .command_execution import CommandCompiler
 from .config import Settings
 from .diagnostics import (
@@ -47,6 +55,7 @@ from .task_config import (
     TaskDefinition,
 )
 from .task_runner import (
+    ArtifactGrowthMonitor,
     CliContainerBackend,
     ContainerBackend,
     ContainerHandle,
@@ -180,9 +189,12 @@ class _ServiceSession:
     task: TaskDefinition
     handle: ContainerHandle
     snapshot: WorkspaceSnapshot
+    artifact_staging: ArtifactStaging
     logs: TaskLogBuffer
     deadline: float
     workspace_monitor: WorkspaceGrowthMonitor
+    artifact_monitor: ArtifactGrowthMonitor
+    owner_scope: str | None
     done: threading.Event = field(default_factory=threading.Event)
     capacity_released: bool = False
 
@@ -190,6 +202,7 @@ class _ServiceSession:
 @dataclass(slots=True)
 class _ExecutionLease:
     execution_id: str
+    owner_scope: str | None = None
     cancellation: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
     handle: ContainerHandle | None = None
@@ -241,11 +254,13 @@ class TaskManager:
         *,
         backend: ContainerBackend | None = None,
         execution_store: ExecutionStore | None = None,
+        artifact_store: EphemeralArtifactStore | None = None,
     ) -> None:
         self.settings = settings
         self.configuration = configuration
         self.backend = backend or CliContainerBackend(configuration.runtime)
         self.execution_store = execution_store or InMemoryExecutionStore()
+        self.artifact_store = artifact_store or EphemeralArtifactStore()
         reconcile_unfinished_executions(self.execution_store)
         self.python_commands = PythonCommandCompiler(settings)
         self.commands = CommandCompiler(settings)
@@ -340,6 +355,7 @@ class TaskManager:
         profile: str | None = None,
         *,
         cancellation_event: threading.Event | None = None,
+        owner_scope: str | None = None,
     ) -> dict[str, object]:
         resolved_profile = self.resolve_execution_profile("python_version", profile)
         return self._run_profile_command(
@@ -347,6 +363,7 @@ class TaskManager:
             "python_version",
             self.python_commands.python_version(),
             cancellation_event=cancellation_event,
+            owner_scope=owner_scope,
         )
 
     def run_pytest(
@@ -363,6 +380,7 @@ class TaskManager:
         show_locals: bool = False,
         max_failures: int | None = None,
         cancellation_event: threading.Event | None = None,
+        owner_scope: str | None = None,
     ) -> dict[str, object]:
         selected = self.resolve_execution_profile("run_pytest", profile)
         argv = self.python_commands.pytest(
@@ -382,6 +400,7 @@ class TaskManager:
             "run_pytest",
             argv,
             cancellation_event=cancellation_event,
+            owner_scope=owner_scope,
             result_adapter=adapt_pytest_result,
             snapshot_initializer=lambda path: _write_debug_plugin(
                 path,
@@ -397,6 +416,7 @@ class TaskManager:
         paths: list[str] | None = None,
         fix: bool = False,
         cancellation_event: threading.Event | None = None,
+        owner_scope: str | None = None,
     ) -> dict[str, object]:
         selected = self.resolve_execution_profile("run_ruff", profile)
         if fix and selected.workspace_access != "writable":
@@ -406,6 +426,7 @@ class TaskManager:
             "run_ruff",
             self.python_commands.ruff(paths=paths, fix=fix),
             cancellation_event=cancellation_event,
+            owner_scope=owner_scope,
             result_adapter=adapt_ruff_result,
         )
 
@@ -416,6 +437,7 @@ class TaskManager:
         paths: list[str] | None = None,
         strict: bool = False,
         cancellation_event: threading.Event | None = None,
+        owner_scope: str | None = None,
     ) -> dict[str, object]:
         selected = self.resolve_execution_profile("run_mypy", profile)
         return self._run_profile_command(
@@ -423,6 +445,7 @@ class TaskManager:
             "run_mypy",
             self.python_commands.mypy(paths=paths, strict=strict),
             cancellation_event=cancellation_event,
+            owner_scope=owner_scope,
             result_adapter=adapt_mypy_result,
         )
 
@@ -435,6 +458,7 @@ class TaskManager:
         branch: bool = False,
         fail_under: float | None = None,
         cancellation_event: threading.Event | None = None,
+        owner_scope: str | None = None,
     ) -> dict[str, object]:
         selected = self.resolve_execution_profile("run_pytest_coverage", profile)
         return self._run_profile_command(
@@ -447,6 +471,7 @@ class TaskManager:
                 fail_under=fail_under,
             ),
             cancellation_event=cancellation_event,
+            owner_scope=owner_scope,
             result_adapter=adapt_coverage_result,
         )
 
@@ -456,6 +481,7 @@ class TaskManager:
         path: str | None = None,
         *,
         cancellation_event: threading.Event | None = None,
+        owner_scope: str | None = None,
     ) -> dict[str, object]:
         selected = self.resolve_execution_profile("run_python_script", profile)
         argv = self.python_commands.python_script(path)
@@ -464,6 +490,7 @@ class TaskManager:
             "run_python_script",
             argv,
             cancellation_event=cancellation_event,
+            owner_scope=owner_scope,
         )
 
     def run_command(
@@ -474,6 +501,7 @@ class TaskManager:
         cwd: str = ".",
         *,
         cancellation_event: threading.Event | None = None,
+        owner_scope: str | None = None,
     ) -> dict[str, object]:
         """Run a bounded caller argv in an explicitly authorized profile."""
 
@@ -485,6 +513,7 @@ class TaskManager:
             command.argv,
             container_workdir=command.container_workdir,
             cancellation_event=cancellation_event,
+            owner_scope=owner_scope,
         )
 
     def start_command(
@@ -495,6 +524,7 @@ class TaskManager:
         cwd: str = ".",
         *,
         cancellation_event: threading.Event | None = None,
+        owner_scope: str | None = None,
     ) -> dict[str, object]:
         """Start a bounded caller argv through the existing service lifecycle."""
 
@@ -506,6 +536,7 @@ class TaskManager:
             "start_command",
             command.argv,
             mode="service",
+            owner_scope=owner_scope,
         )
         return self._start_service(
             task,
@@ -521,12 +552,15 @@ class TaskManager:
         name: str,
         *,
         cancellation_event: threading.Event | None = None,
+        owner_scope: str | None = None,
     ) -> dict[str, object]:
         """Run one configured run-mode task against a disposable snapshot."""
 
         started = time.monotonic()
         deadline = started + self.configuration.limits.timeout_seconds
-        task, lease = self._begin_start(name, "run", "run_task")
+        task, lease = self._begin_start(
+            name, "run", "run_task", owner_scope=owner_scope
+        )
         return self._run_sync_execution(
             task,
             lease,
@@ -543,12 +577,15 @@ class TaskManager:
         *,
         container_workdir: str = "/workspace",
         cancellation_event: threading.Event | None,
+        owner_scope: str | None = None,
         result_adapter: Callable[[dict[str, object]], dict[str, object]] | None = None,
         snapshot_initializer: Callable[[Path], None] | None = None,
     ) -> dict[str, object]:
         started = time.monotonic()
         deadline = started + self.configuration.limits.timeout_seconds
-        task, lease = self._begin_profile_start(profile_name, tool, argv)
+        task, lease = self._begin_profile_start(
+            profile_name, tool, argv, owner_scope=owner_scope
+        )
         result = self._run_sync_execution(
             task,
             lease,
@@ -576,6 +613,7 @@ class TaskManager:
     ) -> dict[str, object]:
         cancellation = _CombinedCancellation(lease.cancellation, cancellation_event)
         snapshot: WorkspaceSnapshot | None = None
+        artifact_staging: ArtifactStaging | None = None
         try:
             try:
                 snapshot = self._create_snapshot(
@@ -584,6 +622,7 @@ class TaskManager:
                 )
                 if snapshot_initializer is not None:
                     snapshot_initializer(snapshot.path)
+                artifact_staging = ArtifactStaging.create()
             except Exception as exc:
                 self._finish_prestart_failure(
                     lease.execution_id,
@@ -599,6 +638,7 @@ class TaskManager:
                 snapshot_path=snapshot.path,
                 task=task,
                 limits=self.configuration.limits,
+                artifact_path=artifact_staging.path,
                 container_workdir=container_workdir,
                 initial_workspace_bytes=snapshot.total_bytes,
                 started_at=started,
@@ -625,13 +665,35 @@ class TaskManager:
             )
             if state is ExecutionState.CANCELLED:
                 reason = self._cancellation_reason(lease, cancellation_event)
+            artifacts: list[ArtifactRecord] = []
             try:
+                artifacts = self.artifact_store.collect(
+                    lease.execution_id,
+                    artifact_staging.path,
+                    self.configuration.limits,
+                    owner_scope=lease.owner_scope,
+                )
+            except ArtifactLimitExceeded:
+                state = ExecutionState.FAILED
+                reason = ExecutionReason.ARTIFACT_LIMIT_EXCEEDED
+                error_summary = None
+            except ArtifactPolicyViolation:
+                state = ExecutionState.FAILED
+                reason = ExecutionReason.ARTIFACT_POLICY_VIOLATION
+                error_summary = None
+            except ArtifactCollectionError:
+                state = ExecutionState.CRASHED
+                reason = ExecutionReason.ARTIFACT_COLLECTION_FAILED
+                error_summary = "artifact collection failed"
+            try:
+                artifact_staging.cleanup()
+                artifact_staging = None
                 snapshot.cleanup()
                 snapshot = None
             except Exception:
                 state = ExecutionState.CRASHED
                 reason = ExecutionReason.CLEANUP_FAILED
-                error_summary = "snapshot cleanup failed"
+                error_summary = "execution temporary cleanup failed"
             self._complete_execution(
                 lease.execution_id,
                 state,
@@ -644,9 +706,12 @@ class TaskManager:
                 result["status"] = legacy_execution_status(state, reason)
                 result["timed_out"] = state is ExecutionState.TIMED_OUT
             result["execution_id"] = lease.execution_id
+            result["artifacts"] = [_artifact_payload(item) for item in artifacts]
             return result
         finally:
             try:
+                if artifact_staging is not None:
+                    artifact_staging.cleanup()
                 if snapshot is not None:
                     snapshot.cleanup()
             except Exception:
@@ -663,11 +728,14 @@ class TaskManager:
         name: str,
         *,
         cancellation_event: threading.Event | None = None,
+        owner_scope: str | None = None,
     ) -> dict[str, object]:
         """Start one configured service task and retain only bounded logs/state."""
 
         started = time.monotonic()
-        task, lease = self._begin_start(name, "service", "start_task")
+        task, lease = self._begin_start(
+            name, "service", "start_task", owner_scope=owner_scope
+        )
         return self._start_service(
             task,
             lease,
@@ -689,19 +757,23 @@ class TaskManager:
         deadline = started + self.configuration.limits.timeout_seconds
         cancellation = _CombinedCancellation(lease.cancellation, cancellation_event)
         snapshot: WorkspaceSnapshot | None = None
+        artifact_staging: ArtifactStaging | None = None
         workspace_monitor: WorkspaceGrowthMonitor | None = None
+        artifact_monitor: ArtifactGrowthMonitor | None = None
         session: _ServiceSession | None = None
         try:
             snapshot = self._create_snapshot(
                 deadline=deadline,
                 cancellation_event=cancellation,  # type: ignore[arg-type]
             )
+            artifact_staging = ArtifactStaging.create()
             logs = TaskLogBuffer(self.configuration.limits.max_output_bytes)
             request = ContainerRequest(
                 container_name=self._container_name(),
                 snapshot_path=snapshot.path,
                 task=task,
                 limits=self.configuration.limits,
+                artifact_path=artifact_staging.path,
                 container_workdir=container_workdir,
                 initial_workspace_bytes=snapshot.total_bytes,
                 started_at=started,
@@ -712,14 +784,18 @@ class TaskManager:
             )
             self._mark_running(lease.execution_id)
             workspace_monitor = WorkspaceGrowthMonitor(request, handle)
+            artifact_monitor = ArtifactGrowthMonitor(request, handle)
             session = _ServiceSession(
                 execution_id=lease.execution_id,
                 task=task,
                 handle=handle,
                 snapshot=snapshot,
+                artifact_staging=artifact_staging,
                 logs=logs,
                 deadline=deadline,
                 workspace_monitor=workspace_monitor,
+                artifact_monitor=artifact_monitor,
+                owner_scope=lease.owner_scope,
             )
             with self._lock:
                 if self._shutdown:
@@ -730,6 +806,7 @@ class TaskManager:
                 self._sessions[lease.execution_id] = session
                 self._transfer_lease_locked(lease)
             workspace_monitor.start()
+            artifact_monitor.start()
             monitor = threading.Thread(
                 target=self._monitor_service,
                 args=(session,),
@@ -750,11 +827,15 @@ class TaskManager:
                 else:
                     if workspace_monitor is not None:
                         workspace_monitor.stop_and_join()
+                    if artifact_monitor is not None:
+                        artifact_monitor.stop_and_join()
                     if lease.handle is not None:
                         try:
                             lease.handle.stop()
                         finally:
                             lease.handle.close()
+                    if artifact_staging is not None:
+                        artifact_staging.cleanup()
                     if snapshot is not None:
                         snapshot.cleanup()
                     self._finish_prestart_failure(
@@ -801,6 +882,22 @@ class TaskManager:
             "events": [event.model_dump(mode="json") for event in page.events],
             "has_more": page.has_more,
             "history_complete": page.history_complete,
+        }
+
+    def execution_artifacts(
+        self, execution_id: str, *, owner_scope: str | None = None
+    ) -> dict[str, object]:
+        record = self._execution_record(execution_id, id_label="execution_id")
+        if not record.terminal:
+            raise TaskManagerError(
+                "artifacts are available only after execution is terminal"
+            )
+        artifacts = self.artifact_store.list_execution(
+            execution_id, owner_scope=owner_scope
+        )
+        return {
+            "execution_id": execution_id,
+            "artifacts": [_artifact_payload(item) for item in artifacts],
         }
 
     def task_status(self, task_id: str) -> dict[str, object]:
@@ -882,7 +979,12 @@ class TaskManager:
         shutdown_done.set()
 
     def _begin_start(
-        self, name: str, mode: str, tool: str
+        self,
+        name: str,
+        mode: str,
+        tool: str,
+        *,
+        owner_scope: str | None = None,
     ) -> tuple[TaskDefinition, _ExecutionLease]:
         if not isinstance(name, str):
             raise TaskManagerError("task name must be a string")
@@ -903,6 +1005,7 @@ class TaskManager:
                 name=name,
                 tool=tool,
                 mode=ExecutionMode(mode),
+                owner_scope=owner_scope,
             )
 
     def _require_profile(self, name: str, tool: str) -> ExecutionProfile:
@@ -936,6 +1039,7 @@ class TaskManager:
         argv: tuple[str, ...],
         *,
         mode: str = "run",
+        owner_scope: str | None = None,
     ) -> tuple[TaskDefinition, _ExecutionLease]:
         with self._lock:
             profile = self._require_profile(name, tool)
@@ -953,6 +1057,7 @@ class TaskManager:
                 name=task.name,
                 tool=tool,
                 mode=ExecutionMode(mode),
+                owner_scope=owner_scope,
             )
             return task, lease
 
@@ -963,6 +1068,7 @@ class TaskManager:
         name: str,
         tool: str,
         mode: ExecutionMode,
+        owner_scope: str | None = None,
     ) -> _ExecutionLease:
         execution_id = secrets.token_urlsafe(24)
         now = time.time()
@@ -981,7 +1087,7 @@ class TaskManager:
         except (ValueError, ExecutionStoreError) as exc:
             self._capacity.release()
             raise TaskManagerError(f"failed to create execution record: {exc}") from exc
-        lease = _ExecutionLease(execution_id)
+        lease = _ExecutionLease(execution_id, owner_scope=owner_scope)
         self._starting[execution_id] = lease
         return lease
 
@@ -1048,10 +1154,15 @@ class TaskManager:
         except Exception:
             pass
         try:
+            session.artifact_monitor.stop_and_join()
+        except Exception:
+            pass
+        try:
             session.handle.close()
         except Exception:
             pass
         try:
+            session.artifact_staging.cleanup()
             session.snapshot.cleanup()
         finally:
             self._crash_if_unfinished(
@@ -1241,6 +1352,12 @@ class TaskManager:
             if session.workspace_monitor.exceeded.is_set():
                 state = ExecutionState.FAILED
                 reason = ExecutionReason.WORKSPACE_LIMIT_EXCEEDED
+            elif session.artifact_monitor.policy_violation.is_set():
+                state = ExecutionState.FAILED
+                reason = ExecutionReason.ARTIFACT_POLICY_VIOLATION
+            elif session.artifact_monitor.limit_exceeded.is_set():
+                state = ExecutionState.FAILED
+                reason = ExecutionReason.ARTIFACT_LIMIT_EXCEEDED
             elif timed_out:
                 state = ExecutionState.TIMED_OUT
                 reason = ExecutionReason.TIMEOUT
@@ -1264,15 +1381,19 @@ class TaskManager:
             error_summary = str(exc)
         finally:
             cleanup_failed = False
-            try:
-                session.workspace_monitor.stop_and_join()
-            except Exception as exc:
-                cleanup_failed = True
-                session.logs.append_stderr(
-                    f"workspace monitor cleanup failure: {exc}".encode(
-                        "utf-8", errors="replace"
+            for label, monitor in (
+                ("workspace", session.workspace_monitor),
+                ("artifact", session.artifact_monitor),
+            ):
+                try:
+                    monitor.stop_and_join()
+                except Exception as exc:
+                    cleanup_failed = True
+                    session.logs.append_stderr(
+                        f"{label} monitor cleanup failure: {exc}".encode(
+                            "utf-8", errors="replace"
+                        )
                     )
-                )
             try:
                 session.handle.close()
             except Exception as exc:
@@ -1283,11 +1404,33 @@ class TaskManager:
                     )
                 )
             try:
+                self.artifact_store.collect(
+                    session.execution_id,
+                    session.artifact_staging.path,
+                    self.configuration.limits,
+                    owner_scope=session.owner_scope,
+                )
+            except ArtifactLimitExceeded:
+                state = ExecutionState.FAILED
+                reason = ExecutionReason.ARTIFACT_LIMIT_EXCEEDED
+                error_summary = None
+            except ArtifactPolicyViolation:
+                state = ExecutionState.FAILED
+                reason = ExecutionReason.ARTIFACT_POLICY_VIOLATION
+                error_summary = None
+            except ArtifactCollectionError:
+                state = ExecutionState.CRASHED
+                reason = ExecutionReason.ARTIFACT_COLLECTION_FAILED
+                error_summary = "artifact collection failed"
+            try:
+                session.artifact_staging.cleanup()
                 session.snapshot.cleanup()
             except Exception as exc:
                 cleanup_failed = True
                 session.logs.append_stderr(
-                    f"snapshot cleanup failure: {exc}".encode("utf-8", errors="replace")
+                    f"execution temporary cleanup failure: {exc}".encode(
+                        "utf-8", errors="replace"
+                    )
                 )
             if cleanup_failed:
                 state = ExecutionState.CRASHED
@@ -1318,6 +1461,12 @@ class TaskManager:
         ]
         for execution_id in completed[:-_MAX_RETAINED_SERVICES]:
             self._sessions.pop(execution_id, None)
+
+
+def _artifact_payload(record: ArtifactRecord) -> dict[str, object]:
+    payload = record.model_dump(mode="json")
+    payload["resource_uri"] = ARTIFACT_URI_PREFIX + record.artifact_id
+    return payload
 
 
 def _bounded_error_summary(value: str | None) -> str | None:
