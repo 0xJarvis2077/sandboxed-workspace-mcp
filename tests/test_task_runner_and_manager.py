@@ -17,7 +17,13 @@ from unittest.mock import patch
 from _mcp_assertions import require_call_tool_result, require_structured_content
 
 from workspace_guard_mcp.config import Settings
-from workspace_guard_mcp.execution import ExecutionReason, ExecutionState
+from workspace_guard_mcp.execution import (
+    ExecutionKind,
+    ExecutionMode,
+    ExecutionReason,
+    ExecutionRecord,
+    ExecutionState,
+)
 from workspace_guard_mcp.execution_store import InMemoryExecutionStore
 from workspace_guard_mcp.server import create_server
 from workspace_guard_mcp.task_config import (
@@ -1436,6 +1442,39 @@ class TaskManagerTests(unittest.TestCase):
                     ValueError, "log capacity must be a positive integer"
                 ):
                     TaskLogBuffer(capacity)  # type: ignore[arg-type]
+
+    def test_task_manager_reconciles_generic_execution_store(self) -> None:
+        store = InMemoryExecutionStore()
+        store.create(
+            ExecutionRecord(
+                execution_id="old-running",
+                kind=ExecutionKind.TASK,
+                name="old",
+                tool="run_task",
+                mode=ExecutionMode.RUN,
+                state=ExecutionState.STARTING,
+                created_at=1.0,
+                updated_at=1.0,
+            )
+        )
+        store.transition(
+            "old-running",
+            {ExecutionState.STARTING},
+            ExecutionState.RUNNING,
+            updated_at=2.0,
+        )
+
+        TaskManager(
+            self.settings,
+            configuration(self.base),
+            backend=FakeBackend(),
+            execution_store=store,
+        )
+
+        reconciled = store.get("old-running")
+        self.assertEqual(reconciled.state, ExecutionState.CRASHED)
+        self.assertEqual(reconciled.reason, ExecutionReason.SERVER_RESTARTED)
+        self.assertIsNotNone(reconciled.finished_at)
 
     def test_authorized_sync_executions_have_unique_ids_and_canonical_records(
         self,
