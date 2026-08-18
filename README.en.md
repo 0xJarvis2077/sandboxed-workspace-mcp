@@ -277,7 +277,10 @@ Common settings:
 | `--block-path` | Add a root-relative blocked glob |
 | `--ignore-dir` | Add a directory basename excluded from automatic scans |
 | `--task-config` / `WORKSPACE_GUARD_MCP_TASK_CONFIG` | Trusted task JSON outside the workspace |
+| `--execution-db` / `WORKSPACE_GUARD_MCP_EXECUTION_DB` | Optional ExecutionRecord SQLite database outside the workspace |
 | `--transport` | `stdio` or `streamable-http` |
+
+WorkspaceGuard can optionally persist bounded, public-safe `ExecutionRecord` metadata to an operator-controlled SQLite database outside the workspace. Persistence preserves execution history across server restarts, but it never scans for, reconnects to, or adopts previously running containers. Unfinished records left by an earlier process are reconciled to `CRASHED / SERVER_RESTARTED` on startup.
 
 `stdio` is intended for local clients. Streamable HTTP listens on `127.0.0.1:3001/mcp` by default; non-loopback or public deployments need explicit network, Host/Origin, HTTPS, and external OAuth/OIDC configuration. `--allow-unauthenticated-http` is for temporary development only. See [SECURITY.md](SECURITY.md) for the full OAuth topology and RFC 9728 details.
 
@@ -300,8 +303,10 @@ src/workspace_guard_mcp/
   pytest_debug_plugin.py # Snapshot-injected controlled pytest failure collector
   command_execution.py  # Generic argv and workspace cwd validation
   task_snapshot.py      # Filtered bounded temporary snapshots
+  execution.py          # Canonical Execution state/reason/record domain model
+  execution_store.py    # In-memory / SQLite execution metadata stores
   task_runner.py        # Docker/Podman argv, pipes, and synchronous execution
-  task_manager.py       # Concurrency, service lifecycle, and log ring buffer
+  task_manager.py       # Execution lifecycle, concurrency, and service sessions
 tests/                   # Unit, boundary, and transport regression tests
 examples/                # Digest-based config templates and task image
 SECURITY.md              # Security boundary, threat model, and residual risk

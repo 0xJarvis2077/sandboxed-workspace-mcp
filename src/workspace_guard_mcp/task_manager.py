@@ -19,6 +19,23 @@ from .diagnostics import (
     adapt_ruff_result,
     capability_result,
 )
+from .execution import (
+    ExecutionKind,
+    ExecutionMode,
+    ExecutionReason,
+    ExecutionRecord,
+    ExecutionState,
+    legacy_execution_status,
+)
+from .execution_store import (
+    ExecutionConflictError,
+    ExecutionStore,
+    ExecutionStoreError,
+    InMemoryExecutionStore,
+    SqliteExecutionStore,
+    UnknownExecutionError,
+    reconcile_unfinished_executions,
+)
 from .pytest_debug_plugin import (
     DEBUG_PLUGIN_FILENAME,
     build_pytest_debug_plugin_source,
@@ -159,27 +176,21 @@ class TaskLogBuffer:
 
 
 @dataclass(slots=True)
-class _ServiceRecord:
-    task_id: str
+class _ServiceSession:
+    execution_id: str
     task: TaskDefinition
     handle: ContainerHandle
     snapshot: WorkspaceSnapshot
     logs: TaskLogBuffer
-    started: float
     deadline: float
     workspace_monitor: WorkspaceGrowthMonitor
-    status: str = "running"
-    exit_code: int | None = None
-    timed_out: bool = False
-    stop_requested: bool = False
-    ended: float | None = None
     done: threading.Event = field(default_factory=threading.Event)
     capacity_released: bool = False
 
 
 @dataclass(slots=True)
-class _StartLease:
-    token: str
+class _ExecutionLease:
+    execution_id: str
     cancellation: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
     handle: ContainerHandle | None = None
@@ -201,7 +212,7 @@ class _LeaseBackend:
     def __init__(
         self,
         manager: TaskManager,
-        lease: _StartLease,
+        lease: _ExecutionLease,
         cancellation: _CombinedCancellation | None = None,
     ) -> None:
         self.manager = manager
@@ -230,18 +241,22 @@ class TaskManager:
         configuration: TaskConfiguration,
         *,
         backend: ContainerBackend | None = None,
+        execution_store: ExecutionStore | None = None,
     ) -> None:
         self.settings = settings
         self.configuration = configuration
         self.backend = backend or CliContainerBackend(configuration.runtime)
+        self.execution_store = execution_store or InMemoryExecutionStore()
+        if isinstance(self.execution_store, SqliteExecutionStore):
+            reconcile_unfinished_executions(self.execution_store)
         self.python_commands = PythonCommandCompiler(settings)
         self.commands = CommandCompiler(settings)
         self._capacity = threading.BoundedSemaphore(
             configuration.limits.max_concurrent_tasks
         )
         self._instance_token = secrets.token_hex(8)
-        self._records: dict[str, _ServiceRecord] = {}
-        self._starting: dict[str, _StartLease] = {}
+        self._sessions: dict[str, _ServiceSession] = {}
+        self._starting: dict[str, _ExecutionLease] = {}
         self._lock = threading.RLock()
         self._shutdown = False
         self._shutdown_done = threading.Event()
@@ -513,34 +528,14 @@ class TaskManager:
 
         started = time.monotonic()
         deadline = started + self.configuration.limits.timeout_seconds
-        task, lease = self._begin_start(name, "run")
-        cancellation = _CombinedCancellation(lease.cancellation, cancellation_event)
-        snapshot: WorkspaceSnapshot | None = None
-        try:
-            snapshot = self._create_snapshot(
-                deadline=deadline,
-                cancellation_event=cancellation,  # type: ignore[arg-type]
-            )
-            request = ContainerRequest(
-                container_name=self._container_name(),
-                snapshot_path=snapshot.path,
-                task=task,
-                limits=self.configuration.limits,
-                initial_workspace_bytes=snapshot.total_bytes,
-                started_at=started,
-                deadline=deadline,
-            )
-            return run_container_task(
-                _LeaseBackend(self, lease, cancellation),
-                request,
-                cancellation,  # type: ignore[arg-type]
-            ).as_dict()
-        finally:
-            try:
-                if snapshot is not None:
-                    snapshot.cleanup()
-            finally:
-                self._finish_lease(lease)
+        task, lease = self._begin_start(name, "run", "run_task")
+        return self._run_sync_execution(
+            task,
+            lease,
+            started=started,
+            deadline=deadline,
+            cancellation_event=cancellation_event,
+        )
 
     def _run_profile_command(
         self,
@@ -556,15 +551,51 @@ class TaskManager:
         started = time.monotonic()
         deadline = started + self.configuration.limits.timeout_seconds
         task, lease = self._begin_profile_start(profile_name, tool, argv)
+        result = self._run_sync_execution(
+            task,
+            lease,
+            started=started,
+            deadline=deadline,
+            cancellation_event=cancellation_event,
+            container_workdir=container_workdir,
+            snapshot_initializer=snapshot_initializer,
+        )
+        result = capability_result(result)
+        if result_adapter is not None:
+            result = result_adapter(result)
+        return result
+
+    def _run_sync_execution(
+        self,
+        task: TaskDefinition,
+        lease: _ExecutionLease,
+        *,
+        started: float,
+        deadline: float,
+        cancellation_event: threading.Event | None,
+        container_workdir: str = "/workspace",
+        snapshot_initializer: Callable[[Path], None] | None = None,
+    ) -> dict[str, object]:
         cancellation = _CombinedCancellation(lease.cancellation, cancellation_event)
         snapshot: WorkspaceSnapshot | None = None
         try:
-            snapshot = self._create_snapshot(
-                deadline=deadline,
-                cancellation_event=cancellation,  # type: ignore[arg-type]
-            )
-            if snapshot_initializer is not None:
-                snapshot_initializer(snapshot.path)
+            try:
+                snapshot = self._create_snapshot(
+                    deadline=deadline,
+                    cancellation_event=cancellation,  # type: ignore[arg-type]
+                )
+                if snapshot_initializer is not None:
+                    snapshot_initializer(snapshot.path)
+            except Exception as exc:
+                self._finish_prestart_failure(
+                    lease.execution_id,
+                    lease=lease,
+                    cancellation_event=cancellation_event,
+                    deadline=deadline,
+                    error_summary=str(exc),
+                )
+                raise
+
             request = ContainerRequest(
                 container_name=self._container_name(),
                 snapshot_path=snapshot.path,
@@ -575,19 +606,57 @@ class TaskManager:
                 started_at=started,
                 deadline=deadline,
             )
-            result = run_container_task(
+
+            def mark_cancelling() -> None:
+                self._request_cancellation(
+                    lease.execution_id,
+                    self._cancellation_reason(lease, cancellation_event),
+                )
+
+            task_result = run_container_task(
                 _LeaseBackend(self, lease, cancellation),
                 request,
                 cancellation,  # type: ignore[arg-type]
-            ).as_dict()
-            result = capability_result(result)
-            if result_adapter is not None:
-                result = result_adapter(result)
+                on_started=lambda: self._mark_running(lease.execution_id),
+                on_cancelling=mark_cancelling,
+            )
+            state = task_result.state
+            reason = task_result.reason
+            error_summary = (
+                task_result.stderr if state is ExecutionState.CRASHED else None
+            )
+            if state is ExecutionState.CANCELLED:
+                reason = self._cancellation_reason(lease, cancellation_event)
+            try:
+                snapshot.cleanup()
+                snapshot = None
+            except Exception:
+                state = ExecutionState.CRASHED
+                reason = ExecutionReason.CLEANUP_FAILED
+                error_summary = "snapshot cleanup failed"
+            self._complete_execution(
+                lease.execution_id,
+                state,
+                reason=reason,
+                exit_code=task_result.exit_code,
+                error_summary=error_summary,
+            )
+            result = task_result.as_dict()
+            if state is not task_result.state:
+                result["status"] = legacy_execution_status(state, reason)
+                result["timed_out"] = state is ExecutionState.TIMED_OUT
+            result["execution_id"] = lease.execution_id
             return result
         finally:
             try:
                 if snapshot is not None:
                     snapshot.cleanup()
+            except Exception:
+                self._crash_if_unfinished(
+                    lease.execution_id,
+                    ExecutionReason.CLEANUP_FAILED,
+                    "snapshot cleanup failed",
+                )
             finally:
                 self._finish_lease(lease)
 
@@ -600,7 +669,7 @@ class TaskManager:
         """Start one configured service task and retain only bounded logs/state."""
 
         started = time.monotonic()
-        task, lease = self._begin_start(name, "service")
+        task, lease = self._begin_start(name, "service", "start_task")
         return self._start_service(
             task,
             lease,
@@ -612,7 +681,7 @@ class TaskManager:
     def _start_service(
         self,
         task: TaskDefinition,
-        lease: _StartLease,
+        lease: _ExecutionLease,
         *,
         started: float,
         cancellation_event: threading.Event | None,
@@ -623,13 +692,12 @@ class TaskManager:
         cancellation = _CombinedCancellation(lease.cancellation, cancellation_event)
         snapshot: WorkspaceSnapshot | None = None
         workspace_monitor: WorkspaceGrowthMonitor | None = None
-        record: _ServiceRecord | None = None
+        session: _ServiceSession | None = None
         try:
             snapshot = self._create_snapshot(
                 deadline=deadline,
                 cancellation_event=cancellation,  # type: ignore[arg-type]
             )
-            task_id = secrets.token_urlsafe(24)
             logs = TaskLogBuffer(self.configuration.limits.max_output_bytes)
             request = ContainerRequest(
                 container_name=self._container_name(),
@@ -644,35 +712,43 @@ class TaskManager:
             handle = _LeaseBackend(self, lease, cancellation).start(
                 request, logs.append_stdout, logs.append_stderr
             )
+            self._mark_running(lease.execution_id)
             workspace_monitor = WorkspaceGrowthMonitor(request, handle)
-            record = _ServiceRecord(
-                task_id=task_id,
+            session = _ServiceSession(
+                execution_id=lease.execution_id,
                 task=task,
                 handle=handle,
                 snapshot=snapshot,
                 logs=logs,
-                started=started,
                 deadline=deadline,
                 workspace_monitor=workspace_monitor,
             )
             with self._lock:
                 if self._shutdown:
+                    self._request_cancellation(
+                        lease.execution_id, ExecutionReason.SERVER_SHUTDOWN
+                    )
                     raise TaskManagerError("task manager is shutting down")
-                self._records[task_id] = record
+                self._sessions[lease.execution_id] = session
                 self._transfer_lease_locked(lease)
             workspace_monitor.start()
             monitor = threading.Thread(
                 target=self._monitor_service,
-                args=(record,),
-                name=f"workspace-guard-mcp-service-{task_id[:8]}",
+                args=(session,),
+                name=f"workspace-guard-mcp-service-{lease.execution_id[:8]}",
                 daemon=True,
             )
             monitor.start()
-            return {"task_id": task_id, "name": task.name, "status": "running"}
+            return {
+                "task_id": lease.execution_id,
+                "execution_id": lease.execution_id,
+                "name": task.name,
+                "status": "running",
+            }
         except BaseException as exc:
             try:
-                if record is not None and lease.capacity_transferred:
-                    self._rollback_service_start(record)
+                if session is not None and lease.capacity_transferred:
+                    self._rollback_service_start(session)
                 else:
                     if workspace_monitor is not None:
                         workspace_monitor.stop_and_join()
@@ -683,6 +759,13 @@ class TaskManager:
                             lease.handle.close()
                     if snapshot is not None:
                         snapshot.cleanup()
+                    self._finish_prestart_failure(
+                        lease.execution_id,
+                        lease=lease,
+                        cancellation_event=cancellation_event,
+                        deadline=deadline,
+                        error_summary=str(exc),
+                    )
             finally:
                 self._finish_lease(lease)
             if isinstance(exc, TaskManagerError):
@@ -694,81 +777,86 @@ class TaskManager:
             ) from exc
 
     def task_status(self, task_id: str) -> dict[str, object]:
-        record = self._record(task_id)
+        record = self._service_execution_record(task_id)
         with self._lock:
-            ended = record.ended
-            duration = (ended or time.monotonic()) - record.started
-            return {
-                "task_id": record.task_id,
-                "name": record.task.name,
-                "status": record.status,
-                "exit_code": record.exit_code,
-                "timed_out": record.timed_out,
-                "truncated": record.logs.dropped,
-                "duration_ms": max(0, int(duration * 1000)),
-            }
+            session = self._sessions.get(task_id)
+            truncated = session.logs.dropped if session is not None else False
+        started = record.started_at or record.created_at
+        ended = record.finished_at or time.time()
+        return {
+            "task_id": record.execution_id,
+            "execution_id": record.execution_id,
+            "name": record.name,
+            "status": legacy_execution_status(
+                record.state, record.reason, service=True
+            ),
+            "exit_code": record.exit_code,
+            "timed_out": record.state is ExecutionState.TIMED_OUT,
+            "truncated": truncated,
+            "duration_ms": max(0, int((ended - started) * 1000)),
+        }
 
     def task_logs(self, task_id: str, cursor: int = 0) -> dict[str, object]:
-        return self._record(task_id).logs.read(cursor)
+        return self._session(task_id).logs.read(cursor)
 
     def stop_task(self, task_id: str) -> dict[str, object]:
-        record = self._record(task_id)
-        with self._lock:
-            if record.status not in {"running", "stopping"}:
-                return self.task_status(task_id)
-            record.stop_requested = True
-            record.status = "stopping"
-        record.handle.stop()
-        if not record.done.wait(timeout=10):
+        record = self._service_execution_record(task_id)
+        if record.terminal:
+            return self.task_status(task_id)
+        session = self._session(task_id)
+        self._request_cancellation(task_id, ExecutionReason.USER_CANCELLED)
+        session.handle.stop()
+        if not session.done.wait(timeout=10):
             raise TaskManagerError("service task did not stop within 10 seconds")
         return self.task_status(task_id)
 
     def shutdown(self) -> None:
-        """Best-effort stop only service containers tracked by this instance."""
+        """Cancel only executions whose runtime ownership belongs to this process."""
 
         with self._lock:
             if self._shutdown:
                 shutdown_done = self._shutdown_done
                 first_shutdown = False
-                leases: list[_StartLease] = []
-                records: list[_ServiceRecord] = []
+                leases: list[_ExecutionLease] = []
+                sessions: list[_ServiceSession] = []
             else:
                 first_shutdown = True
                 shutdown_done = self._shutdown_done
                 self._shutdown = True
                 leases = list(self._starting.values())
-                records = [
-                    record
-                    for record in self._records.values()
-                    if record.status in {"running", "stopping"}
-                ]
+                sessions = list(self._sessions.values())
                 for lease in leases:
                     lease.cancellation.set()
-                for record in records:
-                    record.stop_requested = True
-                    record.status = "stopping"
         if not first_shutdown:
             shutdown_done.wait()
             return
 
         for lease in leases:
+            self._request_cancellation(
+                lease.execution_id, ExecutionReason.SERVER_SHUTDOWN
+            )
             if lease.handle is not None:
                 try:
                     lease.handle.stop()
                 except Exception:
                     pass
-        for record in records:
+        for session in sessions:
+            self._request_cancellation(
+                session.execution_id, ExecutionReason.SERVER_SHUTDOWN
+            )
             try:
-                record.handle.stop()
+                session.handle.stop()
             except Exception:
                 pass
         for lease in leases:
             lease.done.wait()
-        for record in records:
-            record.done.wait()
+        for session in sessions:
+            session.done.wait()
         shutdown_done.set()
 
-    def _begin_start(self, name: str, mode: str) -> tuple[TaskDefinition, _StartLease]:
+    def _begin_start(
+        self, name: str, mode: str, tool: str
+    ) -> tuple[TaskDefinition, _ExecutionLease]:
         if not isinstance(name, str):
             raise TaskManagerError("task name must be a string")
         with self._lock:
@@ -783,9 +871,12 @@ class TaskManager:
                 )
             if not self._capacity.acquire(blocking=False):
                 raise TaskManagerError("maximum concurrent task limit has been reached")
-            lease = _StartLease(secrets.token_urlsafe(18))
-            self._starting[lease.token] = lease
-            return task, lease
+            return task, self._create_execution_lease(
+                kind=ExecutionKind.TASK,
+                name=name,
+                tool=tool,
+                mode=ExecutionMode(mode),
+            )
 
     def _require_profile(self, name: str, tool: str) -> ExecutionProfile:
         if not isinstance(name, str):
@@ -818,77 +909,272 @@ class TaskManager:
         argv: tuple[str, ...],
         *,
         mode: str = "run",
-    ) -> tuple[TaskDefinition, _StartLease]:
+    ) -> tuple[TaskDefinition, _ExecutionLease]:
         with self._lock:
             profile = self._require_profile(name, tool)
             if not self._capacity.acquire(blocking=False):
                 raise TaskManagerError("maximum concurrent task limit has been reached")
-            lease = _StartLease(secrets.token_urlsafe(18))
-            self._starting[lease.token] = lease
-            return (
-                TaskDefinition(
-                    name=f"{name}-{tool}",
-                    mode=mode,
-                    image=profile.image,
-                    argv=argv,
-                    workspace_access=profile.workspace_access,
-                ),
-                lease,
+            task = TaskDefinition(
+                name=f"{name}-{tool}",
+                mode=mode,
+                image=profile.image,
+                argv=argv,
+                workspace_access=profile.workspace_access,
             )
+            lease = self._create_execution_lease(
+                kind=ExecutionKind.PROFILE,
+                name=task.name,
+                tool=tool,
+                mode=ExecutionMode(mode),
+            )
+            return task, lease
 
-    def _finish_lease(self, lease: _StartLease) -> None:
+    def _create_execution_lease(
+        self,
+        *,
+        kind: ExecutionKind,
+        name: str,
+        tool: str,
+        mode: ExecutionMode,
+    ) -> _ExecutionLease:
+        execution_id = secrets.token_urlsafe(24)
+        now = time.time()
+        try:
+            record = ExecutionRecord(
+                execution_id=execution_id,
+                kind=kind,
+                name=name,
+                tool=tool,
+                mode=mode,
+                state=ExecutionState.STARTING,
+                created_at=now,
+                updated_at=now,
+            )
+            self.execution_store.create(record)
+        except (ValueError, ExecutionStoreError) as exc:
+            self._capacity.release()
+            raise TaskManagerError(f"failed to create execution record: {exc}") from exc
+        lease = _ExecutionLease(execution_id)
+        self._starting[execution_id] = lease
+        return lease
+
+    def _finish_lease(self, lease: _ExecutionLease) -> None:
         release_capacity = False
         with self._lock:
             if lease.finished:
                 return
             lease.finished = True
-            self._starting.pop(lease.token, None)
+            self._starting.pop(lease.execution_id, None)
             release_capacity = not lease.capacity_transferred
         if release_capacity:
             self._capacity.release()
         lease.done.set()
 
-    def _transfer_lease_locked(self, lease: _StartLease) -> None:
+    def _transfer_lease_locked(self, lease: _ExecutionLease) -> None:
         lease.capacity_transferred = True
         lease.finished = True
-        self._starting.pop(lease.token, None)
+        self._starting.pop(lease.execution_id, None)
         lease.done.set()
 
-    def _record(self, task_id: str) -> _ServiceRecord:
-        if not isinstance(task_id, str) or not task_id:
+    def _execution_record(self, execution_id: str) -> ExecutionRecord:
+        if not isinstance(execution_id, str) or not execution_id:
             raise TaskManagerError("task_id must be a non-empty manager-issued ID")
-        with self._lock:
-            record = self._records.get(task_id)
-        if record is None:
+        try:
+            return self.execution_store.get(execution_id)
+        except UnknownExecutionError as exc:
+            raise TaskManagerError("unknown task_id for this server instance") from exc
+        except ExecutionStoreError as exc:
+            raise TaskManagerError(f"failed to read execution record: {exc}") from exc
+
+    def _service_execution_record(self, execution_id: str) -> ExecutionRecord:
+        record = self._execution_record(execution_id)
+        if record.mode is not ExecutionMode.SERVICE:
             raise TaskManagerError("unknown task_id for this server instance")
         return record
 
-    def _rollback_service_start(self, record: _ServiceRecord) -> None:
-        """Release all ownership transferred before monitor startup failed."""
+    def _session(self, execution_id: str) -> _ServiceSession:
+        self._service_execution_record(execution_id)
+        with self._lock:
+            session = self._sessions.get(execution_id)
+        if session is None:
+            raise TaskManagerError("service runtime session is no longer available")
+        return session
+
+    def _rollback_service_start(self, session: _ServiceSession) -> None:
+        """Release runtime ownership transferred before monitor startup failed."""
 
         with self._lock:
-            if self._records.get(record.task_id) is record:
-                self._records.pop(record.task_id)
-            record.stop_requested = True
-            record.status = "failed"
-            record.ended = time.monotonic()
-            release_capacity = not record.capacity_released
-            record.capacity_released = True
+            if self._sessions.get(session.execution_id) is session:
+                self._sessions.pop(session.execution_id)
+            release_capacity = not session.capacity_released
+            session.capacity_released = True
         try:
-            record.handle.stop()
-        except Exception:
-            pass
-        record.workspace_monitor.stop_and_join()
-        try:
-            record.handle.close()
+            session.handle.stop()
         except Exception:
             pass
         try:
-            record.snapshot.cleanup()
+            session.workspace_monitor.stop_and_join()
+        except Exception:
+            pass
+        try:
+            session.handle.close()
+        except Exception:
+            pass
+        try:
+            session.snapshot.cleanup()
         finally:
+            self._crash_if_unfinished(
+                session.execution_id,
+                ExecutionReason.RUNTIME_MONITOR_FAILED,
+                "service monitor failed to start",
+            )
             if release_capacity:
                 self._capacity.release()
-            record.done.set()
+            session.done.set()
+
+    def _mark_running(self, execution_id: str) -> None:
+        try:
+            self.execution_store.transition(
+                execution_id,
+                {ExecutionState.STARTING},
+                ExecutionState.RUNNING,
+                started_at=time.time(),
+            )
+        except ExecutionStoreError as exc:
+            raise TaskManagerError(f"failed to mark execution running: {exc}") from exc
+
+    def _request_cancellation(
+        self, execution_id: str, reason: ExecutionReason
+    ) -> ExecutionRecord:
+        record = self._execution_record(execution_id)
+        if record.terminal or record.state is ExecutionState.CANCELLING:
+            return record
+        if record.state not in {ExecutionState.STARTING, ExecutionState.RUNNING}:
+            return record
+        try:
+            return self.execution_store.transition(
+                execution_id,
+                {record.state},
+                ExecutionState.CANCELLING,
+                reason=reason,
+            )
+        except ExecutionConflictError:
+            return self._execution_record(execution_id)
+        except ExecutionStoreError as exc:
+            raise TaskManagerError(f"failed to cancel execution: {exc}") from exc
+
+    def _complete_execution(
+        self,
+        execution_id: str,
+        state: ExecutionState,
+        *,
+        reason: ExecutionReason | None = None,
+        exit_code: int | None = None,
+        error_summary: str | None = None,
+    ) -> ExecutionRecord:
+        record = self._execution_record(execution_id)
+        if record.terminal:
+            return record
+        if (
+            record.state is ExecutionState.CANCELLING
+            and state is not ExecutionState.TIMED_OUT
+        ):
+            state = ExecutionState.CANCELLED
+            reason = record.reason or reason
+        try:
+            return self.execution_store.transition(
+                execution_id,
+                {record.state},
+                state,
+                reason=reason,
+                exit_code=exit_code,
+                error_summary=_bounded_error_summary(error_summary),
+                finished_at=time.time(),
+            )
+        except ExecutionConflictError as conflict:
+            current = self._execution_record(execution_id)
+            if current.terminal:
+                return current
+            if current.state is ExecutionState.CANCELLING:
+                return self.execution_store.transition(
+                    execution_id,
+                    {ExecutionState.CANCELLING},
+                    ExecutionState.CANCELLED,
+                    reason=current.reason or reason,
+                    exit_code=exit_code,
+                    finished_at=time.time(),
+                )
+            raise TaskManagerError(
+                "execution state changed during completion"
+            ) from conflict
+        except ExecutionStoreError as exc:
+            raise TaskManagerError(f"failed to complete execution: {exc}") from exc
+
+    def _finish_prestart_failure(
+        self,
+        execution_id: str,
+        *,
+        lease: _ExecutionLease,
+        cancellation_event: threading.Event | None,
+        deadline: float,
+        error_summary: str,
+    ) -> None:
+        if lease.cancellation.is_set() or self._shutdown:
+            self._request_cancellation(execution_id, ExecutionReason.SERVER_SHUTDOWN)
+            self._complete_execution(
+                execution_id,
+                ExecutionState.CANCELLED,
+                reason=ExecutionReason.SERVER_SHUTDOWN,
+            )
+            return
+        if cancellation_event is not None and cancellation_event.is_set():
+            self._request_cancellation(execution_id, ExecutionReason.CLIENT_CANCELLED)
+            self._complete_execution(
+                execution_id,
+                ExecutionState.CANCELLED,
+                reason=ExecutionReason.CLIENT_CANCELLED,
+            )
+            return
+        if time.monotonic() >= deadline:
+            self._complete_execution(
+                execution_id,
+                ExecutionState.TIMED_OUT,
+                reason=ExecutionReason.TIMEOUT,
+            )
+            return
+        self._complete_execution(
+            execution_id,
+            ExecutionState.CRASHED,
+            reason=ExecutionReason.RUNTIME_START_FAILED,
+            error_summary=error_summary,
+        )
+
+    def _cancellation_reason(
+        self,
+        lease: _ExecutionLease,
+        cancellation_event: threading.Event | None,
+    ) -> ExecutionReason:
+        if lease.cancellation.is_set() or self._shutdown:
+            return ExecutionReason.SERVER_SHUTDOWN
+        if cancellation_event is not None and cancellation_event.is_set():
+            return ExecutionReason.CLIENT_CANCELLED
+        return ExecutionReason.CLIENT_CANCELLED
+
+    def _crash_if_unfinished(
+        self,
+        execution_id: str,
+        reason: ExecutionReason,
+        error_summary: str,
+    ) -> None:
+        record = self._execution_record(execution_id)
+        if record.terminal:
+            return
+        self._complete_execution(
+            execution_id,
+            ExecutionState.CRASHED,
+            reason=reason,
+            error_summary=error_summary,
+        )
 
     def _create_snapshot(
         self,
@@ -903,75 +1189,111 @@ class TaskManager:
     def _container_name(self) -> str:
         return f"workspace-guard-mcp-{self._instance_token}-{secrets.token_hex(8)}"
 
-    def _monitor_service(self, record: _ServiceRecord) -> None:
+    def _monitor_service(self, session: _ServiceSession) -> None:
+        exit_code: int | None = None
+        state = ExecutionState.FAILED
+        reason: ExecutionReason | None = None
+        error_summary: str | None = None
+        timed_out = False
         try:
             try:
-                remaining = max(0, record.deadline - time.monotonic())
-                exit_code = record.handle.wait(timeout=remaining)
+                remaining = max(0, session.deadline - time.monotonic())
+                exit_code = session.handle.wait(timeout=remaining)
             except TimeoutError:
-                with self._lock:
-                    record.timed_out = True
-                record.handle.stop()
+                timed_out = True
+                session.handle.stop()
                 try:
-                    exit_code = record.handle.wait(timeout=5)
+                    exit_code = session.handle.wait(timeout=5)
                 except TimeoutError:
                     exit_code = None
-            with self._lock:
-                record.exit_code = exit_code
-                if record.workspace_monitor.exceeded.is_set():
-                    record.status = "workspace_limit_exceeded"
-                elif record.timed_out:
-                    record.status = "timed_out"
-                elif record.stop_requested:
-                    record.status = "stopped"
-                elif exit_code == 0:
-                    record.status = "succeeded"
-                else:
-                    record.status = "failed"
+            current = self._execution_record(session.execution_id)
+            if session.workspace_monitor.exceeded.is_set():
+                state = ExecutionState.FAILED
+                reason = ExecutionReason.WORKSPACE_LIMIT_EXCEEDED
+            elif timed_out:
+                state = ExecutionState.TIMED_OUT
+                reason = ExecutionReason.TIMEOUT
+            elif current.state is ExecutionState.CANCELLING:
+                state = ExecutionState.CANCELLED
+                reason = current.reason
+            elif exit_code == 0:
+                state = ExecutionState.SUCCEEDED
+            else:
+                state = ExecutionState.FAILED
         except Exception as exc:
             try:
-                record.handle.stop()
+                session.handle.stop()
             except Exception:
                 pass
-            record.logs.append_stderr(
+            session.logs.append_stderr(
                 f"container monitor failure: {exc}".encode("utf-8", errors="replace")
             )
-            with self._lock:
-                record.status = "failed"
+            state = ExecutionState.CRASHED
+            reason = ExecutionReason.RUNTIME_MONITOR_FAILED
+            error_summary = str(exc)
         finally:
-            record.workspace_monitor.stop_and_join()
+            cleanup_failed = False
             try:
-                record.handle.close()
+                session.workspace_monitor.stop_and_join()
             except Exception as exc:
-                record.logs.append_stderr(
+                cleanup_failed = True
+                session.logs.append_stderr(
+                    f"workspace monitor cleanup failure: {exc}".encode(
+                        "utf-8", errors="replace"
+                    )
+                )
+            try:
+                session.handle.close()
+            except Exception as exc:
+                cleanup_failed = True
+                session.logs.append_stderr(
                     f"container cleanup failure: {exc}".encode(
                         "utf-8", errors="replace"
                     )
                 )
             try:
-                record.snapshot.cleanup()
+                session.snapshot.cleanup()
             except Exception as exc:
-                record.logs.append_stderr(
+                cleanup_failed = True
+                session.logs.append_stderr(
                     f"snapshot cleanup failure: {exc}".encode("utf-8", errors="replace")
+                )
+            if cleanup_failed:
+                state = ExecutionState.CRASHED
+                reason = ExecutionReason.CLEANUP_FAILED
+                error_summary = "service execution cleanup failed"
+            try:
+                self._complete_execution(
+                    session.execution_id,
+                    state,
+                    reason=reason,
+                    exit_code=exit_code,
+                    error_summary=error_summary,
                 )
             finally:
                 with self._lock:
-                    record.ended = time.monotonic()
-                    self._prune_records_locked()
-                    release_capacity = not record.capacity_released
-                    record.capacity_released = True
+                    self._prune_sessions_locked()
+                    release_capacity = not session.capacity_released
+                    session.capacity_released = True
                 if release_capacity:
                     self._capacity.release()
-                record.done.set()
+                session.done.set()
 
-    def _prune_records_locked(self) -> None:
+    def _prune_sessions_locked(self) -> None:
         completed = [
-            task_id
-            for task_id, record in self._records.items()
-            if record.status not in {"running", "stopping"}
+            execution_id
+            for execution_id in self._sessions
+            if self._execution_record(execution_id).terminal
         ]
-        for task_id in completed[:-_MAX_RETAINED_SERVICES]:
-            self._records.pop(task_id, None)
+        for execution_id in completed[:-_MAX_RETAINED_SERVICES]:
+            self._sessions.pop(execution_id, None)
+
+
+def _bounded_error_summary(value: str | None) -> str | None:
+    if value is None:
+        return None
+    encoded = value.encode("utf-8", errors="replace")[: 16 * 1024]
+    return encoded.decode("utf-8", errors="ignore")[:4096]
 
 
 def _decode_bounded(data: bytes, limit: int) -> str:

@@ -8,12 +8,19 @@ import os
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from mcp.server.transport_security import TransportSecuritySettings
 
 from . import __version__
 from .config import DEFAULT_IGNORED_DIRS, ConfigurationError, Settings
+from .execution_store import (
+    ExecutionStoreError,
+    InMemoryExecutionStore,
+    SqliteExecutionStore,
+    validate_execution_db_path,
+)
 from .oauth import (
     DEFAULT_OAUTH_SCOPES,
     OAuthConfigurationError,
@@ -42,6 +49,7 @@ class RuntimeOptions:
     public_origin: str | None
     oauth: OAuthSettings | None
     task_configuration: TaskConfiguration | None
+    execution_db: Path | None
 
 
 def build_parser(
@@ -281,6 +289,15 @@ def build_parser(
             "(or set WORKSPACE_GUARD_MCP_TASK_CONFIG)"
         ),
     )
+    parser.add_argument(
+        "--execution-db",
+        default=env.get("WORKSPACE_GUARD_MCP_EXECUTION_DB"),
+        metavar="ABSOLUTE_SQLITE_PATH",
+        help=(
+            "optional execution metadata SQLite database outside the workspace "
+            "(or set WORKSPACE_GUARD_MCP_EXECUTION_DB)"
+        ),
+    )
     return parser
 
 
@@ -359,6 +376,15 @@ def parse_runtime(
         except TaskConfigurationError as exc:
             parser.error(str(exc))
 
+    execution_db: Path | None = None
+    if args.execution_db:
+        try:
+            execution_db = validate_execution_db_path(
+                args.execution_db, workspace_root=settings.root
+            )
+        except ExecutionStoreError as exc:
+            parser.error(str(exc))
+
     oauth_required = args.transport == "streamable-http" and (
         public_origin is not None or not _is_loopback(args.host)
     )
@@ -430,13 +456,23 @@ def parse_runtime(
         public_origin=public_origin,
         oauth=oauth,
         task_configuration=task_configuration,
+        execution_db=execution_db,
     )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     runtime = parse_runtime(argv)
+    execution_store = (
+        SqliteExecutionStore(runtime.execution_db)
+        if runtime.execution_db is not None
+        else InMemoryExecutionStore()
+    )
     task_manager = (
-        TaskManager(runtime.settings, runtime.task_configuration)
+        TaskManager(
+            runtime.settings,
+            runtime.task_configuration,
+            execution_store=execution_store,
+        )
         if runtime.task_configuration is not None
         else None
     )

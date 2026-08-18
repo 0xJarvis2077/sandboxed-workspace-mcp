@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+from .execution import (
+    ExecutionReason,
+    ExecutionState,
+    legacy_execution_status,
+)
 from .task_config import TaskDefinition, TaskLimits
 
 OutputCallback = Callable[[bytes], None]
@@ -398,15 +403,23 @@ def _next_workspace_scan_delay(scan_duration: float, pressure: float) -> float:
 
 @dataclass(frozen=True, slots=True)
 class TaskRunResult:
-    """Stable synchronous task result returned through MCP."""
+    """Canonical synchronous execution result with a legacy public projection."""
 
-    status: str
+    state: ExecutionState
+    reason: ExecutionReason | None
     exit_code: int | None
     stdout: str
     stderr: str
     truncated: bool
-    timed_out: bool
     duration_ms: int
+
+    @property
+    def status(self) -> str:
+        return legacy_execution_status(self.state, self.reason)
+
+    @property
+    def timed_out(self) -> bool:
+        return self.state is ExecutionState.TIMED_OUT
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -468,78 +481,111 @@ def run_container_task(
     backend: ContainerBackend,
     request: ContainerRequest,
     cancellation_event: threading.Event | None = None,
+    *,
+    on_started: Callable[[], None] | None = None,
+    on_cancelling: Callable[[], None] | None = None,
 ) -> TaskRunResult:
-    """Run one container with bounded output, timeout, and explicit failures."""
+    """Run one container with bounded output and canonical lifecycle semantics."""
 
     started = request.started_at or time.monotonic()
     deadline = request.deadline or started + request.limits.timeout_seconds
     capture = BoundedOutput(request.limits.max_output_bytes)
     if time.monotonic() >= deadline:
         return TaskRunResult(
-            status="timed_out",
+            state=ExecutionState.TIMED_OUT,
+            reason=ExecutionReason.TIMEOUT,
             exit_code=None,
             stdout="",
             stderr="task timeout expired before container start",
             truncated=False,
-            timed_out=True,
             duration_ms=_duration_ms(started),
         )
+    handle: ContainerHandle | None = None
     try:
         handle = backend.start(request, capture.stdout, capture.stderr)
+        if on_started is not None:
+            on_started()
     except Exception as exc:
+        if handle is not None:
+            try:
+                handle.stop()
+            except Exception:
+                pass
+            try:
+                handle.close()
+            except Exception:
+                pass
+        if cancellation_event is not None and cancellation_event.is_set():
+            if on_cancelling is not None:
+                on_cancelling()
+            return TaskRunResult(
+                state=ExecutionState.CANCELLED,
+                reason=None,
+                exit_code=None,
+                stdout="",
+                stderr="task cancelled before container start completed",
+                truncated=False,
+                duration_ms=_duration_ms(started),
+            )
         return TaskRunResult(
-            status="start_failed",
+            state=ExecutionState.CRASHED,
+            reason=ExecutionReason.RUNTIME_START_FAILED,
             exit_code=None,
             stdout="",
             stderr=str(exc),
             truncated=False,
-            timed_out=False,
             duration_ms=_duration_ms(started),
         )
 
+    assert handle is not None
     exit_code: int | None = None
     timed_out = False
     output_overflow = False
     cancelled = False
     workspace_limit_exceeded = False
-    lifecycle_failed = False
+    cleanup_failed = False
+    monitor_failed = False
     workspace_monitor = WorkspaceGrowthMonitor(request, handle)
 
-    def record_lifecycle_failure(phase: str, exc: Exception) -> None:
-        nonlocal lifecycle_failed
-        lifecycle_failed = True
+    def record_cleanup_failure(phase: str, exc: Exception) -> None:
+        nonlocal cleanup_failed
+        cleanup_failed = True
         capture.stderr(f"{phase}: {exc}\n".encode("utf-8", errors="replace"))
 
     def stop_handle() -> None:
         try:
             handle.stop()
         except Exception as exc:
-            record_lifecycle_failure("container stop failure", exc)
+            record_cleanup_failure("container stop failure", exc)
 
     def close_handle() -> None:
         try:
             handle.close()
         except Exception as exc:
-            record_lifecycle_failure("container cleanup failure", exc)
+            record_cleanup_failure("container cleanup failure", exc)
 
     try:
         workspace_monitor.start()
     except Exception as exc:
-        record_lifecycle_failure("workspace monitor start failure", exc)
+        capture.stderr(
+            f"workspace monitor start failure: {exc}\n".encode(
+                "utf-8", errors="replace"
+            )
+        )
         stop_handle()
         try:
             workspace_monitor.stop_and_join()
         except Exception as cleanup_exc:
-            record_lifecycle_failure("workspace monitor cleanup failure", cleanup_exc)
+            record_cleanup_failure("workspace monitor cleanup failure", cleanup_exc)
         close_handle()
         stdout, stderr = capture.text()
         return TaskRunResult(
-            status="start_failed",
+            state=ExecutionState.CRASHED,
+            reason=ExecutionReason.RUNTIME_MONITOR_FAILED,
             exit_code=None,
             stdout=stdout,
             stderr=stderr,
             truncated=capture.truncated,
-            timed_out=False,
             duration_ms=_duration_ms(started),
         )
 
@@ -550,6 +596,8 @@ def run_container_task(
                 break
             if cancellation_event is not None and cancellation_event.is_set():
                 cancelled = True
+                if on_cancelling is not None:
+                    on_cancelling()
                 stop_handle()
                 break
             if capture.truncated:
@@ -571,6 +619,12 @@ def run_container_task(
                 exit_code = handle.wait(timeout=5)
             except TimeoutError:
                 stop_handle()
+    except Exception as exc:
+        monitor_failed = True
+        capture.stderr(
+            f"container monitor failure: {exc}\n".encode("utf-8", errors="replace")
+        )
+        stop_handle()
     except BaseException:
         stop_handle()
         raise
@@ -578,7 +632,7 @@ def run_container_task(
         try:
             workspace_monitor.stop_and_join()
         except Exception as exc:
-            record_lifecycle_failure("workspace monitor cleanup failure", exc)
+            record_cleanup_failure("workspace monitor cleanup failure", exc)
         close_handle()
 
     if capture.truncated:
@@ -588,27 +642,38 @@ def run_container_task(
     stdout, stderr = capture.text()
     if workspace_monitor.exceeded.is_set():
         workspace_limit_exceeded = True
-    if workspace_limit_exceeded:
-        status = "workspace_limit_exceeded"
+
+    if monitor_failed:
+        state = ExecutionState.CRASHED
+        reason = ExecutionReason.RUNTIME_MONITOR_FAILED
+    elif cleanup_failed:
+        state = ExecutionState.CRASHED
+        reason = ExecutionReason.CLEANUP_FAILED
+    elif workspace_limit_exceeded:
+        state = ExecutionState.FAILED
+        reason = ExecutionReason.WORKSPACE_LIMIT_EXCEEDED
     elif cancelled:
-        status = "cancelled"
+        state = ExecutionState.CANCELLED
+        reason = None
     elif output_overflow:
-        status = "output_limit_exceeded"
+        state = ExecutionState.FAILED
+        reason = ExecutionReason.OUTPUT_LIMIT_EXCEEDED
     elif timed_out:
-        status = "timed_out"
-    elif lifecycle_failed:
-        status = "failed"
+        state = ExecutionState.TIMED_OUT
+        reason = ExecutionReason.TIMEOUT
     elif exit_code == 0:
-        status = "succeeded"
+        state = ExecutionState.SUCCEEDED
+        reason = None
     else:
-        status = "failed"
+        state = ExecutionState.FAILED
+        reason = None
     return TaskRunResult(
-        status=status,
+        state=state,
+        reason=reason,
         exit_code=exit_code,
         stdout=stdout,
         stderr=stderr,
         truncated=capture.truncated,
-        timed_out=timed_out,
         duration_ms=_duration_ms(started),
     )
 

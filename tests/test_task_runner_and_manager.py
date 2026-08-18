@@ -17,6 +17,8 @@ from unittest.mock import patch
 from _mcp_assertions import require_call_tool_result, require_structured_content
 
 from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.execution import ExecutionReason, ExecutionState
+from workspace_guard_mcp.execution_store import InMemoryExecutionStore
 from workspace_guard_mcp.server import create_server
 from workspace_guard_mcp.task_config import (
     ExecutionProfile,
@@ -1403,7 +1405,7 @@ class TaskManagerTests(unittest.TestCase):
         self.assertTrue(backend.handles[0].stopped)
         self.assertTrue(backend.handles[0].closed)
         self.assertFalse(backend.requests[0].snapshot_path.exists())
-        self.assertEqual(manager._records, {})
+        self.assertEqual(manager._sessions, {})
         self.assertTrue(manager._capacity.acquire(blocking=False))
         manager._capacity.release()
 
@@ -1434,6 +1436,115 @@ class TaskManagerTests(unittest.TestCase):
                     ValueError, "log capacity must be a positive integer"
                 ):
                     TaskLogBuffer(capacity)  # type: ignore[arg-type]
+
+    def test_authorized_sync_executions_have_unique_ids_and_canonical_records(
+        self,
+    ) -> None:
+        task_store = InMemoryExecutionStore()
+        task_manager = TaskManager(
+            self.settings,
+            configuration(self.base),
+            backend=FakeBackend(),
+            execution_store=task_store,
+        )
+        task_result = task_manager.run_task("test")
+        task_execution_id = task_result["execution_id"]
+        assert isinstance(task_execution_id, str)
+        self.assertEqual(
+            task_store.get(task_execution_id).state,
+            ExecutionState.SUCCEEDED,
+        )
+
+        tools = frozenset(
+            {
+                "python_version",
+                "run_pytest",
+                "run_python_script",
+                "run_ruff",
+                "run_mypy",
+                "run_pytest_coverage",
+                "run_command",
+            }
+        )
+        profile_store = InMemoryExecutionStore()
+        profile_manager = TaskManager(
+            self.settings,
+            profile_configuration(self.base, tools=tools),
+            backend=FakeBackend(stdout=b"[]"),
+            execution_store=profile_store,
+        )
+        results = [
+            profile_manager.python_version("debug"),
+            profile_manager.run_pytest("debug", targets=["tests"]),
+            profile_manager.run_python_script("debug", "debug.py"),
+            profile_manager.run_ruff("debug", paths=["."]),
+            profile_manager.run_mypy("debug", paths=["."]),
+            profile_manager.run_pytest_coverage("debug", targets=["tests"]),
+            profile_manager.run_command("debug", "python", ["--version"]),
+        ]
+        execution_ids = {result["execution_id"] for result in results}
+        self.assertEqual(len(execution_ids), len(results))
+        for execution_id in execution_ids:
+            assert isinstance(execution_id, str)
+            self.assertEqual(
+                profile_store.get(execution_id).state,
+                ExecutionState.SUCCEEDED,
+            )
+
+    def test_service_id_is_execution_id_and_stop_is_canonical_cancellation(
+        self,
+    ) -> None:
+        store = InMemoryExecutionStore()
+        manager = TaskManager(
+            self.settings,
+            configuration(self.base),
+            backend=FakeBackend(blocking=True),
+            execution_store=store,
+        )
+        started = manager.start_task("dev")
+        self.assertEqual(started["task_id"], started["execution_id"])
+        execution_id = started["execution_id"]
+        assert isinstance(execution_id, str)
+        self.assertEqual(store.get(execution_id).state, ExecutionState.RUNNING)
+
+        stopped = manager.stop_task(execution_id)
+        self.assertEqual(stopped["status"], "stopped")
+        self.assertEqual(stopped["execution_id"], execution_id)
+        record = store.get(execution_id)
+        self.assertEqual(record.state, ExecutionState.CANCELLED)
+        self.assertEqual(record.reason, ExecutionReason.USER_CANCELLED)
+
+    def test_failed_and_crashed_execution_semantics_are_distinct(self) -> None:
+        failed_store = InMemoryExecutionStore()
+        failed_manager = TaskManager(
+            self.settings,
+            configuration(self.base),
+            backend=FakeBackend(exit_code=2),
+            execution_store=failed_store,
+        )
+        failed = failed_manager.run_task("test")
+        failed_id = failed["execution_id"]
+        assert isinstance(failed_id, str)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed_store.get(failed_id).state, ExecutionState.FAILED)
+
+        crashed_store = InMemoryExecutionStore()
+        crashed_manager = TaskManager(
+            self.settings,
+            configuration(self.base),
+            backend=FakeBackend(start_error=OSError("runtime denied")),
+            execution_store=crashed_store,
+        )
+        crashed = crashed_manager.run_task("test")
+        crashed_id = crashed["execution_id"]
+        assert isinstance(crashed_id, str)
+        self.assertEqual(crashed["status"], "start_failed")
+        crashed_record = crashed_store.get(crashed_id)
+        self.assertEqual(crashed_record.state, ExecutionState.CRASHED)
+        self.assertEqual(
+            crashed_record.reason,
+            ExecutionReason.RUNTIME_START_FAILED,
+        )
 
     def test_server_conditionally_registers_narrow_task_schemas(self) -> None:
         default_server = create_server(self.settings)

@@ -129,6 +129,32 @@ class CliTests(unittest.TestCase):
         self.assertIn("*.token", runtime.settings.blocked_patterns)
         self.assertIn("private/**", runtime.settings.blocked_patterns)
 
+    def test_execution_db_cli_and_environment_require_safe_external_path(self) -> None:
+        with tempfile.TemporaryDirectory() as base:
+            base_path = Path(base)
+            root = base_path / "workspace"
+            root.mkdir()
+            database = base_path / "executions.sqlite3"
+            runtime = parse_runtime(
+                [],
+                {
+                    "WORKSPACE_GUARD_MCP_ROOT": str(root),
+                    "WORKSPACE_GUARD_MCP_EXECUTION_DB": str(database),
+                },
+            )
+            self.assertEqual(runtime.execution_db, database)
+
+            for unsafe in ("relative.sqlite3", str(root / "executions.sqlite3")):
+                with (
+                    self.subTest(unsafe=unsafe),
+                    contextlib.redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit),
+                ):
+                    parse_runtime(
+                        ["--root", str(root), "--execution-db", unsafe],
+                        {},
+                    )
+
     def test_git_write_flag_and_environment_require_writable_mode(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             runtime = parse_runtime(
