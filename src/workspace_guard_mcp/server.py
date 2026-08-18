@@ -66,6 +66,8 @@ _STRICT_TOOL_ARGUMENTS = {
     "run_task": frozenset({"name"}),
     "start_task": frozenset({"name"}),
     "task_status": frozenset({"task_id"}),
+    "execution_status": frozenset({"execution_id"}),
+    "execution_events": frozenset({"execution_id", "cursor", "limit"}),
     "task_logs": frozenset({"task_id", "cursor"}),
     "stop_task": frozenset({"task_id"}),
     "list_execution_profiles": frozenset(),
@@ -130,6 +132,8 @@ _TOOL_SCOPES: dict[str, frozenset[str]] = {
     "purge_trashed_file": frozenset({"workspace.delete", "workspace.purge"}),
     "list_tasks": frozenset({"tasks.read"}),
     "task_status": frozenset({"tasks.read"}),
+    "execution_status": frozenset({"tasks.read"}),
+    "execution_events": frozenset({"tasks.read"}),
     "task_logs": frozenset({"tasks.read"}),
     "run_task": frozenset({"tasks.run"}),
     "start_task": frozenset({"tasks.run"}),
@@ -643,6 +647,22 @@ def create_server(
 
         result = computer.run_shell_result(command)
         return {"text": result.text, "source_truncated": result.truncated}
+
+    if task_manager is not None:
+
+        @server.tool(annotations=READ_ONLY)
+        def execution_status(execution_id: str) -> dict[str, object]:
+            """Read the canonical current state of one execution."""
+
+            return task_manager.execution_status(execution_id)
+
+        @server.tool(annotations=READ_ONLY)
+        def execution_events(
+            execution_id: str, cursor: int = 0, limit: int = 50
+        ) -> dict[str, object]:
+            """Read bounded append-only lifecycle history for one execution."""
+
+            return task_manager.execution_events(execution_id, cursor, limit)
 
     if task_manager is not None and task_manager.configuration.tasks:
 

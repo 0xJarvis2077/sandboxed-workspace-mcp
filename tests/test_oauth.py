@@ -374,6 +374,11 @@ class OAuthServerTests(unittest.TestCase):
             _security_schemes(by_name["list_execution_profiles"]),
             [{"type": "oauth2", "scopes": ["tasks.read"]}],
         )
+        for name in ("execution_status", "execution_events"):
+            self.assertEqual(
+                _security_schemes(by_name[name]),
+                [{"type": "oauth2", "scopes": ["tasks.read"]}],
+            )
 
         read = AccessToken(token="", client_id="client", scopes=["workspace.read"])
         write = AccessToken(token="", client_id="client", scopes=["workspace.write"])

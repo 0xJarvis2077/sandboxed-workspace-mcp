@@ -57,6 +57,11 @@ class ExecutionMode(StrEnum):
     SERVICE = "service"
 
 
+class ExecutionEventType(StrEnum):
+    CREATED = "created"
+    STATE_TRANSITION = "state_transition"
+
+
 TERMINAL_EXECUTION_STATES = frozenset(
     {
         ExecutionState.SUCCEEDED,
@@ -197,6 +202,49 @@ class ExecutionRecord(BaseModel):
     @property
     def terminal(self) -> bool:
         return is_terminal_state(self.state)
+
+
+class ExecutionEvent(BaseModel):
+    """Bounded append-only lifecycle metadata for one canonical execution."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
+
+    execution_id: str = Field(min_length=1, max_length=128)
+    sequence: int = Field(ge=1, strict=True)
+    timestamp: float
+    event_type: ExecutionEventType
+    from_state: ExecutionState | None
+    to_state: ExecutionState
+    reason: ExecutionReason | None = None
+    error_summary: str | None = Field(default=None, max_length=4096)
+
+    @field_validator("execution_id", "error_summary", mode="after")
+    @classmethod
+    def _bound_utf8(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        limits = {
+            "execution_id": 512,
+            "error_summary": 16 * 1024,
+        }
+        field_name = info.field_name
+        if field_name is None:
+            raise ValueError("execution event string field name is unavailable")
+        limit = limits[field_name]
+        if len(value.encode("utf-8")) > limit:
+            raise ValueError(f"{field_name} exceeds the {limit}-byte limit")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_event_lifecycle(self) -> ExecutionEvent:
+        if self.event_type is ExecutionEventType.CREATED:
+            if self.from_state is not None:
+                raise ValueError("created event requires from_state=None")
+            return self
+        if self.from_state is None:
+            raise ValueError("state_transition event requires from_state")
+        ensure_execution_transition(self.from_state, self.to_state)
+        return self
 
 
 def is_terminal_state(state: ExecutionState) -> bool:

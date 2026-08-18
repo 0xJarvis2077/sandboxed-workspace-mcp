@@ -91,7 +91,8 @@ The compatibility entrypoint remains available:
 | Git writes (optional) | `git_init`, `git_create_baseline` | Configured-root `main` initialization and one server-owned first baseline; disabled by default |
 | Compatibility commands | `run_shell` | Closed read-only grammar; never starts a shell |
 | Fixed tasks | `list_tasks`, `run_task` | Operator-defined synchronous tasks |
-| Long-running tasks | `start_task`, `task_status`, `task_logs`, `stop_task` | Bounded stdout/stderr with cursor-based logs |
+| Long-running tasks | `start_task`, `task_status`, `task_logs`, `stop_task` | Bounded stdout/stderr with cursor-based logs; `task_status` retains service compatibility semantics |
+| Execution queries | `execution_status`, `execution_events` | Canonical current truth plus bounded, cursor-based append-only lifecycle history |
 | Execution profiles | `list_execution_profiles`, `python_version`, `run_pytest`, `run_ruff`, `run_mypy`, `run_pytest_coverage`, `run_python_script`, `run_command`, `start_command` | Authorized execution and structured diagnostics in a pinned image and disposable snapshot |
 
 Without a task config, the task manager, container backend, and dynamic execution tools are not created or registered.
@@ -277,10 +278,10 @@ Common settings:
 | `--block-path` | Add a root-relative blocked glob |
 | `--ignore-dir` | Add a directory basename excluded from automatic scans |
 | `--task-config` / `WORKSPACE_GUARD_MCP_TASK_CONFIG` | Trusted task JSON outside the workspace |
-| `--execution-db` / `WORKSPACE_GUARD_MCP_EXECUTION_DB` | Optional ExecutionRecord SQLite database outside the workspace |
+| `--execution-db` / `WORKSPACE_GUARD_MCP_EXECUTION_DB` | Optional ExecutionRecord + ExecutionEvent SQLite database outside the workspace |
 | `--transport` | `stdio` or `streamable-http` |
 
-WorkspaceGuard can optionally persist bounded, public-safe `ExecutionRecord` metadata to an operator-controlled SQLite database outside the workspace. Persistence preserves execution history across server restarts, but it never scans for, reconnects to, or adopts previously running containers. Unfinished records left by an earlier process are reconciled to `CRASHED / SERVER_RESTARTED` on startup.
+WorkspaceGuard can optionally persist bounded, public-safe `ExecutionRecord` current truth and `ExecutionEvent` lifecycle history to an operator-controlled SQLite database outside the workspace. Record transitions and event appends commit in the same durable transaction. Without `--execution-db`, both are process-local in the InMemory store; with it, both persist across server restarts. Version 1 execution databases are automatically migrated to version 2 without fabricating pre-audit history, and `execution_events` reports `history_complete=false` for those partial histories. Persistence never scans for, reconnects to, or adopts previously running containers. Unfinished records left by an earlier process are reconciled to `CRASHED / SERVER_RESTARTED` on startup.
 
 `stdio` is intended for local clients. Streamable HTTP listens on `127.0.0.1:3001/mcp` by default; non-loopback or public deployments need explicit network, Host/Origin, HTTPS, and external OAuth/OIDC configuration. `--allow-unauthenticated-http` is for temporary development only. See [SECURITY.md](SECURITY.md) for the full OAuth topology and RFC 9728 details.
 
@@ -303,8 +304,8 @@ src/workspace_guard_mcp/
   pytest_debug_plugin.py # Snapshot-injected controlled pytest failure collector
   command_execution.py  # Generic argv and workspace cwd validation
   task_snapshot.py      # Filtered bounded temporary snapshots
-  execution.py          # Canonical Execution state/reason/record domain model
-  execution_store.py    # In-memory / SQLite execution metadata stores
+  execution.py          # Canonical Execution record/event lifecycle domain model
+  execution_store.py    # In-memory / SQLite record + append-only audit stores
   task_runner.py        # Docker/Podman argv, pipes, and synchronous execution
   task_manager.py       # Execution lifecycle, concurrency, and service sessions
 tests/                   # Unit, boundary, and transport regression tests

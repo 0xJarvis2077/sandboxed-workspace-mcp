@@ -16,8 +16,15 @@ from types import MappingProxyType
 from typing import Literal
 
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import BaseModel, ConfigDict, RootModel
+from pydantic import BaseModel, ConfigDict, Field, RootModel
 
+from .execution import (
+    ExecutionEventType,
+    ExecutionKind,
+    ExecutionMode,
+    ExecutionReason,
+    ExecutionState,
+)
 from .result_cache import ResultCache
 from .result_presentation import externalize_tool_payload
 
@@ -425,6 +432,42 @@ class TaskStatusResult(PublicResultModel):
     duration_ms: int
 
 
+class ExecutionStatusResult(PublicResultModel):
+    execution_id: str
+    kind: ExecutionKind
+    name: str
+    tool: str | None
+    mode: ExecutionMode
+    state: ExecutionState
+    created_at: float
+    updated_at: float
+    started_at: float | None
+    finished_at: float | None
+    exit_code: int | None
+    reason: ExecutionReason | None
+    error_summary: str | None
+
+
+class ExecutionEventResult(PublicResultModel):
+    execution_id: str
+    sequence: int
+    timestamp: float
+    event_type: ExecutionEventType
+    from_state: ExecutionState | None
+    to_state: ExecutionState
+    reason: ExecutionReason | None
+    error_summary: str | None
+
+
+class ExecutionEventsResult(PublicResultModel):
+    execution_id: str
+    cursor: int
+    next_cursor: int
+    events: list[ExecutionEventResult] = Field(max_length=100)
+    has_more: bool
+    history_complete: bool
+
+
 class TaskLogsResult(PublicResultModel):
     cursor: int
     next_cursor: int
@@ -683,6 +726,18 @@ _CONTRACTS = (
         "Inspect one service task created by this server instance.",
         READ_ONLY_LOCAL,
         TaskStatusResult,
+    ),
+    _contract(
+        "execution_status",
+        "Read the canonical current state of one execution.",
+        READ_ONLY_LOCAL,
+        ExecutionStatusResult,
+    ),
+    _contract(
+        "execution_events",
+        "Read bounded append-only lifecycle history for one execution.",
+        READ_ONLY_LOCAL,
+        ExecutionEventsResult,
     ),
     _contract(
         "task_logs",

@@ -103,6 +103,42 @@ class InMemoryExecutionStoreTests(unittest.TestCase):
         self.assertIsNotNone(cancelling.started_at)
         self.assertIsNone(cancelling.finished_at)
 
+    def test_events_are_atomic_ordered_and_bounded(self) -> None:
+        store = InMemoryExecutionStore()
+        store.create(record())
+        running = store.transition(
+            "exec-test", {ExecutionState.STARTING}, ExecutionState.RUNNING
+        )
+        succeeded = store.transition(
+            "exec-test", {ExecutionState.RUNNING}, ExecutionState.SUCCEEDED
+        )
+        first = store.list_events("exec-test", limit=2)
+        self.assertTrue(first.history_complete)
+        self.assertTrue(first.has_more)
+        self.assertEqual([event.sequence for event in first.events], [1, 2])
+        self.assertEqual(first.events[1].timestamp, running.updated_at)
+        second = store.list_events("exec-test", cursor=first.next_cursor, limit=2)
+        self.assertFalse(second.has_more)
+        self.assertEqual(second.events[0].sequence, 3)
+        self.assertEqual(second.events[0].timestamp, succeeded.updated_at)
+
+        before = store.list_events("exec-test").events
+        with self.assertRaises(ExecutionConflictError):
+            store.transition(
+                "exec-test", {ExecutionState.RUNNING}, ExecutionState.FAILED
+            )
+        self.assertEqual(store.list_events("exec-test").events, before)
+        with self.assertRaises(DuplicateExecutionError):
+            store.create(record())
+        self.assertEqual(store.list_events("exec-test").events, before)
+
+        for cursor, limit in ((-1, 1), (True, 1), (0, 0), (0, 101), (0, True)):
+            with (
+                self.subTest(cursor=cursor, limit=limit),
+                self.assertRaises(ValueError),
+            ):
+                store.list_events("exec-test", cursor=cursor, limit=limit)
+
 
 class SqliteExecutionStoreTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -137,7 +173,7 @@ class SqliteExecutionStoreTests(unittest.TestCase):
             ExecutionState.SUCCEEDED,
         )
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
             self.assertEqual(
                 connection.execute("PRAGMA journal_mode").fetchone()[0], "wal"
             )
@@ -153,7 +189,7 @@ class SqliteExecutionStoreTests(unittest.TestCase):
 
     def test_newer_schema_and_invalid_persisted_record_fail_closed(self) -> None:
         with sqlite3.connect(self.path) as connection:
-            connection.execute("PRAGMA user_version=2")
+            connection.execute("PRAGMA user_version=3")
         with self.assertRaises(ExecutionStoreError):
             SqliteExecutionStore(self.path)
 
@@ -207,6 +243,124 @@ class SqliteExecutionStoreTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIsInstance(errors[0], ExecutionConflictError)
         self.assertEqual(store.get("exec-test").state, results[0])
+        events = store.list_events("exec-test").events
+        terminal_events = [
+            event
+            for event in events
+            if event.from_state is ExecutionState.RUNNING
+            and event.to_state in {ExecutionState.SUCCEEDED, ExecutionState.FAILED}
+        ]
+        self.assertEqual(len(terminal_events), 1)
+
+    def test_sqlite_events_persist_paginate_and_fail_closed_on_corruption(self) -> None:
+        store = SqliteExecutionStore(self.path)
+        original = record()
+        store.create(original)
+        running = store.transition(
+            "exec-test", {ExecutionState.STARTING}, ExecutionState.RUNNING
+        )
+        failed = store.transition(
+            "exec-test",
+            {ExecutionState.RUNNING},
+            ExecutionState.FAILED,
+            reason=ExecutionReason.OUTPUT_LIMIT_EXCEEDED,
+            error_summary="bounded failure",
+        )
+        page = SqliteExecutionStore(self.path).list_events("exec-test", limit=2)
+        self.assertTrue(page.history_complete)
+        self.assertTrue(page.has_more)
+        self.assertEqual([event.sequence for event in page.events], [1, 2])
+        self.assertEqual(page.events[1].timestamp, running.updated_at)
+        second = store.list_events("exec-test", cursor=page.next_cursor, limit=2)
+        self.assertFalse(second.has_more)
+        self.assertEqual(second.next_cursor, 3)
+        self.assertEqual(second.events[0].timestamp, failed.updated_at)
+        self.assertEqual(second.events[0].reason, ExecutionReason.OUTPUT_LIMIT_EXCEEDED)
+        self.assertEqual(second.events[0].error_summary, "bounded failure")
+
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "UPDATE execution_events SET event_type='whatever' "
+                "WHERE execution_id=? AND sequence=2",
+                ("exec-test",),
+            )
+        with self.assertRaises(ExecutionStoreError):
+            store.list_events("exec-test")
+
+    def test_sqlite_event_insert_failures_roll_back_record_changes(self) -> None:
+        store = SqliteExecutionStore(self.path)
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "CREATE TRIGGER reject_created BEFORE INSERT ON execution_events "
+                "WHEN NEW.execution_id='create-fails' "
+                "BEGIN SELECT RAISE(ABORT, 'forced event failure'); END"
+            )
+        with self.assertRaises(ExecutionStoreError):
+            store.create(record("create-fails"))
+        with self.assertRaises(UnknownExecutionError):
+            store.get("create-fails")
+
+        store.create(record())
+        before = store.list_events("exec-test").events
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "CREATE TRIGGER reject_transition BEFORE INSERT ON execution_events "
+                "WHEN NEW.execution_id='exec-test' AND NEW.sequence > 1 "
+                "BEGIN SELECT RAISE(ABORT, 'forced event failure'); END"
+            )
+        with self.assertRaises(ExecutionStoreError):
+            store.transition(
+                "exec-test", {ExecutionState.STARTING}, ExecutionState.RUNNING
+            )
+        self.assertEqual(store.get("exec-test").state, ExecutionState.STARTING)
+        self.assertEqual(store.list_events("exec-test").events, before)
+
+    def test_v1_migration_preserves_record_without_fabricating_history(self) -> None:
+        old = record("legacy")
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "CREATE TABLE executions ("
+                "execution_id TEXT PRIMARY KEY, kind TEXT NOT NULL, "
+                "name TEXT NOT NULL, tool TEXT, mode TEXT NOT NULL, "
+                "state TEXT NOT NULL, created_at REAL NOT NULL, "
+                "updated_at REAL NOT NULL, "
+                "started_at REAL, finished_at REAL, exit_code INTEGER, "
+                "reason TEXT, error_summary TEXT)"
+            )
+            connection.execute(
+                "CREATE INDEX executions_state_created ON executions(state, created_at)"
+            )
+            connection.execute(
+                "INSERT INTO executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    old.execution_id,
+                    old.kind.value,
+                    old.name,
+                    old.tool,
+                    old.mode.value,
+                    old.state.value,
+                    old.created_at,
+                    old.updated_at,
+                    old.started_at,
+                    old.finished_at,
+                    old.exit_code,
+                    None,
+                    old.error_summary,
+                ),
+            )
+            connection.execute("PRAGMA user_version=1")
+        store = SqliteExecutionStore(self.path)
+        self.assertEqual(store.get("legacy"), old)
+        page = store.list_events("legacy")
+        self.assertEqual(page.events, [])
+        self.assertFalse(page.history_complete)
+        reconciled = reconcile_unfinished_executions(store)
+        self.assertEqual(reconciled[0].state, ExecutionState.CRASHED)
+        page = store.list_events("legacy")
+        self.assertEqual(len(page.events), 1)
+        self.assertEqual(page.events[0].sequence, 1)
+        self.assertEqual(page.events[0].from_state, ExecutionState.STARTING)
+        self.assertFalse(page.history_complete)
 
     def test_restart_reconciliation_crashes_only_unfinished_records(self) -> None:
         store = SqliteExecutionStore(self.path)

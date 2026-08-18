@@ -1493,6 +1493,17 @@ class TaskManagerTests(unittest.TestCase):
             task_store.get(task_execution_id).state,
             ExecutionState.SUCCEEDED,
         )
+        task_status = task_manager.execution_status(task_execution_id)
+        self.assertEqual(task_status["kind"], "task")
+        self.assertEqual(task_status["mode"], "run")
+        self.assertEqual(task_status["tool"], "run_task")
+        self.assertEqual(task_status["state"], "succeeded")
+        task_events = task_manager.execution_events(task_execution_id)["events"]
+        assert isinstance(task_events, list)
+        self.assertEqual(
+            [event["event_type"] for event in task_events],
+            ["created", "state_transition", "state_transition"],
+        )
 
         tools = frozenset(
             {
@@ -1529,6 +1540,13 @@ class TaskManagerTests(unittest.TestCase):
                 profile_store.get(execution_id).state,
                 ExecutionState.SUCCEEDED,
             )
+            self.assertEqual(
+                profile_manager.execution_status(execution_id)["kind"],
+                "profile",
+            )
+            profile_events = profile_manager.execution_events(execution_id)["events"]
+            assert isinstance(profile_events, list)
+            self.assertEqual(len(profile_events), 3)
 
     def test_service_id_is_execution_id_and_stop_is_canonical_cancellation(
         self,
@@ -1552,6 +1570,20 @@ class TaskManagerTests(unittest.TestCase):
         record = store.get(execution_id)
         self.assertEqual(record.state, ExecutionState.CANCELLED)
         self.assertEqual(record.reason, ExecutionReason.USER_CANCELLED)
+        status = manager.execution_status(execution_id)
+        self.assertEqual(status["state"], "cancelled")
+        events = manager.execution_events(execution_id)["events"]
+        assert isinstance(events, list)
+        self.assertEqual(
+            [(event["from_state"], event["to_state"]) for event in events],
+            [
+                (None, "starting"),
+                ("starting", "running"),
+                ("running", "cancelling"),
+                ("cancelling", "cancelled"),
+            ],
+        )
+        self.assertEqual(events[-1]["reason"], "user_cancelled")
 
     def test_failed_and_crashed_execution_semantics_are_distinct(self) -> None:
         failed_store = InMemoryExecutionStore()
@@ -1603,6 +1635,8 @@ class TaskManagerTests(unittest.TestCase):
             "task_status",
             "task_logs",
             "stop_task",
+            "execution_status",
+            "execution_events",
         }
         self.assertTrue(default_names.isdisjoint(task_names))
         self.assertTrue(task_names.issubset(by_name))
@@ -1612,6 +1646,20 @@ class TaskManagerTests(unittest.TestCase):
         )
         self.assertEqual(
             set(by_name["stop_task"].input_schema["properties"]), {"task_id"}
+        )
+        self.assertEqual(
+            set(by_name["execution_status"].input_schema["properties"]),
+            {"execution_id"},
+        )
+        self.assertEqual(
+            set(by_name["execution_events"].input_schema["properties"]),
+            {"execution_id", "cursor", "limit"},
+        )
+        self.assertFalse(
+            by_name["execution_status"].input_schema["additionalProperties"]
+        )
+        self.assertFalse(
+            by_name["execution_events"].input_schema["additionalProperties"]
         )
 
         async def exercise_task_tools() -> None:
@@ -1645,6 +1693,8 @@ class TaskManagerTests(unittest.TestCase):
             "python_version",
             "run_pytest",
             "run_python_script",
+            "execution_status",
+            "execution_events",
         }
         self.assertTrue(default_names.isdisjoint(dynamic))
         self.assertTrue(dynamic.issubset(by_name))
@@ -1694,6 +1744,8 @@ class TaskManagerTests(unittest.TestCase):
             "task_status",
             "task_logs",
             "stop_task",
+            "execution_status",
+            "execution_events",
         }
         self.assertTrue(command_tools.issubset(by_name))
         self.assertNotIn("run_task", by_name)
