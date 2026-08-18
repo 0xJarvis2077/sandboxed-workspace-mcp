@@ -296,6 +296,7 @@ class ExecutionProfileListResult(PublicResultModel):
 
 
 class CommandExecutionResult(PublicResultModel):
+    execution_id: str
     status: str
     exit_code: int | None
     stdout: str
@@ -408,12 +409,14 @@ class CoverageResult(CommandExecutionResult):
 
 class TaskStartResult(PublicResultModel):
     task_id: str
+    execution_id: str
     name: str
     status: Literal["running"]
 
 
 class TaskStatusResult(PublicResultModel):
     task_id: str
+    execution_id: str
     name: str
     status: str
     exit_code: int | None

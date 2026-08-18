@@ -1420,6 +1420,7 @@ name = "workspace-guard-mcp"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
+    { name = "pydantic" },
     { name = "pyjwt", extra = ["crypto"] },
 ]
 
@@ -1438,6 +1439,7 @@ requires-dist = [
     { name = "coverage", extras = ["toml"], marker = "extra == 'dev'", specifier = ">=7.6,<8" },
     { name = "mcp", specifier = ">=2.0.0,<3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==1.20.2" },
+    { name = "pydantic", specifier = ">=2,<3" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9,<1" },

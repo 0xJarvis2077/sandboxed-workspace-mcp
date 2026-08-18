@@ -100,6 +100,14 @@ Container isolation reduces risk but is not a virtual-machine security boundary.
 
 The execution boundary intentionally has no port mapping, host networking, privileged mode, extra mounts, Docker socket mounting, caller environment, configuration reload, or snapshot write-back. Generic profiles accept only the bounded caller argv described above. `start_task` and `start_command` exist for startup diagnostics and bounded traceback/log inspection, not for publishing a development server. Commands requiring a real database, credentials, or external services need a separately designed stateful/integration boundary.
 
+### Execution persistence
+
+Execution persistence is optional control-plane state. When `--execution-db` (or `WORKSPACE_GUARD_MCP_EXECUTION_DB`) is configured, the SQLite database must be an absolute regular-file path under an existing directory outside the workspace, and the database itself must not be a symlink. Without that option the same canonical execution lifecycle uses an in-memory store.
+
+The database stores only bounded `ExecutionRecord` metadata: the opaque manager-issued execution ID, kind/name/tool/mode, canonical state, wall-clock lifecycle timestamps, exit code, bounded reason, and bounded error summary. It deliberately does **not** persist argv, image references, environment variables, secrets, credentials, OAuth tokens, stdout/stderr, host paths, snapshot paths, container names/IDs, `ContainerHandle`, `WorkspaceSnapshot`, log buffers, workspace monitors, or cancellation events. The SQLite file therefore remains outside the workspace-to-container snapshot trust path and is never mounted into task containers.
+
+Persistence recovers history truth, not compute ownership. A server restart never scans Docker/Podman, guesses container ownership, reconnects to, stops, or adopts containers from the old process. Any persisted `STARTING`, `RUNNING`, or `CANCELLING` record is reconciled to `CRASHED` with reason `SERVER_RESTARTED`; terminal records remain unchanged. SQLite persistence does not weaken container/network isolation, snapshot semantics, or the rule that runtime handles are owned only by the current process.
+
 ## Remaining risks
 
 - A malicious local process with write access to the workspace can race directory renames or link/reparse-point replacement. POSIX descriptor-relative opens reduce this window for reads but do not make the whole application an OS sandbox; Windows reparse-point handling has a larger residual race surface.

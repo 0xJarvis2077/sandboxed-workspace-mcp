@@ -277,7 +277,10 @@ CI 会实际构建该 Dockerfile，并在 `--network none` 的运行容器中执
 | `--block-path` | 追加 root-relative blocked glob |
 | `--ignore-dir` | 追加不主动扫描的目录 basename |
 | `--task-config` / `WORKSPACE_GUARD_MCP_TASK_CONFIG` | 工作区外的可信任务 JSON |
+| `--execution-db` / `WORKSPACE_GUARD_MCP_EXECUTION_DB` | 可选的工作区外 ExecutionRecord SQLite 数据库 |
 | `--transport` | `stdio` 或 `streamable-http` |
+
+WorkspaceGuard 可选地把有界、public-safe 的 `ExecutionRecord` 元数据持久化到 operator 控制且位于 workspace 外的 SQLite 数据库。持久化会保留跨 server restart 的 execution history，但不会扫描、重新连接或接管之前仍在运行的 container；旧进程留下的未完成 execution 会在启动时标记为 `CRASHED / SERVER_RESTARTED`。
 
 `stdio` 适合本机连接。Streamable HTTP 默认只监听 `127.0.0.1:3001/mcp`；非回环或公开部署需要明确的网络开关、Host/Origin 配置、HTTPS 和外部 OAuth/OIDC。`--allow-unauthenticated-http` 仅用于临时开发，不应作为部署方案。完整 OAuth 拓扑和 RFC 9728 细节见 [SECURITY.md](SECURITY.md)。
 
@@ -300,8 +303,10 @@ src/workspace_guard_mcp/
   pytest_debug_plugin.py # 快照内注入的受控 pytest failure collector
   command_execution.py  # 通用命令 argv 和 workspace cwd 校验
   task_snapshot.py      # 过滤后的有界临时快照
+  execution.py          # canonical Execution state/reason/record domain model
+  execution_store.py    # 内存 / SQLite execution metadata store
   task_runner.py        # Docker/Podman argv、pipe 和同步执行
-  task_manager.py       # 并发、服务生命周期和日志 ring buffer
+  task_manager.py       # execution 生命周期、并发和 service runtime session
 tests/                   # 单元、边界和传输回归测试
 examples/                # 必须替换 digest 的配置模板和任务镜像
 SECURITY.md              # 安全边界、威胁模型和剩余风险
