@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
@@ -12,6 +13,7 @@ from workspace_guard_mcp.artifact import ArtifactRecord
 from workspace_guard_mcp.artifact_store import (
     ArtifactLimitExceeded,
     ArtifactPolicyViolation,
+    ArtifactResourceTooLarge,
     ArtifactStoreMiss,
     EphemeralArtifactStore,
 )
@@ -41,11 +43,20 @@ class ArtifactRecordTests(unittest.TestCase):
             record.name = "other.txt"  # type: ignore[misc]
 
     def test_rejects_unsafe_or_overlong_names(self) -> None:
-        for name in ("", "../x", "a/b", "a\\b", "nul\x00x", "line\nfeed"):
+        for name in (
+            "",
+            "../x",
+            "a/b",
+            "a\\b",
+            "nul\x00x",
+            "line\nfeed",
+            "report\u202egnp.exe",
+        ):
             with self.subTest(name=name), self.assertRaises(ValidationError):
                 self._record(name=name)
         with self.assertRaises(ValidationError):
             self._record(name="é" * 256)
+        self.assertEqual(self._record(name="报告📊.csv").name, "报告📊.csv")
 
     def test_rejects_invalid_ids_hash_sizes_and_time(self) -> None:
         invalid = (
@@ -178,6 +189,31 @@ class EphemeralArtifactStoreTests(unittest.TestCase):
             with self.assertRaises(ArtifactStoreMiss):
                 store.read(record.artifact_id, owner_scope="owner-a")
             self.assertEqual(store.execution_count, 0)
+
+    def test_direct_resource_read_rejects_oversized_content_before_read_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            staging = Path(directory)
+            (staging / "large.bin").write_bytes(b"12345")
+            store = EphemeralArtifactStore()
+            record = store.collect("execution-1", staging, self._limits())[0]
+        with (
+            patch(
+                "workspace_guard_mcp.artifact_store.MAX_ARTIFACT_RESOURCE_BYTES",
+                4,
+            ),
+            patch.object(
+                Path,
+                "read_bytes",
+                side_effect=AssertionError("must not read"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ArtifactResourceTooLarge,
+                "artifact too large for direct resource delivery",
+            ):
+                store.read(record.artifact_id)
 
     def test_retention_evicts_whole_oldest_execution_set(self) -> None:
         store = EphemeralArtifactStore(max_retained_executions=1, max_store_bytes=32)

@@ -5,9 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import MappingProxyType
+from unittest.mock import patch
 
 from _mcp_assertions import require_resource_contents
-from mcp.server.mcpserver.exceptions import ResourceNotFoundError
+from mcp.server.mcpserver.exceptions import ResourceError, ResourceNotFoundError
 
 from workspace_guard_mcp.config import Settings
 from workspace_guard_mcp.server import create_server
@@ -48,6 +49,42 @@ class ArtifactServerTests(unittest.TestCase):
                 blob = contents[0]
                 self.assertEqual(blob.mime_type, "application/octet-stream")
                 self.assertEqual(blob.content, payload)
+
+            asyncio.run(exercise())
+
+    def test_oversized_artifact_resource_is_rejected_boundedly(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as root,
+            tempfile.TemporaryDirectory() as staging_dir,
+        ):
+            workspace = Path(root)
+            settings = Settings.create(workspace, allow_writes=False)
+            configuration = TaskConfiguration(
+                source=workspace / "tasks.json",
+                runtime="docker",
+                limits=TaskLimits(),
+                tasks=MappingProxyType({}),
+            )
+            manager = TaskManager(settings, configuration)
+            staging = Path(staging_dir)
+            (staging / "large.bin").write_bytes(b"12345")
+            record = manager.artifact_store.collect(
+                "execution-1", staging, configuration.limits
+            )[0]
+            server = create_server(settings, manager)
+
+            async def exercise() -> None:
+                with patch(
+                    "workspace_guard_mcp.artifact_store.MAX_ARTIFACT_RESOURCE_BYTES",
+                    4,
+                ):
+                    with self.assertRaisesRegex(
+                        ResourceError,
+                        "artifact too large for direct resource delivery",
+                    ):
+                        await server.read_resource(
+                            f"workspaceguard://artifact/{record.artifact_id}"
+                        )
 
             asyncio.run(exercise())
 

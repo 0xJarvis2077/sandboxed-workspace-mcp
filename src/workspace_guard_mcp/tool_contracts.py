@@ -313,11 +313,13 @@ class ArtifactResult(PublicResultModel):
     size_bytes: int
     sha256: str
     created_at: float
-    resource_uri: str
+    content_available: bool
+    resource_uri: str | None
 
 
 class ExecutionArtifactsResult(PublicResultModel):
     execution_id: str
+    manifest_complete: bool
     artifacts: list[ArtifactResult] = Field(max_length=100)
 
 

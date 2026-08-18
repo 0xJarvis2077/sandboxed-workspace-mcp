@@ -25,6 +25,7 @@ ARTIFACT_RESOURCE_MIME = "application/octet-stream"
 DEFAULT_MAX_RETAINED_EXECUTIONS = 128
 DEFAULT_MAX_STORE_BYTES = 512 * 1024 * 1024
 DEFAULT_TTL_SECONDS = 60 * 60.0
+MAX_ARTIFACT_RESOURCE_BYTES = 16 * 1024 * 1024
 _COPY_CHUNK_BYTES = 64 * 1024
 _MAX_COLLISION_RETRIES = 16
 _ARTIFACT_ID = re.compile(r"^[A-Za-z0-9_-]{32}$")
@@ -48,6 +49,10 @@ class ArtifactCollectionError(ArtifactError):
 
 class ArtifactStoreMiss(LookupError):
     """Raised for invalid, missing, expired, evicted, or wrong-owner artifacts."""
+
+
+class ArtifactResourceTooLarge(ArtifactError):
+    """Raised when stored content exceeds the direct MCP resource delivery bound."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +238,10 @@ class EphemeralArtifactStore:
             entry = self._executions.get(execution_id)
             if entry is None or entry.owner_scope != owner_scope:
                 raise ArtifactStoreMiss("artifact not found")
+            if item.record.size_bytes > MAX_ARTIFACT_RESOURCE_BYTES:
+                raise ArtifactResourceTooLarge(
+                    "artifact too large for direct resource delivery"
+                )
             self._executions.move_to_end(execution_id)
             path = item.path
         try:

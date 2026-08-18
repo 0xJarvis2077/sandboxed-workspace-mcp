@@ -18,7 +18,7 @@ from mcp.server.auth.middleware.bearer_auth import (
     RequireAuthMiddleware,
 )
 from mcp.server.auth.provider import TokenVerifier
-from mcp.server.mcpserver.exceptions import ResourceNotFoundError
+from mcp.server.mcpserver.exceptions import ResourceError, ResourceNotFoundError
 from mcp.server.streamable_http import EventStore
 from mcp.server.streamable_http_manager import DEFAULT_MAX_REQUEST_BODY_SIZE
 from mcp.server.transport_security import TransportSecuritySettings
@@ -33,6 +33,7 @@ from . import __version__, resources, tool_contracts
 from .artifact_store import (
     ARTIFACT_RESOURCE_MIME,
     ARTIFACT_URI_TEMPLATE,
+    ArtifactResourceTooLarge,
     ArtifactStoreMiss,
 )
 from .config import Settings
@@ -1041,6 +1042,10 @@ def create_server(
                 return task_manager.artifact_store.read(
                     id, owner_scope=server.result_owner_scope()
                 )
+            except ArtifactResourceTooLarge as exc:
+                raise ResourceError(
+                    "artifact too large for direct resource delivery"
+                ) from exc
             except ArtifactStoreMiss as exc:
                 raise ResourceNotFoundError("Unknown resource") from exc
 
