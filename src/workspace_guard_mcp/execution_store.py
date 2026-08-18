@@ -1,4 +1,4 @@
-"""Small execution-record stores for in-memory and SQLite persistence."""
+"""Execution record/event stores for in-memory and SQLite persistence."""
 
 from __future__ import annotations
 
@@ -8,19 +8,23 @@ import threading
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from pydantic import ValidationError
 
 from .execution import (
+    ExecutionEvent,
+    ExecutionEventType,
     ExecutionReason,
     ExecutionRecord,
     ExecutionState,
     ensure_execution_transition,
 )
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+_MAX_EVENT_PAGE_SIZE = 100
 _UNFINISHED_STATES = frozenset(
     {
         ExecutionState.STARTING,
@@ -43,6 +47,16 @@ _EXECUTION_COLUMNS = (
     "reason",
     "error_summary",
 )
+_EVENT_COLUMNS = (
+    "execution_id",
+    "sequence",
+    "event_type",
+    "timestamp",
+    "from_state",
+    "to_state",
+    "reason",
+    "error_summary",
+)
 
 
 class ExecutionStoreError(RuntimeError):
@@ -61,8 +75,16 @@ class ExecutionConflictError(ExecutionStoreError):
     """Raised when optimistic state checking rejects a transition."""
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionEventPage:
+    events: list[ExecutionEvent]
+    next_cursor: int
+    has_more: bool
+    history_complete: bool
+
+
 class ExecutionStore(Protocol):
-    """Minimal persistence boundary for canonical execution records."""
+    """Persistence boundary for canonical execution records and lifecycle events."""
 
     def create(self, record: ExecutionRecord) -> None: ...
 
@@ -84,21 +106,28 @@ class ExecutionStore(Protocol):
 
     def list_unfinished(self) -> list[ExecutionRecord]: ...
 
+    def list_events(
+        self, execution_id: str, *, cursor: int = 0, limit: int = 50
+    ) -> ExecutionEventPage: ...
+
 
 class InMemoryExecutionStore:
-    """Thread-safe process-local execution history used by default."""
+    """Thread-safe process-local execution record and audit history."""
 
     def __init__(self) -> None:
         self._records: dict[str, ExecutionRecord] = {}
+        self._events: dict[str, list[ExecutionEvent]] = {}
         self._lock = threading.RLock()
 
     def create(self, record: ExecutionRecord) -> None:
+        event = _created_event(record)
         with self._lock:
             if record.execution_id in self._records:
                 raise DuplicateExecutionError(
                     f"duplicate execution_id: {record.execution_id}"
                 )
             self._records[record.execution_id] = record
+            self._events[record.execution_id] = [event]
 
     def get(self, execution_id: str) -> ExecutionRecord:
         with self._lock:
@@ -126,7 +155,12 @@ class InMemoryExecutionStore:
         if not expected:
             raise ValueError("expected_states must not be empty")
         with self._lock:
-            current = self.get(execution_id)
+            try:
+                current = self._records[execution_id]
+            except KeyError as exc:
+                raise UnknownExecutionError(
+                    f"unknown execution_id: {execution_id}"
+                ) from exc
             if current.state not in expected:
                 raise ExecutionConflictError(
                     f"execution {execution_id} is {current.state.value}, "
@@ -143,7 +177,10 @@ class InMemoryExecutionStore:
                 finished_at=finished_at,
                 updated_at=updated_at,
             )
+            events = self._events[execution_id]
+            event = _transition_event(current, record, len(events) + 1)
             self._records[execution_id] = record
+            events.append(event)
             return record
 
     def list_unfinished(self) -> list[ExecutionRecord]:
@@ -154,16 +191,40 @@ class InMemoryExecutionStore:
                 if record.state in _UNFINISHED_STATES
             ]
 
+    def list_events(
+        self, execution_id: str, *, cursor: int = 0, limit: int = 50
+    ) -> ExecutionEventPage:
+        _validate_event_page_args(cursor, limit)
+        with self._lock:
+            if execution_id not in self._records:
+                raise UnknownExecutionError(f"unknown execution_id: {execution_id}")
+            all_events = self._events[execution_id]
+            selected = [event for event in all_events if event.sequence > cursor]
+            page = selected[: limit + 1]
+            has_more = len(page) > limit
+            events = page[:limit]
+            next_cursor = events[-1].sequence if events else cursor
+            return ExecutionEventPage(
+                events=list(events),
+                next_cursor=next_cursor,
+                has_more=has_more,
+                history_complete=bool(
+                    all_events
+                    and all_events[0].sequence == 1
+                    and all_events[0].event_type is ExecutionEventType.CREATED
+                ),
+            )
+
 
 class SqliteExecutionStore:
-    """SQLite-backed execution metadata with short-lived connections."""
+    """SQLite-backed durable execution records and append-only lifecycle events."""
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
         self._initialize()
 
     def create(self, record: ExecutionRecord) -> None:
-        values = _record_values(record)
+        event = _created_event(record)
         placeholders = ", ".join("?" for _ in _EXECUTION_COLUMNS)
         sql = (
             f"INSERT INTO executions ({', '.join(_EXECUTION_COLUMNS)}) "
@@ -171,11 +232,21 @@ class SqliteExecutionStore:
         )
         try:
             with self._connect() as connection:
-                connection.execute(sql, values)
-        except sqlite3.IntegrityError as exc:
-            raise DuplicateExecutionError(
-                f"duplicate execution_id: {record.execution_id}"
-            ) from exc
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    connection.execute(sql, _record_values(record))
+                except sqlite3.IntegrityError as exc:
+                    raise DuplicateExecutionError(
+                        f"duplicate execution_id: {record.execution_id}"
+                    ) from exc
+                connection.execute(
+                    f"INSERT INTO execution_events ({', '.join(_EVENT_COLUMNS)}) "
+                    f"VALUES ({', '.join('?' for _ in _EVENT_COLUMNS)})",
+                    _event_values(event),
+                )
+                connection.commit()
+        except DuplicateExecutionError:
+            raise
         except sqlite3.DatabaseError as exc:
             raise ExecutionStoreError(f"cannot create execution record: {exc}") from exc
 
@@ -237,6 +308,14 @@ class SqliteExecutionStore:
                     finished_at=finished_at,
                     updated_at=updated_at,
                 )
+                sequence = int(
+                    connection.execute(
+                        "SELECT COALESCE(MAX(sequence), 0) + 1 "
+                        "FROM execution_events WHERE execution_id = ?",
+                        (execution_id,),
+                    ).fetchone()[0]
+                )
+                event = _transition_event(current, updated, sequence)
                 placeholders = ", ".join("?" for _ in expected_values)
                 cursor = connection.execute(
                     "UPDATE executions SET "
@@ -259,6 +338,11 @@ class SqliteExecutionStore:
                     raise ExecutionConflictError(
                         f"execution {execution_id} changed during transition"
                     )
+                connection.execute(
+                    f"INSERT INTO execution_events ({', '.join(_EVENT_COLUMNS)}) "
+                    f"VALUES ({', '.join('?' for _ in _EVENT_COLUMNS)})",
+                    _event_values(event),
+                )
                 connection.commit()
                 return updated
         except (UnknownExecutionError, ExecutionConflictError):
@@ -284,6 +368,45 @@ class SqliteExecutionStore:
             ) from exc
         return [_record_from_row(row) for row in rows]
 
+    def list_events(
+        self, execution_id: str, *, cursor: int = 0, limit: int = 50
+    ) -> ExecutionEventPage:
+        _validate_event_page_args(cursor, limit)
+        try:
+            with self._connect() as connection:
+                exists = connection.execute(
+                    "SELECT 1 FROM executions WHERE execution_id = ?",
+                    (execution_id,),
+                ).fetchone()
+                if exists is None:
+                    raise UnknownExecutionError(f"unknown execution_id: {execution_id}")
+                rows = connection.execute(
+                    f"SELECT {', '.join(_EVENT_COLUMNS)} FROM execution_events "
+                    "WHERE execution_id = ? AND sequence > ? "
+                    "ORDER BY sequence LIMIT ?",
+                    (execution_id, cursor, limit + 1),
+                ).fetchall()
+                first = connection.execute(
+                    "SELECT sequence, event_type FROM execution_events "
+                    "WHERE execution_id = ? ORDER BY sequence LIMIT 1",
+                    (execution_id,),
+                ).fetchone()
+        except UnknownExecutionError:
+            raise
+        except sqlite3.DatabaseError as exc:
+            raise ExecutionStoreError(f"cannot list execution events: {exc}") from exc
+        events = [_event_from_row(row) for row in rows[:limit]]
+        return ExecutionEventPage(
+            events=events,
+            next_cursor=events[-1].sequence if events else cursor,
+            has_more=len(rows) > limit,
+            history_complete=bool(
+                first is not None
+                and first[0] == 1
+                and first[1] == ExecutionEventType.CREATED.value
+            ),
+        )
+
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=5.0)
@@ -291,6 +414,7 @@ class SqliteExecutionStore:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA busy_timeout=5000")
             connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA foreign_keys=ON")
             yield connection
         except BaseException:
             connection.rollback()
@@ -310,28 +434,15 @@ class SqliteExecutionStore:
                         f"version {_SCHEMA_VERSION}"
                     )
                 if version == 0:
-                    connection.executescript(
-                        """
-                        CREATE TABLE executions (
-                            execution_id TEXT PRIMARY KEY,
-                            kind TEXT NOT NULL,
-                            name TEXT NOT NULL,
-                            tool TEXT,
-                            mode TEXT NOT NULL,
-                            state TEXT NOT NULL,
-                            created_at REAL NOT NULL,
-                            updated_at REAL NOT NULL,
-                            started_at REAL,
-                            finished_at REAL,
-                            exit_code INTEGER,
-                            reason TEXT,
-                            error_summary TEXT
-                        );
-                        CREATE INDEX executions_state_created
-                        ON executions(state, created_at);
-                        PRAGMA user_version=1;
-                        """
-                    )
+                    connection.execute("BEGIN IMMEDIATE")
+                    _create_v1_schema(connection)
+                    _create_event_schema(connection)
+                    connection.execute("PRAGMA user_version=2")
+                    connection.commit()
+                elif version == 1:
+                    connection.execute("BEGIN IMMEDIATE")
+                    _create_event_schema(connection)
+                    connection.execute("PRAGMA user_version=2")
                     connection.commit()
                 self._validate_schema(connection)
         except ExecutionStoreError:
@@ -348,14 +459,20 @@ class SqliteExecutionStore:
             raise ExecutionStoreError(
                 f"unsupported execution database version: {version}"
             )
-        rows = connection.execute("PRAGMA table_info(executions)").fetchall()
-        if not rows:
+        execution_rows = connection.execute("PRAGMA table_info(executions)").fetchall()
+        event_rows = connection.execute(
+            "PRAGMA table_info(execution_events)"
+        ).fetchall()
+        if not execution_rows:
             raise ExecutionStoreError("execution database schema is missing executions")
-        names = tuple(row[1] for row in rows)
-        if names != _EXECUTION_COLUMNS:
+        if not event_rows:
             raise ExecutionStoreError(
-                "execution database schema does not match version 1"
+                "execution database schema is missing execution_events"
             )
+        if tuple(row[1] for row in execution_rows) != _EXECUTION_COLUMNS:
+            raise ExecutionStoreError("execution database executions schema is invalid")
+        if tuple(row[1] for row in event_rows) != _EVENT_COLUMNS:
+            raise ExecutionStoreError("execution database event schema is invalid")
 
 
 def validate_execution_db_path(path: str | Path, *, workspace_root: Path) -> Path:
@@ -415,6 +532,41 @@ def reconcile_unfinished_executions(store: ExecutionStore) -> list[ExecutionReco
     return reconciled
 
 
+def _validate_event_page_args(cursor: int, limit: int) -> None:
+    if type(cursor) is not int or cursor < 0:
+        raise ValueError("cursor must be a non-negative integer")
+    if type(limit) is not int or not 1 <= limit <= _MAX_EVENT_PAGE_SIZE:
+        raise ValueError("limit must be an integer between 1 and 100")
+
+
+def _created_event(record: ExecutionRecord) -> ExecutionEvent:
+    return ExecutionEvent(
+        execution_id=record.execution_id,
+        sequence=1,
+        timestamp=record.created_at,
+        event_type=ExecutionEventType.CREATED,
+        from_state=None,
+        to_state=record.state,
+        reason=record.reason,
+        error_summary=record.error_summary,
+    )
+
+
+def _transition_event(
+    current: ExecutionRecord, updated: ExecutionRecord, sequence: int
+) -> ExecutionEvent:
+    return ExecutionEvent(
+        execution_id=updated.execution_id,
+        sequence=sequence,
+        timestamp=updated.updated_at,
+        event_type=ExecutionEventType.STATE_TRANSITION,
+        from_state=current.state,
+        to_state=updated.state,
+        reason=updated.reason,
+        error_summary=updated.error_summary,
+    )
+
+
 def _transitioned_record(
     current: ExecutionRecord,
     new_state: ExecutionState,
@@ -461,6 +613,31 @@ def _transitioned_record(
     return ExecutionRecord.model_validate(values)
 
 
+def _create_v1_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TABLE executions ("
+        "execution_id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, "
+        "tool TEXT, mode TEXT NOT NULL, state TEXT NOT NULL, "
+        "created_at REAL NOT NULL, updated_at REAL NOT NULL, started_at REAL, "
+        "finished_at REAL, exit_code INTEGER, "
+        "reason TEXT, error_summary TEXT)"
+    )
+    connection.execute(
+        "CREATE INDEX executions_state_created ON executions(state, created_at)"
+    )
+
+
+def _create_event_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TABLE execution_events ("
+        "execution_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
+        "event_type TEXT NOT NULL, timestamp REAL NOT NULL, from_state TEXT, "
+        "to_state TEXT NOT NULL, reason TEXT, "
+        "error_summary TEXT, PRIMARY KEY (execution_id, sequence), "
+        "FOREIGN KEY (execution_id) REFERENCES executions(execution_id))"
+    )
+
+
 def _record_values(record: ExecutionRecord) -> tuple[object, ...]:
     return (
         record.execution_id,
@@ -479,10 +656,32 @@ def _record_values(record: ExecutionRecord) -> tuple[object, ...]:
     )
 
 
+def _event_values(event: ExecutionEvent) -> tuple[object, ...]:
+    return (
+        event.execution_id,
+        event.sequence,
+        event.event_type.value,
+        event.timestamp,
+        event.from_state.value if event.from_state is not None else None,
+        event.to_state.value,
+        event.reason.value if event.reason is not None else None,
+        event.error_summary,
+    )
+
+
 def _record_from_row(row: sqlite3.Row) -> ExecutionRecord:
     try:
         return ExecutionRecord.model_validate(dict(row))
     except ValidationError as exc:
         raise ExecutionStoreError(
             "execution database contains an invalid record"
+        ) from exc
+
+
+def _event_from_row(row: sqlite3.Row) -> ExecutionEvent:
+    try:
+        return ExecutionEvent.model_validate(dict(row))
+    except ValidationError as exc:
+        raise ExecutionStoreError(
+            "execution database contains an invalid event"
         ) from exc

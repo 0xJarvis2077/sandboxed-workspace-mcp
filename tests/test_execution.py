@@ -5,6 +5,8 @@ import unittest
 from pydantic import ValidationError
 
 from workspace_guard_mcp.execution import (
+    ExecutionEvent,
+    ExecutionEventType,
     ExecutionKind,
     ExecutionMode,
     ExecutionReason,
@@ -52,6 +54,63 @@ class ExecutionDomainTests(unittest.TestCase):
             self.record(state="unknown")
         with self.assertRaises(ValidationError):
             self.record(error_summary="x" * 4097)
+
+    def test_execution_events_enforce_canonical_history_shape(self) -> None:
+        created = ExecutionEvent(
+            execution_id="exec-test",
+            sequence=1,
+            timestamp=1.0,
+            event_type=ExecutionEventType.CREATED,
+            from_state=None,
+            to_state=ExecutionState.STARTING,
+            reason=None,
+            error_summary=None,
+        )
+        self.assertEqual(created.sequence, 1)
+        transition = ExecutionEvent(
+            execution_id="exec-test",
+            sequence=2,
+            timestamp=2.0,
+            event_type=ExecutionEventType.STATE_TRANSITION,
+            from_state=ExecutionState.STARTING,
+            to_state=ExecutionState.RUNNING,
+            reason=None,
+            error_summary=None,
+        )
+        self.assertEqual(transition.to_state, ExecutionState.RUNNING)
+
+        invalid_updates = (
+            {
+                "event_type": ExecutionEventType.CREATED,
+                "from_state": ExecutionState.STARTING,
+            },
+            {"event_type": ExecutionEventType.STATE_TRANSITION, "from_state": None},
+            {
+                "event_type": ExecutionEventType.STATE_TRANSITION,
+                "from_state": ExecutionState.STARTING,
+                "to_state": ExecutionState.SUCCEEDED,
+            },
+            {"sequence": 0},
+            {"sequence": True},
+            {"timestamp": float("nan")},
+            {"timestamp": float("inf")},
+            {"execution_id": "界" * 171},
+            {"error_summary": "x" * 4097},
+            {"argv": ["sh"]},
+        )
+        base: dict[str, object] = {
+            "execution_id": "exec-test",
+            "sequence": 2,
+            "timestamp": 2.0,
+            "event_type": ExecutionEventType.STATE_TRANSITION,
+            "from_state": ExecutionState.STARTING,
+            "to_state": ExecutionState.RUNNING,
+            "reason": None,
+            "error_summary": None,
+        }
+        for updates in invalid_updates:
+            with self.subTest(updates=updates), self.assertRaises(ValidationError):
+                ExecutionEvent.model_validate({**base, **updates})
 
     def test_terminal_states_are_exact(self) -> None:
         terminal = {

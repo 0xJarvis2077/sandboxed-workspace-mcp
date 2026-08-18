@@ -83,6 +83,13 @@ class ToolContractTests(unittest.TestCase):
             "run_pytest": {"status", "failures"},
             "run_ruff": {"status", "diagnostics"},
             "run_pytest_coverage": {"tests", "coverage"},
+            "execution_status": {"execution_id", "state", "reason"},
+            "execution_events": {
+                "events",
+                "next_cursor",
+                "has_more",
+                "history_complete",
+            },
         }
         for name, required_names in expectations.items():
             with self.subTest(tool=name):

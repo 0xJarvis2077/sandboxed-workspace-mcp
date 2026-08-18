@@ -774,6 +774,35 @@ class TaskManager:
                 f"failed to start {failure_description}: {exc}"
             ) from exc
 
+    def execution_status(self, execution_id: str) -> dict[str, object]:
+        record = self._execution_record(execution_id, id_label="execution_id")
+        return record.model_dump(mode="json")
+
+    def execution_events(
+        self, execution_id: str, cursor: int = 0, limit: int = 50
+    ) -> dict[str, object]:
+        self._execution_record(execution_id, id_label="execution_id")
+        try:
+            page = self.execution_store.list_events(
+                execution_id, cursor=cursor, limit=limit
+            )
+        except ValueError as exc:
+            raise TaskManagerError(str(exc)) from exc
+        except UnknownExecutionError as exc:
+            raise TaskManagerError(
+                "unknown execution_id for this server instance"
+            ) from exc
+        except ExecutionStoreError as exc:
+            raise TaskManagerError(f"failed to read execution events: {exc}") from exc
+        return {
+            "execution_id": execution_id,
+            "cursor": cursor,
+            "next_cursor": page.next_cursor,
+            "events": [event.model_dump(mode="json") for event in page.events],
+            "has_more": page.has_more,
+            "history_complete": page.history_complete,
+        }
+
     def task_status(self, task_id: str) -> dict[str, object]:
         record = self._service_execution_record(task_id)
         with self._lock:
@@ -974,13 +1003,17 @@ class TaskManager:
         self._starting.pop(lease.execution_id, None)
         lease.done.set()
 
-    def _execution_record(self, execution_id: str) -> ExecutionRecord:
+    def _execution_record(
+        self, execution_id: str, *, id_label: str = "task_id"
+    ) -> ExecutionRecord:
         if not isinstance(execution_id, str) or not execution_id:
-            raise TaskManagerError("task_id must be a non-empty manager-issued ID")
+            raise TaskManagerError(f"{id_label} must be a non-empty manager-issued ID")
         try:
             return self.execution_store.get(execution_id)
         except UnknownExecutionError as exc:
-            raise TaskManagerError("unknown task_id for this server instance") from exc
+            raise TaskManagerError(
+                f"unknown {id_label} for this server instance"
+            ) from exc
         except ExecutionStoreError as exc:
             raise TaskManagerError(f"failed to read execution record: {exc}") from exc
 

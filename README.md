@@ -91,7 +91,8 @@ python -m venv .venv
 | Git 写入（可选） | `git_init`, `git_create_baseline` | 仅配置 root、main 分支和服务器固定首次基线；默认不注册 |
 | 兼容命令 | `run_shell` | 只解析封闭的只读语法，从不启动 Shell |
 | 固定任务 | `list_tasks`, `run_task` | 操作者预定义的同步任务 |
-| 长任务 | `start_task`, `task_status`, `task_logs`, `stop_task` | 有界 stdout/stderr 和 cursor 日志 |
+| 长任务 | `start_task`, `task_status`, `task_logs`, `stop_task` | 有界 stdout/stderr 和 cursor 日志；`task_status` 保留 service 兼容语义 |
+| Execution 查询 | `execution_status`, `execution_events` | canonical current truth 与有界、cursor-based append-only lifecycle history |
 | Execution profile | `list_execution_profiles`, `python_version`, `run_pytest`, `run_ruff`, `run_mypy`, `run_pytest_coverage`, `run_python_script`, `run_command`, `start_command` | 固定镜像、一次性快照中的授权执行与结构化诊断 |
 
 没有提供 task config 时，任务管理器、容器后端和动态执行工具都不会创建或注册。
@@ -277,10 +278,10 @@ CI 会实际构建该 Dockerfile，并在 `--network none` 的运行容器中执
 | `--block-path` | 追加 root-relative blocked glob |
 | `--ignore-dir` | 追加不主动扫描的目录 basename |
 | `--task-config` / `WORKSPACE_GUARD_MCP_TASK_CONFIG` | 工作区外的可信任务 JSON |
-| `--execution-db` / `WORKSPACE_GUARD_MCP_EXECUTION_DB` | 可选的工作区外 ExecutionRecord SQLite 数据库 |
+| `--execution-db` / `WORKSPACE_GUARD_MCP_EXECUTION_DB` | 可选的工作区外 ExecutionRecord + ExecutionEvent SQLite 数据库 |
 | `--transport` | `stdio` 或 `streamable-http` |
 
-WorkspaceGuard 可选地把有界、public-safe 的 `ExecutionRecord` 元数据持久化到 operator 控制且位于 workspace 外的 SQLite 数据库。持久化会保留跨 server restart 的 execution history，但不会扫描、重新连接或接管之前仍在运行的 container；旧进程留下的未完成 execution 会在启动时标记为 `CRASHED / SERVER_RESTARTED`。
+WorkspaceGuard 可选地把有界、public-safe 的 `ExecutionRecord` current truth 与 `ExecutionEvent` lifecycle history 持久化到 operator 控制且位于 workspace 外的 SQLite 数据库。Record transition 与 Event append 在同一 durable transaction 中完成。未配置 `--execution-db` 时，两者仅保存在 process-local InMemory store；配置后可跨 server restart 持久化。v1 execution database 会自动升级到 v2，升级前已有 record 不会被伪造历史，`execution_events` 会通过 `history_complete=false` 明确表示这类 partial history。持久化不会扫描、重新连接或接管之前仍在运行的 container；旧进程留下的未完成 execution 会在启动时标记为 `CRASHED / SERVER_RESTARTED`。
 
 `stdio` 适合本机连接。Streamable HTTP 默认只监听 `127.0.0.1:3001/mcp`；非回环或公开部署需要明确的网络开关、Host/Origin 配置、HTTPS 和外部 OAuth/OIDC。`--allow-unauthenticated-http` 仅用于临时开发，不应作为部署方案。完整 OAuth 拓扑和 RFC 9728 细节见 [SECURITY.md](SECURITY.md)。
 
@@ -303,8 +304,8 @@ src/workspace_guard_mcp/
   pytest_debug_plugin.py # 快照内注入的受控 pytest failure collector
   command_execution.py  # 通用命令 argv 和 workspace cwd 校验
   task_snapshot.py      # 过滤后的有界临时快照
-  execution.py          # canonical Execution state/reason/record domain model
-  execution_store.py    # 内存 / SQLite execution metadata store
+  execution.py          # canonical Execution record/event lifecycle domain model
+  execution_store.py    # 内存 / SQLite record + append-only audit store
   task_runner.py        # Docker/Podman argv、pipe 和同步执行
   task_manager.py       # execution 生命周期、并发和 service runtime session
 tests/                   # 单元、边界和传输回归测试
