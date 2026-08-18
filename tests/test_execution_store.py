@@ -90,6 +90,19 @@ class InMemoryExecutionStoreTests(unittest.TestCase):
         with self.assertRaises(UnknownExecutionError):
             store.get("missing")
 
+    def test_starting_to_cancelling_initializes_started_at(self) -> None:
+        store = InMemoryExecutionStore()
+        store.create(record())
+        cancelling = store.transition(
+            "exec-test",
+            {ExecutionState.STARTING},
+            ExecutionState.CANCELLING,
+            reason=ExecutionReason.USER_CANCELLED,
+        )
+        self.assertEqual(cancelling.state, ExecutionState.CANCELLING)
+        self.assertIsNotNone(cancelling.started_at)
+        self.assertIsNone(cancelling.finished_at)
+
 
 class SqliteExecutionStoreTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -150,6 +163,18 @@ class SqliteExecutionStoreTests(unittest.TestCase):
         with sqlite3.connect(self.path) as connection:
             connection.execute(
                 "UPDATE executions SET state = 'not-a-state' WHERE execution_id = ?",
+                ("exec-test",),
+            )
+        with self.assertRaises(ExecutionStoreError):
+            store.get("exec-test")
+
+    def test_invalid_persisted_lifecycle_record_fails_closed(self) -> None:
+        store = SqliteExecutionStore(self.path)
+        store.create(record())
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "UPDATE executions SET state = 'succeeded', finished_at = NULL "
+                "WHERE execution_id = ?",
                 ("exec-test",),
             )
         with self.assertRaises(ExecutionStoreError):

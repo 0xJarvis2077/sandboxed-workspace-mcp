@@ -101,6 +101,112 @@ class ExecutionDomainTests(unittest.TestCase):
             ):
                 ensure_execution_transition(terminal, ExecutionState.RUNNING)
 
+    def test_lifecycle_chronology_is_consistent(self) -> None:
+        with self.assertRaises(ValidationError):
+            self.record(created_at=10.0, updated_at=9.0)
+        with self.assertRaises(ValidationError):
+            self.record(created_at=10.0, updated_at=10.0, started_at=9.0)
+        with self.assertRaises(ValidationError):
+            self.record(
+                state=ExecutionState.SUCCEEDED,
+                created_at=10.0,
+                updated_at=11.0,
+                started_at=11.0,
+                finished_at=10.5,
+            )
+        crashed = self.record(
+            state=ExecutionState.CRASHED,
+            created_at=10.0,
+            updated_at=11.0,
+            finished_at=11.0,
+            reason=ExecutionReason.RUNTIME_START_FAILED,
+        )
+        self.assertIsNone(crashed.started_at)
+
+    def test_state_and_timestamp_consistency(self) -> None:
+        for state in (ExecutionState.RUNNING, ExecutionState.CANCELLING):
+            with self.subTest(state=state), self.assertRaises(ValidationError):
+                self.record(state=state)
+
+        terminal_reasons = {
+            ExecutionState.SUCCEEDED: None,
+            ExecutionState.FAILED: None,
+            ExecutionState.CANCELLED: ExecutionReason.USER_CANCELLED,
+            ExecutionState.TIMED_OUT: ExecutionReason.TIMEOUT,
+            ExecutionState.CRASHED: ExecutionReason.RUNTIME_START_FAILED,
+        }
+        for state, reason in terminal_reasons.items():
+            with self.subTest(state=state), self.assertRaises(ValidationError):
+                self.record(state=state, started_at=1.0, reason=reason)
+
+        for state in (
+            ExecutionState.STARTING,
+            ExecutionState.RUNNING,
+            ExecutionState.CANCELLING,
+        ):
+            updates: dict[str, object] = {
+                "state": state,
+                "updated_at": 2.0,
+                "finished_at": 2.0,
+            }
+            if state is not ExecutionState.STARTING:
+                updates["started_at"] = 1.0
+            with self.subTest(state=state), self.assertRaises(ValidationError):
+                self.record(**updates)
+
+    def test_terminal_reason_invariants(self) -> None:
+        self.record(
+            state=ExecutionState.TIMED_OUT,
+            updated_at=2.0,
+            finished_at=2.0,
+            reason=ExecutionReason.TIMEOUT,
+        )
+        for reason in (None, ExecutionReason.USER_CANCELLED):
+            with self.subTest(reason=reason), self.assertRaises(ValidationError):
+                self.record(
+                    state=ExecutionState.TIMED_OUT,
+                    updated_at=2.0,
+                    finished_at=2.0,
+                    reason=reason,
+                )
+
+        for reason in (
+            ExecutionReason.USER_CANCELLED,
+            ExecutionReason.CLIENT_CANCELLED,
+            ExecutionReason.SERVER_SHUTDOWN,
+        ):
+            self.record(
+                state=ExecutionState.CANCELLED,
+                updated_at=2.0,
+                finished_at=2.0,
+                reason=reason,
+            )
+        for reason in (
+            None,
+            ExecutionReason.TIMEOUT,
+            ExecutionReason.RUNTIME_START_FAILED,
+        ):
+            with self.subTest(reason=reason), self.assertRaises(ValidationError):
+                self.record(
+                    state=ExecutionState.CANCELLED,
+                    updated_at=2.0,
+                    finished_at=2.0,
+                    reason=reason,
+                )
+
+        self.record(
+            state=ExecutionState.SUCCEEDED,
+            updated_at=2.0,
+            finished_at=2.0,
+        )
+        with self.assertRaises(ValidationError):
+            self.record(
+                state=ExecutionState.SUCCEEDED,
+                updated_at=2.0,
+                finished_at=2.0,
+                reason=ExecutionReason.TIMEOUT,
+            )
+
     def test_legacy_status_mapping_keeps_reason_out_of_public_state(self) -> None:
         self.assertEqual(
             legacy_execution_status(

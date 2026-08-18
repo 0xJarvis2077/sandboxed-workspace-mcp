@@ -5,7 +5,14 @@ from __future__ import annotations
 import sys
 from collections.abc import Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 if sys.version_info >= (3, 11):
     from enum import StrEnum
@@ -57,6 +64,13 @@ TERMINAL_EXECUTION_STATES = frozenset(
         ExecutionState.CANCELLED,
         ExecutionState.TIMED_OUT,
         ExecutionState.CRASHED,
+    }
+)
+_CANCELLATION_REASONS = frozenset(
+    {
+        ExecutionReason.USER_CANCELLED,
+        ExecutionReason.CLIENT_CANCELLED,
+        ExecutionReason.SERVER_SHUTDOWN,
     }
 )
 
@@ -140,6 +154,45 @@ class ExecutionRecord(BaseModel):
         if len(value.encode("utf-8")) > limit:
             raise ValueError(f"{field_name} exceeds the {limit}-byte limit")
         return value
+
+    @model_validator(mode="after")
+    def _validate_lifecycle(self) -> ExecutionRecord:
+        if self.updated_at < self.created_at:
+            raise ValueError("updated_at must not be earlier than created_at")
+        if self.started_at is not None and self.started_at < self.created_at:
+            raise ValueError("started_at must not be earlier than created_at")
+        if self.finished_at is not None:
+            lower_bound = (
+                self.started_at if self.started_at is not None else self.created_at
+            )
+            if self.finished_at < lower_bound:
+                label = "started_at" if self.started_at is not None else "created_at"
+                raise ValueError(f"finished_at must not be earlier than {label}")
+
+        if (
+            self.state in {ExecutionState.RUNNING, ExecutionState.CANCELLING}
+            and self.started_at is None
+        ):
+            raise ValueError(f"{self.state.value} execution requires started_at")
+        if is_terminal_state(self.state):
+            if self.finished_at is None:
+                raise ValueError("terminal execution requires finished_at")
+        elif self.finished_at is not None:
+            raise ValueError("non-terminal execution must not have finished_at")
+
+        if (
+            self.state is ExecutionState.TIMED_OUT
+            and self.reason is not ExecutionReason.TIMEOUT
+        ):
+            raise ValueError("timed_out execution requires timeout reason")
+        if (
+            self.state is ExecutionState.CANCELLED
+            and self.reason not in _CANCELLATION_REASONS
+        ):
+            raise ValueError("cancelled execution requires a cancellation reason")
+        if self.state is ExecutionState.SUCCEEDED and self.reason is not None:
+            raise ValueError("succeeded execution must not have a reason")
+        return self
 
     @property
     def terminal(self) -> bool:

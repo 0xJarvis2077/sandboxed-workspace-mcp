@@ -32,7 +32,6 @@ from .execution_store import (
     ExecutionStore,
     ExecutionStoreError,
     InMemoryExecutionStore,
-    SqliteExecutionStore,
     UnknownExecutionError,
     reconcile_unfinished_executions,
 )
@@ -247,8 +246,7 @@ class TaskManager:
         self.configuration = configuration
         self.backend = backend or CliContainerBackend(configuration.runtime)
         self.execution_store = execution_store or InMemoryExecutionStore()
-        if isinstance(self.execution_store, SqliteExecutionStore):
-            reconcile_unfinished_executions(self.execution_store)
+        reconcile_unfinished_executions(self.execution_store)
         self.python_commands = PythonCommandCompiler(settings)
         self.commands = CommandCompiler(settings)
         self._capacity = threading.BoundedSemaphore(

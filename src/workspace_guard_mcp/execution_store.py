@@ -429,7 +429,10 @@ def _transitioned_record(
     now = time.time() if updated_at is None else updated_at
     actual_started = current.started_at if started_at is None else started_at
     actual_finished = current.finished_at if finished_at is None else finished_at
-    if new_state is ExecutionState.RUNNING and actual_started is None:
+    if (
+        new_state in {ExecutionState.RUNNING, ExecutionState.CANCELLING}
+        and actual_started is None
+    ):
         actual_started = now
     if (
         new_state
