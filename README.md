@@ -2,9 +2,9 @@
 
 [English](README.en.md) · [安全边界](SECURITY.md) · [任务模板](examples/tasks.json) · [Execution profile 模板](examples/execution-profiles.json)
 
-WorkspaceGuard MCP 让 AI Coding Agent 可以直接操作真实代码仓库，同时把“能读什么、能改什么、能执行什么”限制在明确的边界里。
+WorkspaceGuard MCP 是面向 AI Agent 的安全执行层（secure execution layer）。它把 Agent 对真实工作区的文件访问、Git 操作以及代码、命令和任务执行限制在显式的 capability、安全策略和资源边界内。
 
-它适合这种场景：你希望 ChatGPT / Coding Agent 能像本地开发助手一样搜索代码、修改文件、看 Git diff、跑 pytest / Ruff / mypy，甚至启动受控的调试命令，但又不想直接交出宿主机 Shell、整个文件系统或无限制的 Docker 权限。
+Coding Agent 是当前最成熟的使用场景：Agent 可以搜索代码、修改文件、审查 Git diff、运行 pytest / Ruff / mypy，甚至启动受控的调试命令，而无需获得宿主机 Shell、整个文件系统或无限制 Docker 权限。更高层的 Agent Runtime 也可以把 WorkspaceGuard 作为 workspace / code / process / task execution backend。
 
 核心能力包括：
 
@@ -13,6 +13,12 @@ WorkspaceGuard MCP 让 AI Coding Agent 可以直接操作真实代码仓库，�
 - **面向 Agent 的代码审查**：有界 Git 查询、`workspace_diff` 和结构化 Tool Results。
 - **隔离执行**：pytest、Ruff、mypy、coverage 和通用命令运行在固定镜像的一次性快照中，不直接执行在宿主工作区。
 - **按需开放能力**：Git 写入、回收站、永久清理、容器执行和 HTTP/OAuth 都需要显式开启。
+
+## 项目边界
+
+WorkspaceGuard 专注于 **execution**，不负责 Agent 的 planning、memory、RAG、workflow orchestration，也不负责把 ERP、CRM、邮件、数据库或其他企业系统封装成业务 capability。更高层系统可以把这些能力单独提供给 Agent，并在需要 workspace、代码、命令或任务执行时使用 WorkspaceGuard 作为受控执行后端。
+
+这意味着 Coding Agent 是重要场景，但不是架构边界；WorkspaceGuard 的核心职责是提供安全、有界、可观察的执行原语，而不是成为完整的 Agent Runtime 或企业业务能力平台。
 
 ## 使用前知道这些就够了
 

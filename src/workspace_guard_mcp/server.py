@@ -360,9 +360,10 @@ def create_server(
         "workspace-guard-mcp",
         title="WorkspaceGuard MCP",
         description=(
-            "Capability-bounded workspace file operations with optional recycle-bin "
-            "trash, recovery, alternate-path restore, and read-only Git access within "
-            "one root."
+            "A secure, capability-bounded execution layer for AI agents, providing "
+            "controlled workspace access, Git operations, recycle-bin trash, "
+            "recovery, alternate-path restore, and isolated code, command, and "
+            "operator-authorized task execution within one root."
         ),
         instructions=(
             "All paths are confined to the configured workspace. Use replace_text for "

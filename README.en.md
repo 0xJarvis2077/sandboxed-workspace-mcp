@@ -2,9 +2,9 @@
 
 [中文](README.md) · [Security boundary](SECURITY.md) · [Task template](examples/tasks.json) · [Execution profile template](examples/execution-profiles.json)
 
-WorkspaceGuard MCP lets AI coding agents work directly with real repositories while keeping file access, mutation, Git operations, and code execution inside explicit boundaries.
+WorkspaceGuard MCP is a secure execution layer for AI agents. It keeps workspace access, Git operations, code execution, commands, and operator-authorized tasks inside explicit capability, policy, and resource boundaries.
 
-It is built for the useful middle ground between a read-only code browser and handing an agent your full local shell. An agent can search code, edit files, review Git diffs, run pytest / Ruff / mypy, and launch controlled debugging commands without automatically gaining access to the rest of the host filesystem, arbitrary Docker settings, or unrestricted Git mutation.
+Coding agents are the most mature use case today: an agent can search code, edit files, review Git diffs, run pytest / Ruff / mypy, and launch controlled debugging commands without automatically gaining access to the rest of the host filesystem, arbitrary Docker settings, or unrestricted Git mutation. Higher-level agent runtimes can also use WorkspaceGuard as a workspace / code / process / task execution backend.
 
 Core capabilities:
 
@@ -13,6 +13,12 @@ Core capabilities:
 - **Agent-friendly review** with bounded Git queries, `workspace_diff`, structured Tool Results, and self-describing MCP Resources.
 - **Isolated execution** for pytest, Ruff, mypy, coverage, and approved commands inside pinned images and disposable workspace snapshots.
 - **Explicit privilege gates** for Git writes, recycle-bin purge, container execution, and HTTP/OAuth exposure.
+
+## Project boundary
+
+WorkspaceGuard focuses on **execution**. It does not provide agent planning, memory, RAG, workflow orchestration, or adapters that turn ERP, CRM, email, databases, and other enterprise systems into business capabilities. Higher-level systems can expose those capabilities separately and use WorkspaceGuard when they need controlled workspace, code, command, or task execution.
+
+Coding agents are therefore an important use case, not the architectural boundary. WorkspaceGuard's job is to provide secure, bounded, observable execution primitives rather than become a complete agent runtime or enterprise capability platform.
 
 ## What to know before using it
 
