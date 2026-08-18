@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -34,6 +35,7 @@ class ContainerRequest:
     snapshot_path: Path
     task: TaskDefinition
     limits: TaskLimits
+    artifact_path: Path | None = None
     container_workdir: str = "/workspace"
     initial_workspace_bytes: int = 0
     started_at: float | None = None
@@ -221,6 +223,10 @@ def build_container_argv(executable: str, request: ContainerRequest) -> list[str
     mount = f"type=bind,source={snapshot},destination=/workspace"
     if request.task.workspace_access == "read-only":
         mount += ",readonly"
+    artifact_mount: str | None = None
+    if request.artifact_path is not None:
+        artifact_path = request.artifact_path.resolve(strict=True)
+        artifact_mount = f"type=bind,source={artifact_path},destination=/artifacts"
     argv = [
         executable,
         "run",
@@ -271,6 +277,15 @@ def build_container_argv(executable: str, request: ContainerRequest) -> list[str
         "--env",
         "CI=1",
     ]
+    if artifact_mount is not None:
+        argv.extend(
+            [
+                "--mount",
+                artifact_mount,
+                "--env",
+                "WORKSPACEGUARD_ARTIFACT_DIR=/artifacts",
+            ]
+        )
     if request.task.workspace_access == "writable":
         argv.extend(
             [
@@ -282,6 +297,96 @@ def build_container_argv(executable: str, request: ContainerRequest) -> list[str
         )
     argv.extend([request.task.image, *request.task.argv])
     return argv
+
+
+class ArtifactGrowthMonitor:
+    """Best-effort early enforcement for the explicit artifact staging boundary."""
+
+    def __init__(self, request: ContainerRequest, handle: ContainerHandle) -> None:
+        self.request = request
+        self.handle = handle
+        self.limit_exceeded = threading.Event()
+        self.policy_violation = threading.Event()
+        self._stop = threading.Event()
+        self._started = False
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"{request.container_name}-artifact-monitor",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        if self.request.artifact_path is not None:
+            self._thread.start()
+            self._started = True
+
+    def stop_and_join(self) -> None:
+        if not self._started:
+            return
+        self._stop.set()
+        self._thread.join(timeout=2)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            started = time.monotonic()
+            try:
+                usage = self._measure_usage()
+            except OSError:
+                pressure = 0.0
+            else:
+                if usage.policy_violation:
+                    self.policy_violation.set()
+                    self.handle.stop()
+                    return
+                if usage.limit_exceeded:
+                    self.limit_exceeded.set()
+                    self.handle.stop()
+                    return
+                pressure = usage.pressure
+            if self._stop.is_set():
+                return
+            elapsed = time.monotonic() - started
+            self._stop.wait(_next_workspace_scan_delay(elapsed, pressure))
+
+    def _measure_usage(self) -> _ArtifactUsage:
+        if self.request.artifact_path is None:
+            return _ArtifactUsage(False, False, 0.0)
+        count = 0
+        largest = 0
+        total = 0
+        with os.scandir(self.request.artifact_path) as entries:
+            for entry in entries:
+                if self._stop.is_set():
+                    return _ArtifactUsage(False, False, 0.0)
+                metadata = entry.stat(follow_symlinks=False)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                    return _ArtifactUsage(False, True, 1.0)
+                count += 1
+                largest = max(largest, metadata.st_size)
+                total += metadata.st_size
+                pressure = max(
+                    count / self.request.limits.max_artifacts_per_execution,
+                    largest / self.request.limits.max_artifact_bytes,
+                    total / self.request.limits.max_total_artifact_bytes,
+                )
+                if pressure > 1.0:
+                    return _ArtifactUsage(True, False, pressure)
+        return _ArtifactUsage(
+            False,
+            False,
+            max(
+                count / self.request.limits.max_artifacts_per_execution,
+                largest / self.request.limits.max_artifact_bytes,
+                total / self.request.limits.max_total_artifact_bytes,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _ArtifactUsage:
+    limit_exceeded: bool
+    policy_violation: bool
+    pressure: float
 
 
 class WorkspaceGrowthMonitor:
@@ -543,9 +648,12 @@ def run_container_task(
     output_overflow = False
     cancelled = False
     workspace_limit_exceeded = False
+    artifact_limit_exceeded = False
+    artifact_policy_violation = False
     cleanup_failed = False
     monitor_failed = False
     workspace_monitor = WorkspaceGrowthMonitor(request, handle)
+    artifact_monitor = ArtifactGrowthMonitor(request, handle)
 
     def record_cleanup_failure(phase: str, exc: Exception) -> None:
         nonlocal cleanup_failed
@@ -566,6 +674,7 @@ def run_container_task(
 
     try:
         workspace_monitor.start()
+        artifact_monitor.start()
     except Exception as exc:
         capture.stderr(
             f"workspace monitor start failure: {exc}\n".encode(
@@ -573,10 +682,14 @@ def run_container_task(
             )
         )
         stop_handle()
-        try:
-            workspace_monitor.stop_and_join()
-        except Exception as cleanup_exc:
-            record_cleanup_failure("workspace monitor cleanup failure", cleanup_exc)
+        for label, monitor in (
+            ("workspace", workspace_monitor),
+            ("artifact", artifact_monitor),
+        ):
+            try:
+                monitor.stop_and_join()
+            except Exception as cleanup_exc:
+                record_cleanup_failure(f"{label} monitor cleanup failure", cleanup_exc)
         close_handle()
         stdout, stderr = capture.text()
         return TaskRunResult(
@@ -593,6 +706,12 @@ def run_container_task(
         while True:
             if workspace_monitor.exceeded.is_set():
                 workspace_limit_exceeded = True
+                break
+            if artifact_monitor.policy_violation.is_set():
+                artifact_policy_violation = True
+                break
+            if artifact_monitor.limit_exceeded.is_set():
+                artifact_limit_exceeded = True
                 break
             if cancellation_event is not None and cancellation_event.is_set():
                 cancelled = True
@@ -629,10 +748,14 @@ def run_container_task(
         stop_handle()
         raise
     finally:
-        try:
-            workspace_monitor.stop_and_join()
-        except Exception as exc:
-            record_cleanup_failure("workspace monitor cleanup failure", exc)
+        for label, monitor in (
+            ("workspace", workspace_monitor),
+            ("artifact", artifact_monitor),
+        ):
+            try:
+                monitor.stop_and_join()
+            except Exception as exc:
+                record_cleanup_failure(f"{label} monitor cleanup failure", exc)
         close_handle()
 
     if capture.truncated:
@@ -642,6 +765,10 @@ def run_container_task(
     stdout, stderr = capture.text()
     if workspace_monitor.exceeded.is_set():
         workspace_limit_exceeded = True
+    if artifact_monitor.policy_violation.is_set():
+        artifact_policy_violation = True
+    if artifact_monitor.limit_exceeded.is_set():
+        artifact_limit_exceeded = True
 
     if monitor_failed:
         state = ExecutionState.CRASHED
@@ -652,6 +779,12 @@ def run_container_task(
     elif workspace_limit_exceeded:
         state = ExecutionState.FAILED
         reason = ExecutionReason.WORKSPACE_LIMIT_EXCEEDED
+    elif artifact_policy_violation:
+        state = ExecutionState.FAILED
+        reason = ExecutionReason.ARTIFACT_POLICY_VIOLATION
+    elif artifact_limit_exceeded:
+        state = ExecutionState.FAILED
+        reason = ExecutionReason.ARTIFACT_LIMIT_EXCEEDED
     elif cancelled:
         state = ExecutionState.CANCELLED
         reason = None

@@ -275,6 +275,9 @@ class ExecutionLimitsResult(PublicResultModel):
     max_concurrent_tasks: int
     max_workspace_file_bytes: int
     max_workspace_growth_bytes: int
+    max_artifacts_per_execution: int
+    max_artifact_bytes: int
+    max_total_artifact_bytes: int
     allow_best_effort_disk_limit: bool
 
 
@@ -302,6 +305,22 @@ class ExecutionProfileListResult(PublicResultModel):
     profiles: list[ExecutionProfileResult]
 
 
+class ArtifactResult(PublicResultModel):
+    artifact_id: str
+    execution_id: str
+    name: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+    created_at: float
+    resource_uri: str
+
+
+class ExecutionArtifactsResult(PublicResultModel):
+    execution_id: str
+    artifacts: list[ArtifactResult] = Field(max_length=100)
+
+
 class CommandExecutionResult(PublicResultModel):
     execution_id: str
     status: str
@@ -320,6 +339,7 @@ class CommandExecutionResult(PublicResultModel):
     stderr_resource_uri: str | None = None
     timed_out: bool
     duration_ms: int
+    artifacts: list[ArtifactResult] = Field(default_factory=list, max_length=100)
     capability_error: str | None = None
 
 
@@ -738,6 +758,12 @@ _CONTRACTS = (
         "Read bounded append-only lifecycle history for one execution.",
         READ_ONLY_LOCAL,
         ExecutionEventsResult,
+    ),
+    _contract(
+        "execution_artifacts",
+        "List immutable admitted artifacts for one terminal execution.",
+        READ_ONLY_LOCAL,
+        ExecutionArtifactsResult,
     ),
     _contract(
         "task_logs",

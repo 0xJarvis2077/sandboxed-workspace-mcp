@@ -30,6 +30,11 @@ from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import __version__, resources, tool_contracts
+from .artifact_store import (
+    ARTIFACT_RESOURCE_MIME,
+    ARTIFACT_URI_TEMPLATE,
+    ArtifactStoreMiss,
+)
 from .config import Settings
 from .oauth import JWTTokenVerifier, OAuthSettings
 from .result_cache import (
@@ -68,6 +73,7 @@ _STRICT_TOOL_ARGUMENTS = {
     "task_status": frozenset({"task_id"}),
     "execution_status": frozenset({"execution_id"}),
     "execution_events": frozenset({"execution_id", "cursor", "limit"}),
+    "execution_artifacts": frozenset({"execution_id"}),
     "task_logs": frozenset({"task_id", "cursor"}),
     "stop_task": frozenset({"task_id"}),
     "list_execution_profiles": frozenset(),
@@ -134,6 +140,7 @@ _TOOL_SCOPES: dict[str, frozenset[str]] = {
     "task_status": frozenset({"tasks.read"}),
     "execution_status": frozenset({"tasks.read"}),
     "execution_events": frozenset({"tasks.read"}),
+    "execution_artifacts": frozenset({"tasks.read"}),
     "task_logs": frozenset({"tasks.read"}),
     "run_task": frozenset({"tasks.run"}),
     "start_task": frozenset({"tasks.run"}),
@@ -664,6 +671,14 @@ def create_server(
 
             return task_manager.execution_events(execution_id, cursor, limit)
 
+        @server.tool(annotations=READ_ONLY)
+        def execution_artifacts(execution_id: str) -> dict[str, object]:
+            """List immutable admitted artifacts for one terminal execution."""
+
+            return task_manager.execution_artifacts(
+                execution_id, owner_scope=server.result_owner_scope()
+            )
+
     if task_manager is not None and task_manager.configuration.tasks:
 
         @server.tool(annotations=READ_ONLY)
@@ -677,11 +692,13 @@ def create_server(
             """Run one configured run-mode task in a disposable container snapshot."""
 
             cancellation = threading.Event()
+            owner_scope = server.result_owner_scope()
             try:
                 return await asyncio.to_thread(
                     task_manager.run_task,
                     name,
                     cancellation_event=cancellation,
+                    owner_scope=owner_scope,
                 )
             except asyncio.CancelledError:
                 cancellation.set()
@@ -692,11 +709,13 @@ def create_server(
             """Start one configured service-mode task for diagnostics and logs."""
 
             cancellation = threading.Event()
+            owner_scope = server.result_owner_scope()
             try:
                 return await asyncio.to_thread(
                     task_manager.start_task,
                     name,
                     cancellation_event=cancellation,
+                    owner_scope=owner_scope,
                 )
             except asyncio.CancelledError:
                 cancellation.set()
@@ -738,11 +757,13 @@ def create_server(
                 """Read Python version inside an authorized pinned container image."""
 
                 cancellation = threading.Event()
+                owner_scope = server.result_owner_scope()
                 try:
                     return await asyncio.to_thread(
                         task_manager.python_version,
                         profile,
                         cancellation_event=cancellation,
+                        owner_scope=owner_scope,
                     )
                 except asyncio.CancelledError:
                     cancellation.set()
@@ -769,6 +790,7 @@ def create_server(
                 """Run structured targeted pytest in an authorized container profile."""
 
                 cancellation = threading.Event()
+                owner_scope = server.result_owner_scope()
                 try:
                     return await asyncio.to_thread(
                         task_manager.run_pytest,
@@ -783,6 +805,7 @@ def create_server(
                         show_locals=show_locals,
                         max_failures=max_failures,
                         cancellation_event=cancellation,
+                        owner_scope=owner_scope,
                     )
                 except asyncio.CancelledError:
                     cancellation.set()
@@ -800,12 +823,14 @@ def create_server(
                 """Execute one policy-checked workspace .py file without arguments."""
 
                 cancellation = threading.Event()
+                owner_scope = server.result_owner_scope()
                 try:
                     return await asyncio.to_thread(
                         task_manager.run_python_script,
                         profile,
                         path,
                         cancellation_event=cancellation,
+                        owner_scope=owner_scope,
                     )
                 except asyncio.CancelledError:
                     cancellation.set()
@@ -825,6 +850,7 @@ def create_server(
                 """Run server-compiled Ruff checks with structured diagnostics."""
 
                 cancellation = threading.Event()
+                owner_scope = server.result_owner_scope()
                 try:
                     return await asyncio.to_thread(
                         task_manager.run_ruff,
@@ -832,6 +858,7 @@ def create_server(
                         paths=paths,
                         fix=fix,
                         cancellation_event=cancellation,
+                        owner_scope=owner_scope,
                     )
                 except asyncio.CancelledError:
                     cancellation.set()
@@ -851,6 +878,7 @@ def create_server(
                 """Run server-compiled mypy checks with structured diagnostics."""
 
                 cancellation = threading.Event()
+                owner_scope = server.result_owner_scope()
                 try:
                     return await asyncio.to_thread(
                         task_manager.run_mypy,
@@ -858,6 +886,7 @@ def create_server(
                         paths=paths,
                         strict=strict,
                         cancellation_event=cancellation,
+                        owner_scope=owner_scope,
                     )
                 except asyncio.CancelledError:
                     cancellation.set()
@@ -879,6 +908,7 @@ def create_server(
                 """Run pytest and coverage in one disposable execution."""
 
                 cancellation = threading.Event()
+                owner_scope = server.result_owner_scope()
                 try:
                     return await asyncio.to_thread(
                         task_manager.run_pytest_coverage,
@@ -888,6 +918,7 @@ def create_server(
                         branch=branch,
                         fail_under=fail_under,
                         cancellation_event=cancellation,
+                        owner_scope=owner_scope,
                     )
                 except asyncio.CancelledError:
                     cancellation.set()
@@ -908,6 +939,7 @@ def create_server(
                 """Run caller argv in an explicitly authorized container profile."""
 
                 cancellation = threading.Event()
+                owner_scope = server.result_owner_scope()
                 try:
                     return await asyncio.to_thread(
                         task_manager.run_command,
@@ -916,6 +948,7 @@ def create_server(
                         args,
                         cwd,
                         cancellation_event=cancellation,
+                        owner_scope=owner_scope,
                     )
                 except asyncio.CancelledError:
                     cancellation.set()
@@ -937,6 +970,7 @@ def create_server(
                 """Start caller argv for bounded diagnostics and log observation."""
 
                 cancellation = threading.Event()
+                owner_scope = server.result_owner_scope()
                 try:
                     return await asyncio.to_thread(
                         task_manager.start_command,
@@ -945,6 +979,7 @@ def create_server(
                         args,
                         cwd,
                         cancellation_event=cancellation,
+                        owner_scope=owner_scope,
                     )
                 except asyncio.CancelledError:
                     cancellation.set()
@@ -992,6 +1027,22 @@ def create_server(
         except ResultCacheMiss as exc:
             raise ResourceNotFoundError("Unknown resource") from exc
         return cached.content
+
+    if task_manager is not None:
+
+        @server.resource(
+            ARTIFACT_URI_TEMPLATE,
+            name="Execution Artifact",
+            description="One immutable admitted binary execution artifact.",
+            mime_type=ARTIFACT_RESOURCE_MIME,
+        )
+        async def artifact_resource(id: str) -> bytes:
+            try:
+                return task_manager.artifact_store.read(
+                    id, owner_scope=server.result_owner_scope()
+                )
+            except ArtifactStoreMiss as exc:
+                raise ResourceNotFoundError("Unknown resource") from exc
 
     @server.resource(
         "internal://instructions",

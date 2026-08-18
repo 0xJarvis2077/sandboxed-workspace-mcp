@@ -67,12 +67,49 @@ class TaskConfigurationTests(unittest.TestCase):
 
         self.assertEqual(configuration.runtime, "docker")
         self.assertEqual(configuration.limits.cpus, "1.5")
+        self.assertEqual(configuration.limits.max_artifacts_per_execution, 32)
+        self.assertEqual(configuration.limits.max_artifact_bytes, 16 * 1024 * 1024)
+        self.assertEqual(
+            configuration.limits.max_total_artifact_bytes, 64 * 1024 * 1024
+        )
         self.assertEqual(configuration.tasks["test"].argv[0], "python")
         with self.assertRaises(TypeError):
             configuration.tasks["other"] = configuration.tasks["test"]  # type: ignore[index]
 
         self.config_path.write_text("{}", encoding="utf-8")
         self.assertIn("test", configuration.tasks)
+
+    def test_artifact_limits_are_bounded_and_consistent(self) -> None:
+        cases = (
+            ("max_artifacts_per_execution", 0),
+            ("max_artifacts_per_execution", 101),
+            ("max_artifact_bytes", 0),
+            ("max_total_artifact_bytes", 0),
+        )
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                config = self._valid()
+                limits = config["limits"]
+                assert isinstance(limits, dict)
+                limits[field] = value
+                with self.assertRaises(TaskConfigurationError):
+                    load_task_config(self._write(config), workspace_root=self.workspace)
+
+        config = self._valid()
+        limits = config["limits"]
+        assert isinstance(limits, dict)
+        limits.update(
+            {
+                "max_artifacts_per_execution": 100,
+                "max_artifact_bytes": 9,
+                "max_total_artifact_bytes": 8,
+            }
+        )
+        with self.assertRaisesRegex(
+            TaskConfigurationError,
+            "max_artifact_bytes must not exceed max_total_artifact_bytes",
+        ):
+            load_task_config(self._write(config), workspace_root=self.workspace)
 
     def test_workspace_access_defaults_read_only_and_writable_is_explicit(self) -> None:
         configuration = load_task_config(
