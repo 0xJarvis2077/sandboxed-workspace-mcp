@@ -424,6 +424,16 @@ def run_execution(
                 truncated=False,
                 duration_ms=_duration_ms(started),
             )
+        if time.monotonic() >= deadline:
+            return TaskRunResult(
+                state=ExecutionState.TIMED_OUT,
+                reason=ExecutionReason.TIMEOUT,
+                exit_code=None,
+                stdout="",
+                stderr="task timeout expired during runtime start",
+                truncated=False,
+                duration_ms=_duration_ms(started),
+            )
         return TaskRunResult(
             state=ExecutionState.CRASHED,
             reason=ExecutionReason.RUNTIME_START_FAILED,
