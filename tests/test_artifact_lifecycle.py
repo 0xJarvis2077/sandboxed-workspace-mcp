@@ -10,6 +10,7 @@ from types import MappingProxyType
 from workspace_guard_mcp.artifact_store import EphemeralArtifactStore
 from workspace_guard_mcp.config import Settings
 from workspace_guard_mcp.execution import ExecutionReason, ExecutionState
+from workspace_guard_mcp.execution_backend import ExecutionRequest as ContainerRequest
 from workspace_guard_mcp.execution_store import SqliteExecutionStore
 from workspace_guard_mcp.task_config import (
     TaskConfiguration,
@@ -17,11 +18,7 @@ from workspace_guard_mcp.task_config import (
     TaskLimits,
 )
 from workspace_guard_mcp.task_manager import TaskManager, TaskManagerError
-from workspace_guard_mcp.task_runner import (
-    ArtifactGrowthMonitor,
-    ContainerRequest,
-    build_container_argv,
-)
+from workspace_guard_mcp.task_runner import ArtifactGrowthMonitor, build_container_argv
 
 PINNED_IMAGE = "example.invalid/workspace-guard-mcp@sha256:" + "b" * 64
 

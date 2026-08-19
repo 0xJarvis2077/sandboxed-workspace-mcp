@@ -1,4 +1,4 @@
-"""Container-only execution backend and bounded synchronous task runner."""
+"""Backend-neutral orchestration with the Docker/Podman CLI adapter."""
 
 from __future__ import annotations
 
@@ -11,60 +11,23 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Protocol
 
 from .execution import (
     ExecutionReason,
     ExecutionState,
     legacy_execution_status,
 )
-from .task_config import TaskDefinition, TaskLimits
-
-OutputCallback = Callable[[bytes], None]
+from .execution_backend import (
+    ExecutionBackend,
+    ExecutionHandle,
+    ExecutionRequest,
+    OutputCallback,
+)
+from .task_config import TaskLimits
 
 
 class TaskExecutionError(RuntimeError):
     """Raised when an authorized task cannot be safely executed."""
-
-
-@dataclass(frozen=True, slots=True)
-class ContainerRequest:
-    """A fully server-generated container invocation."""
-
-    container_name: str
-    snapshot_path: Path
-    task: TaskDefinition
-    limits: TaskLimits
-    artifact_path: Path | None = None
-    container_workdir: str = "/workspace"
-    initial_workspace_bytes: int = 0
-    started_at: float | None = None
-    deadline: float | None = None
-
-
-class ContainerHandle(Protocol):
-    """A tracked container process created by a backend."""
-
-    def wait(self, timeout: float | None = None) -> int:
-        """Wait for the container and return its exit code."""
-
-    def stop(self) -> None:
-        """Stop only this tracked container."""
-
-    def close(self) -> None:
-        """Release local pipe/process resources."""
-
-
-class ContainerBackend(Protocol):
-    """Backend boundary used by fake unit-test and production implementations."""
-
-    def start(
-        self,
-        request: ContainerRequest,
-        on_stdout: OutputCallback,
-        on_stderr: OutputCallback,
-    ) -> ContainerHandle:
-        """Start one container without interpreting any command through a shell."""
 
 
 class CliContainerBackend:
@@ -78,10 +41,10 @@ class CliContainerBackend:
 
     def start(
         self,
-        request: ContainerRequest,
+        request: ExecutionRequest,
         on_stdout: OutputCallback,
         on_stderr: OutputCallback,
-    ) -> ContainerHandle:
+    ) -> ExecutionHandle:
         if self.executable is None:
             raise TaskExecutionError(
                 f"container runtime {self.runtime!r} was not found; "
@@ -105,7 +68,7 @@ class CliContainerBackend:
         return _CliContainerHandle(
             executable=self.executable,
             process=process,
-            container_name=request.container_name,
+            container_name=request.runtime_name,
             on_stdout=on_stdout,
             on_stderr=on_stderr,
         )
@@ -215,10 +178,10 @@ class _CliContainerHandle:
             reader.join(timeout=2)
 
 
-def build_container_argv(executable: str, request: ContainerRequest) -> list[str]:
+def build_container_argv(executable: str, request: ExecutionRequest) -> list[str]:
     """Render the complete hardened runtime argv without a shell."""
 
-    snapshot = request.snapshot_path.resolve(strict=True)
+    snapshot = request.workspace_path.resolve(strict=True)
     limits = request.limits
     mount = f"type=bind,source={snapshot},destination=/workspace"
     if request.task.workspace_access == "read-only":
@@ -232,7 +195,7 @@ def build_container_argv(executable: str, request: ContainerRequest) -> list[str
         "run",
         "--rm",
         "--name",
-        request.container_name,
+        request.runtime_name,
         "--pull=never",
         "--network=none",
         "--read-only",
@@ -247,7 +210,7 @@ def build_container_argv(executable: str, request: ContainerRequest) -> list[str
         "--pids-limit",
         str(limits.pids),
         "--workdir",
-        _validated_container_workdir(request.container_workdir),
+        _validated_container_workdir(request.workdir),
         "--mount",
         mount,
         "--tmpfs",
@@ -302,7 +265,7 @@ def build_container_argv(executable: str, request: ContainerRequest) -> list[str
 class ArtifactGrowthMonitor:
     """Best-effort early enforcement for the explicit artifact staging boundary."""
 
-    def __init__(self, request: ContainerRequest, handle: ContainerHandle) -> None:
+    def __init__(self, request: ExecutionRequest, handle: ExecutionHandle) -> None:
         self.request = request
         self.handle = handle
         self.limit_exceeded = threading.Event()
@@ -311,7 +274,7 @@ class ArtifactGrowthMonitor:
         self._started = False
         self._thread = threading.Thread(
             target=self._run,
-            name=f"{request.container_name}-artifact-monitor",
+            name=f"{request.runtime_name}-artifact-monitor",
             daemon=True,
         )
 
@@ -476,7 +439,7 @@ def measure_workspace_usage(
 class WorkspaceGrowthMonitor:
     """Best-effort host-side monitor for writable snapshot growth."""
 
-    def __init__(self, request: ContainerRequest, handle: ContainerHandle) -> None:
+    def __init__(self, request: ExecutionRequest, handle: ExecutionHandle) -> None:
         self.request = request
         self.handle = handle
         self.exceeded = threading.Event()
@@ -484,7 +447,7 @@ class WorkspaceGrowthMonitor:
         self._started = False
         self._thread = threading.Thread(
             target=self._run,
-            name=f"{request.container_name}-workspace-monitor",
+            name=f"{request.runtime_name}-workspace-monitor",
             daemon=True,
         )
 
@@ -523,7 +486,7 @@ class WorkspaceGrowthMonitor:
 
     def _measure_usage(self) -> WorkspaceUsage:
         return measure_workspace_usage(
-            self.request.snapshot_path,
+            self.request.workspace_path,
             initial_workspace_bytes=self.request.initial_workspace_bytes,
             limits=self.request.limits,
             stop_event=self._stop,
@@ -654,15 +617,15 @@ class BoundedOutput:
         )
 
 
-def run_container_task(
-    backend: ContainerBackend,
-    request: ContainerRequest,
+def run_execution(
+    backend: ExecutionBackend,
+    request: ExecutionRequest,
     cancellation_event: threading.Event | None = None,
     *,
     on_started: Callable[[], None] | None = None,
     on_cancelling: Callable[[], None] | None = None,
 ) -> TaskRunResult:
-    """Run one container with bounded output and canonical lifecycle semantics."""
+    """Run one backend execution with bounded output and lifecycle semantics."""
 
     started = request.started_at or time.monotonic()
     deadline = request.deadline or started + request.limits.timeout_seconds
@@ -677,7 +640,7 @@ def run_container_task(
             truncated=False,
             duration_ms=_duration_ms(started),
         )
-    handle: ContainerHandle | None = None
+    handle: ExecutionHandle | None = None
     try:
         handle = backend.start(request, capture.stdout, capture.stderr)
         if on_started is not None:

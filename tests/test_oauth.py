@@ -25,6 +25,7 @@ from starlette.applications import Starlette
 from starlette.types import Message
 
 from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.execution_backend import ExecutionRequest as ContainerRequest
 from workspace_guard_mcp.oauth import (
     DEFAULT_OAUTH_SCOPES,
     JWTTokenVerifier,
@@ -38,7 +39,6 @@ from workspace_guard_mcp.task_config import (
     TaskLimits,
 )
 from workspace_guard_mcp.task_manager import TaskManager
-from workspace_guard_mcp.task_runner import ContainerRequest
 
 ISSUER = "https://idp.example.test/tenant"
 RESOURCE = "https://mcp.example.test"
