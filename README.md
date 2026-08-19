@@ -261,6 +261,26 @@ stop_task(started["task_id"])
 
 profile 是 operator 的安全与环境策略，不是 agent 必须记住的工具分类。structured tool 未指定 profile 时优先使用顶层 `default_profile`，否则使用唯一 capability 候选；仍有多个候选时返回明确的 ambiguous profile error。`run_command` 和 `start_command` 始终要求显式 profile，并继续要求 `allow_arbitrary_commands=true`。`list_execution_profiles` 仍用于 capability discovery/operator inspection，并标记默认 profile。
 
+#### Execution Profile Composition
+
+profile 支持**单继承**来减少 operator 配置重复，并且只在启动加载配置时解析一次。root profile 仍必须显式提供 `image` 和 `tools`；derived profile 用 `extends` 指向一个 parent，可继承或显式覆盖 `image`、`workspace_access` 和 `allow_arbitrary_commands`。`tools_add` 在 parent 工具集合上追加能力，而 `tools` 会完整替换继承的工具集合；二者不能同时出现，root profile 也不能使用没有 parent 语义的 `tools_add`。
+
+```json
+{
+  "python-safe": {
+    "image": "sha256:<64-hex-digest>",
+    "tools": ["python_version", "run_pytest"]
+  },
+  "coding": {
+    "extends": "python-safe",
+    "tools_add": ["run_command", "start_command"],
+    "allow_arbitrary_commands": true
+  }
+}
+```
+
+parent 可以声明在 child 之后；unknown parent、inheritance cycle、重复/不支持的 `tools_add` 都会让 startup fail closed。composition **不会放宽 authorization**：每个解析后的 effective profile 都会独立重新执行 tool、workspace-access、writable disk limit 和 arbitrary-command 安全校验。`TaskManager` 与 `list_execution_profiles` 只看到 fully resolved effective profile，不暴露 `extends` 或 `tools_add`。
+
 调用方不能覆盖环境变量、镜像、网络、挂载、端口、资源限制或容器 ID。每次执行都会先建立过滤后的临时快照；快照修改不会写回真实工作区。
 
 ### 构建和切换 Execution image

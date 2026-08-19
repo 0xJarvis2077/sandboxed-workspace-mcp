@@ -26,18 +26,11 @@
       "workspace_access": "read-only"
     },
     "coding": {
-      "image": "REPLACE_WITH_REPOSITORY_DIGEST_OR_FULL_LOCAL_SHA256_IMAGE_ID",
-      "tools": [
-        "python_version",
-        "run_pytest",
-        "run_python_script",
-        "run_ruff",
-        "run_mypy",
-        "run_pytest_coverage",
+      "extends": "python-safe",
+      "tools_add": [
         "run_command",
         "start_command"
       ],
-      "workspace_access": "read-only",
       "allow_arbitrary_commands": true
     }
   }

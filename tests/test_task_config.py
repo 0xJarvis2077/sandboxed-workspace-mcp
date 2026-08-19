@@ -6,15 +6,35 @@ import json
 import os
 import tempfile
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 
 from workspace_guard_mcp.cli import parse_runtime
 from workspace_guard_mcp.task_config import (
+    ExecutionProfile,
     TaskConfigurationError,
     load_task_config,
 )
 
 PINNED_IMAGE = "example.invalid/workspace-guard-mcp@sha256:" + "a" * 64
+
+
+def _profiles_config(
+    profiles: Mapping[str, object],
+    *,
+    default_profile: str | None = None,
+    limits: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    config: dict[str, object] = {
+        "version": 1,
+        "runtime": "docker",
+        "profiles": dict(profiles),
+    }
+    if default_profile is not None:
+        config["default_profile"] = default_profile
+    if limits is not None:
+        config["limits"] = dict(limits)
+    return config
 
 
 class TaskConfigurationTests(unittest.TestCase):
@@ -299,6 +319,282 @@ class TaskConfigurationTests(unittest.TestCase):
                 profile[field] = invalid
                 with self.assertRaisesRegex(TaskConfigurationError, message):
                     load_task_config(self._write(value), workspace_root=self.workspace)
+
+    def test_profile_composition_resolves_effective_profiles(self) -> None:
+        value = _profiles_config(
+            {
+                "coding": {
+                    "extends": "python-safe",
+                    "tools_add": ["run_command", "start_command"],
+                    "allow_arbitrary_commands": True,
+                },
+                "lint": {"extends": "base", "tools_add": ["run_mypy"]},
+                "plain": {"extends": "base"},
+                "python-safe": {
+                    "extends": "base",
+                    "tools_add": ["run_ruff"],
+                },
+                "base": {
+                    "image": PINNED_IMAGE,
+                    "tools": ["python_version", "run_pytest"],
+                    "workspace_access": "read-only",
+                },
+            },
+            default_profile="coding",
+        )
+
+        configuration = load_task_config(
+            self._write(value), workspace_root=self.workspace
+        )
+
+        coding = configuration.profiles["coding"]
+        self.assertIsInstance(coding, ExecutionProfile)
+        self.assertEqual(coding.image, PINNED_IMAGE)
+        self.assertEqual(
+            coding.tools,
+            {
+                "python_version",
+                "run_pytest",
+                "run_ruff",
+                "run_command",
+                "start_command",
+            },
+        )
+        self.assertIsInstance(coding.tools, frozenset)
+        self.assertEqual(coding.workspace_access, "read-only")
+        self.assertTrue(coding.allow_arbitrary_commands)
+        self.assertEqual(
+            configuration.profiles["plain"].tools,
+            {"python_version", "run_pytest"},
+        )
+        self.assertEqual(
+            configuration.profiles["lint"].tools,
+            {"python_version", "run_pytest", "run_mypy"},
+        )
+        self.assertEqual(configuration.default_profile, "coding")
+        self.assertFalse(hasattr(coding, "extends"))
+        self.assertFalse(hasattr(coding, "tools_add"))
+        with self.assertRaises(TypeError):
+            configuration.profiles["other"] = coding  # type: ignore[index]
+
+    def test_profile_composition_supports_replacement_and_overrides(self) -> None:
+        replacement_image = "sha256:" + "b" * 64
+        value = _profiles_config(
+            {
+                "base": {
+                    "image": PINNED_IMAGE,
+                    "tools": ["run_pytest", "run_command"],
+                    "allow_arbitrary_commands": True,
+                },
+                "restricted": {
+                    "extends": "base",
+                    "image": replacement_image,
+                    "tools": ["run_pytest"],
+                    "allow_arbitrary_commands": False,
+                },
+            }
+        )
+
+        configuration = load_task_config(
+            self._write(value), workspace_root=self.workspace
+        )
+
+        restricted = configuration.profiles["restricted"]
+        self.assertEqual(restricted.image, replacement_image)
+        self.assertEqual(restricted.tools, {"run_pytest"})
+        self.assertFalse(restricted.allow_arbitrary_commands)
+
+    def test_profile_composition_raw_fields_are_strict(self) -> None:
+        base = {"image": PINNED_IMAGE, "tools": ["run_pytest"]}
+        cases = (
+            ({"extends": 123}, "extends"),
+            ({"extends": True}, "extends"),
+            ({"extends": ""}, "extends"),
+            ({"extends": "invalid profile name"}, "extends"),
+            ({"extends": "base", "tools_add": "run_ruff"}, "non-empty array"),
+            ({"extends": "base", "tools_add": []}, "non-empty array"),
+            (
+                {"extends": "base", "tools_add": ["definitely_not_a_tool"]},
+                "unsupported execution tool",
+            ),
+            (
+                {"extends": "base", "tools_add": ["run_ruff", "run_ruff"]},
+                "duplicate tool",
+            ),
+            (
+                {
+                    "extends": "base",
+                    "tools": ["run_pytest"],
+                    "tools_add": ["run_ruff"],
+                },
+                "both tools and tools_add",
+            ),
+            ({"extends": "base", "image": "python:3.13"}, "sha256 digest"),
+            ({"extends": "base", "toolz": ["run_ruff"]}, "unknown field"),
+        )
+        for child, message in cases:
+            with self.subTest(child=child):
+                value = _profiles_config({"base": base, "child": child})
+                with self.assertRaisesRegex(TaskConfigurationError, message):
+                    load_task_config(self._write(value), workspace_root=self.workspace)
+
+        root_tools_add = _profiles_config(
+            {"root": {"image": PINNED_IMAGE, "tools_add": ["run_ruff"]}}
+        )
+        with self.assertRaisesRegex(TaskConfigurationError, "root profile.*tools_add"):
+            load_task_config(self._write(root_tools_add), workspace_root=self.workspace)
+
+    def test_tools_add_rejects_already_inherited_tools(self) -> None:
+        value = _profiles_config(
+            {
+                "base": {"image": PINNED_IMAGE, "tools": ["run_pytest"]},
+                "child": {"extends": "base", "tools_add": ["run_pytest"]},
+            }
+        )
+
+        with self.assertRaisesRegex(
+            TaskConfigurationError, "child.*already inherited.*run_pytest"
+        ):
+            load_task_config(self._write(value), workspace_root=self.workspace)
+
+    def test_profile_composition_rejects_unknown_parent_and_cycles(self) -> None:
+        unknown = _profiles_config(
+            {"child": {"extends": "missing-profile"}},
+            default_profile="child",
+        )
+        with self.assertRaisesRegex(
+            TaskConfigurationError, "child.*unknown profile.*missing-profile"
+        ):
+            load_task_config(self._write(unknown), workspace_root=self.workspace)
+
+        cycles = (
+            {"a": {"extends": "a"}},
+            {"a": {"extends": "b"}, "b": {"extends": "a"}},
+            {
+                "a": {"extends": "b"},
+                "b": {"extends": "c"},
+                "c": {"extends": "a"},
+            },
+        )
+        for profiles in cycles:
+            with self.subTest(profiles=profiles):
+                with self.assertRaisesRegex(TaskConfigurationError, "cycle.*a"):
+                    load_task_config(
+                        self._write(_profiles_config(profiles)),
+                        workspace_root=self.workspace,
+                    )
+
+    def test_profile_composition_rejects_excessive_inheritance_depth(self) -> None:
+        profiles: dict[str, object] = {
+            f"p{index:03d}": {"extends": f"p{index - 1:03d}"}
+            for index in range(129, 0, -1)
+        }
+        profiles["p000"] = {"image": PINNED_IMAGE, "tools": ["run_pytest"]}
+
+        with self.assertRaisesRegex(TaskConfigurationError, "inheritance depth"):
+            load_task_config(
+                self._write(_profiles_config(profiles)),
+                workspace_root=self.workspace,
+            )
+
+    def test_effective_arbitrary_command_authorization_is_revalidated(self) -> None:
+        safe_base = {"image": PINNED_IMAGE, "tools": ["run_pytest"]}
+        missing_grant = _profiles_config(
+            {
+                "base": safe_base,
+                "coding": {"extends": "base", "tools_add": ["run_command"]},
+            }
+        )
+        with self.assertRaisesRegex(TaskConfigurationError, "allow_arbitrary_commands"):
+            load_task_config(self._write(missing_grant), workspace_root=self.workspace)
+
+        explicit_grant = json.loads(json.dumps(missing_grant))
+        explicit_grant["profiles"]["coding"]["allow_arbitrary_commands"] = True
+        configuration = load_task_config(
+            self._write(explicit_grant), workspace_root=self.workspace
+        )
+        self.assertTrue(configuration.profiles["coding"].allow_arbitrary_commands)
+
+        arbitrary_base = {
+            "image": PINNED_IMAGE,
+            "tools": ["run_pytest", "run_command"],
+            "allow_arbitrary_commands": True,
+        }
+        inherited_grant = load_task_config(
+            self._write(
+                _profiles_config(
+                    {
+                        "base": arbitrary_base,
+                        "child": {"extends": "base"},
+                    }
+                )
+            ),
+            workspace_root=self.workspace,
+        )
+        self.assertTrue(inherited_grant.profiles["child"].allow_arbitrary_commands)
+        self.assertIn("run_command", inherited_grant.profiles["child"].tools)
+
+        revoked_without_removal = _profiles_config(
+            {
+                "base": arbitrary_base,
+                "child": {
+                    "extends": "base",
+                    "allow_arbitrary_commands": False,
+                },
+            }
+        )
+        with self.assertRaisesRegex(TaskConfigurationError, "allow_arbitrary_commands"):
+            load_task_config(
+                self._write(revoked_without_removal), workspace_root=self.workspace
+            )
+
+        revoked_with_replacement = _profiles_config(
+            {
+                "base": arbitrary_base,
+                "child": {
+                    "extends": "base",
+                    "tools": ["run_pytest"],
+                    "allow_arbitrary_commands": False,
+                },
+            }
+        )
+        configuration = load_task_config(
+            self._write(revoked_with_replacement), workspace_root=self.workspace
+        )
+        self.assertEqual(configuration.profiles["child"].tools, {"run_pytest"})
+        self.assertFalse(configuration.profiles["child"].allow_arbitrary_commands)
+
+    def test_inherited_writable_profile_obeys_effective_disk_safety_gate(self) -> None:
+        profiles = {
+            "base": {
+                "image": PINNED_IMAGE,
+                "tools": ["run_pytest"],
+                "workspace_access": "writable",
+            },
+            "child": {"extends": "base"},
+            "read-only-child": {
+                "extends": "base",
+                "workspace_access": "read-only",
+            },
+        }
+        with self.assertRaisesRegex(TaskConfigurationError, "explicit limit"):
+            load_task_config(
+                self._write(_profiles_config(profiles)), workspace_root=self.workspace
+            )
+
+        limits = {
+            "max_workspace_file_bytes": 1024 * 1024,
+            "max_workspace_growth_bytes": 10 * 1024 * 1024,
+            "allow_best_effort_disk_limit": True,
+        }
+        configuration = load_task_config(
+            self._write(_profiles_config(profiles, limits=limits)),
+            workspace_root=self.workspace,
+        )
+        self.assertEqual(configuration.profiles["child"].workspace_access, "writable")
+        self.assertEqual(
+            configuration.profiles["read-only-child"].workspace_access, "read-only"
+        )
 
     def test_path_must_be_absolute_outside_workspace_and_not_a_symlink(self) -> None:
         self._write(self._valid())

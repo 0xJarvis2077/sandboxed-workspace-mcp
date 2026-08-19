@@ -34,6 +34,7 @@ from workspace_guard_mcp.task_config import (
     TaskConfiguration,
     TaskDefinition,
     TaskLimits,
+    load_task_config,
 )
 from workspace_guard_mcp.task_manager import (
     TaskLogBuffer,
@@ -1032,6 +1033,52 @@ class TaskManagerTests(unittest.TestCase):
             TaskManager(
                 self.settings, ambiguous, backend=FakeBackend()
             ).resolve_execution_profile("run_pytest")
+
+    def test_derived_profile_is_consumed_as_effective_authorization(self) -> None:
+        config_path = self.base / "derived-profiles.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "runtime": "docker",
+                    "default_profile": "coding",
+                    "profiles": {
+                        "coding": {
+                            "extends": "safe",
+                            "tools_add": ["run_command"],
+                            "allow_arbitrary_commands": True,
+                        },
+                        "safe": {
+                            "image": PINNED_IMAGE,
+                            "tools": ["run_pytest"],
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        configured = load_task_config(config_path, workspace_root=self.root)
+        backend = FakeBackend(stdout=b"Python 3.13\n")
+        manager = TaskManager(self.settings, configured, backend=backend)
+
+        resolved = manager.resolve_execution_profile("run_pytest")
+        self.assertEqual(resolved.name, "coding")
+        self.assertEqual(resolved.tools, {"run_pytest", "run_command"})
+        result = manager.run_command("coding", "python", ["--version"])
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(backend.requests[0].task.image, PINNED_IMAGE)
+        self.assertEqual(backend.requests[0].task.workspace_access, "read-only")
+
+        listed = manager.list_execution_profiles()
+        entries = listed["profiles"]
+        assert isinstance(entries, list)
+        coding = next(entry for entry in entries if entry["name"] == "coding")
+        self.assertEqual(coding["tools"], ["run_command", "run_pytest"])
+        self.assertNotIn("extends", coding)
+        self.assertNotIn("tools_add", coding)
+
+        with self.assertRaisesRegex(TaskManagerError, "does not authorize"):
+            manager.resolve_execution_profile("run_command", "safe")
 
     def test_structured_analysis_tools_compile_and_adapt_results(self) -> None:
         (self.root / "src").mkdir()
