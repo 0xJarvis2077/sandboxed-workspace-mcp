@@ -12,7 +12,7 @@ Coding Agent 是当前最成熟的使用场景：Agent 可以搜索代码、修�
 - **可恢复修改**：可选回收站、历史文件读取和受控 Git baseline，误删或改坏时有退路。
 - **面向 Agent 的代码审查**：有界 Git 查询、`workspace_diff` 和结构化 Tool Results。
 - **隔离执行**：pytest、Ruff、mypy、coverage 和通用命令运行在固定镜像的一次性快照中，不直接执行在宿主工作区。
-- **按需开放能力**：Git 写入、回收站、永久清理、容器执行和 HTTP/OAuth 都需要显式开启。
+- **按需开放能力**：Git 写入、回收站、永久清理、受控 execution backend 和 HTTP/OAuth 都需要显式开启。
 
 ## 项目边界
 
@@ -25,12 +25,12 @@ WorkspaceGuard 专注于 **execution**，不负责 Agent 的 planning、memory�
 - 一个服务实例只负责一个 `--root`。需要多个项目时，启动多个实例。
 - 默认工作区工具可写；如果只想让 Agent 看代码，启动时加 `--read-only`。
 - `--read-only` 不等于禁用测试：已授权的任务仍可以在一次性快照中执行，但不会写回真实工作区。
-- Git 初始化、回收站和容器执行默认都不会自动获得额外权限，需要显式配置。
-- execution profile 使用固定 image digest / 完整本地 `sha256` ID，运行时不让 Agent 临时换镜像、加网络或挂载宿主目录。
+- Git 初始化、回收站和 execution backend 默认都不会自动获得额外权限，需要显式配置。
+- execution profile 使用固定不可变 image 引用；Docker/Podman 可接受完整本地 `sha256` ID，Microsandbox 要求 registry `repository@sha256` digest。运行时不让 Agent 临时换镜像、加网络或挂载宿主目录。
 
 如果你只在本机自己用，推荐从 `stdio + --read-only` 开始，需要编辑时再去掉 `--read-only`；只有确实需要时再开启 Git 写入、回收站或 execution profile。
 
-完整威胁模型、文件安全语义、Git 约束和容器边界见 [SECURITY.md](SECURITY.md)。
+完整威胁模型、文件安全语义、Git 约束和 backend-specific execution 边界见 [SECURITY.md](SECURITY.md)。
 
 ## 5 分钟启动
 
@@ -51,6 +51,18 @@ python -m venv .venv
 ```bash
 .venv/bin/python -m pip install -e ".[dev]"
 ```
+
+### Execution backend 安装
+
+Docker / Podman backend 使用普通安装即可，并要求对应 CLI/runtime 由 operator 预先安装。Microsandbox 是可选 production backend，需要额外安装固定版本 SDK：
+
+```bash
+python -m pip install "workspace-guard-mcp[microsandbox]"
+# 源码模式
+.venv/bin/python -m pip install -e ".[microsandbox]"
+```
+
+`runtime` 当前正式支持 `docker`、`podman` 和 `microsandbox`。选择 `microsandbox` 但未安装 optional extra 时，服务会在启动阶段明确失败，不会 fallback 到容器或宿主机执行。
 
 ### 连接 MCP 客户端
 
@@ -95,7 +107,7 @@ python -m venv .venv
 | Execution 查询 | `execution_status`, `execution_events`, `execution_artifacts` | canonical current truth（含 terminal resource accounting）、有界 lifecycle history 与 terminal artifact metadata |
 | Execution profile | `list_execution_profiles`, `python_version`, `run_pytest`, `run_ruff`, `run_mypy`, `run_pytest_coverage`, `run_python_script`, `run_command`, `start_command` | 固定镜像、一次性快照中的授权执行与结构化诊断 |
 
-没有提供 task config 时，任务管理器、容器后端和动态执行工具都不会创建或注册。
+没有提供 task config 时，任务管理器、execution backend 和动态执行工具都不会创建或注册。
 
 ## Structured Tool Results
 
@@ -153,7 +165,7 @@ Resource Enforcement 定义 execution **最多允许**使用多少资源；Resou
 
 `wall_time_ms` 使用 monotonic elapsed time，覆盖 WorkspaceGuard 从 canonical execution 创建到 terminal completion 前的 snapshot 准备、runtime、artifact collection 与临时清理。workspace baseline 在所有 Server-side snapshot initializer 完成后、runtime 启动前建立；writable execution 在 runtime 结束且 snapshot cleanup 前测量 final bytes，删除文件时 growth 下限为 0。`stdout_bytes` / `stderr_bytes` 是 runtime pipe 实际观察到的 lifetime bytes，可大于最终 retained output，Server 自己生成的 diagnostic stderr 不计入这些 counter。
 
-当前 CLI container backend 没有可靠的 CPU-time 与真正 peak-memory telemetry source，因此 `cpu_time_ms` 和 `peak_memory_bytes` 为 `null`。这表示 **unavailable**，不是 0，也不会用 timeout、CPU/memory limits 或采样估算值冒充 accounting。
+当前 backend-neutral accounting layer 还没有跨所有 production runtime 都可靠的 CPU-time 与真正 peak-memory telemetry source；Microsandbox SDK metrics 本轮也刻意没有接入。因此 `cpu_time_ms` 和 `peak_memory_bytes` 继续为 `null`。这表示 **unavailable**，不是 0，也不会用 timeout、CPU/memory limits 或采样估算值冒充 accounting。
 
 ## Tool Annotations
 
@@ -239,25 +251,58 @@ stop_task(started["task_id"])
 
 `start_task` 和 `start_command` 不映射端口，只用于启动诊断和日志观察。
 
-## 容器任务和 Execution profile
+## Execution backend、固定任务和 Execution profile
+
+可信 task config 的 `runtime` 当前支持三个 production 值：
+
+- `docker` → `CliContainerBackend("docker")`
+- `podman` → `CliContainerBackend("podman")`
+- `microsandbox` → `MicrosandboxBackend`
+
+三者都进入同一 `TaskManager → ExecutionRequest → ExecutionBackend` 生命周期；task/profile、audit、artifact、output bound、workspace monitor 和 terminal resource accounting 不因 backend 改变。backend 不兼容的配置由对应 adapter fail closed，而不是在 parser 里复制一套能力矩阵。
 
 ### 固定任务
 
 复制 [examples/tasks.json](examples/tasks.json) 到工作区外，替换明显的占位符并删除不需要的任务。每个任务固定 image、argv、运行模式和 workspace 访问模式；服务不会在运行时下载依赖。
 
-需要生成 workspace 产物的任务必须显式使用 `"workspace_access": "writable"`，并配置文件大小、总增长和 best-effort 磁盘限制。普通任务默认使用只读 bind mount。
+需要生成 workspace 产物的任务必须显式使用 `"workspace_access": "writable"`，并配置文件大小、总增长和 best-effort 磁盘限制。普通任务默认使用只读 execution workspace mount。
+
+### Microsandbox 配置示例
+
+Microsandbox 第一版要求 registry-style `repository@sha256` OCI digest，不能使用 Docker 本机 `sha256:<id>`。CPU 必须能精确表示为整数 vCPU，memory 必须精确换算为整数 MiB；execution network 固定关闭，运行期间固定 `pull_policy=never`。
+
+```json
+{
+  "version": 1,
+  "runtime": "microsandbox",
+  "limits": {
+    "cpus": "2",
+    "memory": "1g",
+    "pids": 128
+  },
+  "profiles": {
+    "python-safe": {
+      "image": "example.invalid/workspace-guard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "tools": ["python_version", "run_pytest"],
+      "workspace_access": "read-only"
+    }
+  }
+}
+```
+
+这些是 adapter representability constraints，不代表 Microsandbox 与 Docker/Podman 具有完全相同的 enforcement primitive 或安全保证。例如 Microsandbox 当前用 `Rlimit.nproc` 表达进程限制，它不被宣称等价于 Docker cgroup `--pids-limit`。更深入的真实 hostile-workload parity 属于后续 hardening。
 
 ### Execution profile
 
 复制 [examples/execution-profiles.json](examples/execution-profiles.json) 到工作区外。profile 固定 image、工具集合和 workspace 访问模式：
 
-- `python_version`：在容器内运行 `python --version`。
+- `python_version`：在授权 execution environment 中运行 `python --version`。
 - `run_pytest`：服务端验证 target、生成 pytest argv，并返回有界 failure/frame/local 信息。
 - `run_ruff`：固定 Ruff check argv，返回 JSON diagnostics；`fix=true` 仅允许 writable profile。
 - `run_mypy`：固定 mypy argv，`strict=true` 只增加 `--strict`。
 - `run_pytest_coverage`：在一次 execution 内完成 pytest 与 coverage，数据只写入 `/tmp`，不产生 workspace `.coverage`；默认尊重项目自己的 coverage `source`/`branch` 配置，`branch=true` 可显式启用分支覆盖率。
 - `run_python_script`：只接受一个真实的 workspace `.py` 文件。
-- `run_command`/`start_command`：只有同时声明 `allow_arbitrary_commands: true` 才能使用；这代表容器内任意代码执行授权。
+- `run_command`/`start_command`：只有同时声明 `allow_arbitrary_commands: true` 才能使用；这代表所选 execution backend 内任意代码执行授权。
 
 profile 是 operator 的安全与环境策略，不是 agent 必须记住的工具分类。structured tool 未指定 profile 时优先使用顶层 `default_profile`，否则使用唯一 capability 候选；仍有多个候选时返回明确的 ambiguous profile error。`run_command` 和 `start_command` 始终要求显式 profile，并继续要求 `allow_arbitrary_commands=true`。`list_execution_profiles` 仍用于 capability discovery/operator inspection，并标记默认 profile。
 
@@ -268,7 +313,7 @@ profile 支持**单继承**来减少 operator 配置重复，并且只在启动�
 ```json
 {
   "python-safe": {
-    "image": "sha256:<64-hex-digest>",
+    "image": "example.invalid/workspace-guard@sha256:<64-hex-digest>",
     "tools": ["python_version", "run_pytest"]
   },
   "coding": {
@@ -281,9 +326,9 @@ profile 支持**单继承**来减少 operator 配置重复，并且只在启动�
 
 parent 可以声明在 child 之后；unknown parent、inheritance cycle、重复/不支持的 `tools_add` 都会让 startup fail closed。composition **不会放宽 authorization**：每个解析后的 effective profile 都会独立重新执行 tool、workspace-access、writable disk limit 和 arbitrary-command 安全校验。`TaskManager` 与 `list_execution_profiles` 只看到 fully resolved effective profile，不暴露 `extends` 或 `tools_add`。
 
-调用方不能覆盖环境变量、镜像、网络、挂载、端口、资源限制或容器 ID。每次执行都会先建立过滤后的临时快照；快照修改不会写回真实工作区。
+调用方不能覆盖环境变量、镜像、网络、挂载、端口、资源限制或 backend-owned runtime identifier。每次执行都会先建立过滤后的临时快照；快照修改不会写回真实工作区。
 
-### 构建和切换 Execution image
+### 构建和切换 Docker / Podman Execution image
 
 `examples/Dockerfile.task` 是标准 execution image 的来源，预装 pytest、coverage、Ruff、mypy 等离线执行工具。修改 Dockerfile 并不会自动更新已经运行的 MCP；operator 必须显式重建镜像、取得不可变 image ID/digest、更新工作区外的 execution profile 配置，然后重启 MCP 服务。例如：
 
@@ -341,7 +386,7 @@ CI 会实际构建该 Dockerfile，并在 `--network none` 的运行容器中执
 
 WorkspaceGuard 可选地把有界、public-safe 的 `ExecutionRecord` current truth、`ExecutionEvent` lifecycle history 和 bounded Artifact Manifest 持久化到 operator 控制且位于 workspace 外的 SQLite 数据库。Terminal record/resources、state-transition event 与新 execution 的 artifact manifest 在同一 durable transaction 中提交；`CANCELLATION_REQUESTED` 作为独立 audit fact 与进入 `CANCELLING` 的 transition 原子记录。现代 history 会验证 CREATED 起点、连续 sequence、state chain、合法 transition、state-compatible reason/error metadata、单调 timestamp，以及最终 event 的 state/timestamp/reason/error metadata 与 current record 完全一致；检测到断链或矛盾时 fail closed，而 v1 legacy history 因没有 CREATED event 继续明确返回 `history_complete=false`。
 
-未配置 `--execution-db` 时使用 process-local InMemory store；它默认最多保留 1024 个 terminal executions，并按 oldest whole-execution eviction 同时删除 record、events 与 manifest，unfinished executions 永不因 retention 被淘汰。显式配置 SQLite 表示 operator 选择 durable audit database，WorkspaceGuard 默认不会按数量静默删除其 audit history，数据库 rotation/retention 由 operator 管理。SQLite schema 当前为 v4；v1/v2/v3 会事务性迁移到 v4，并在迁移时 scrub 旧 schema 中可能由 caller/runtime 写入的 `error_summary`。旧 execution 的 artifact manifest 标记为 `manifest_complete=false`，不会把“历史不可知”伪造成“确定没有 artifact”；v4 也会对“incomplete manifest 却存在 artifact rows”或“unfinished execution 却宣称 manifest complete”这类矛盾状态 fail closed。持久化不会扫描、重新连接或接管旧进程 container；未完成 execution 在启动时标记为 `CRASHED / SERVER_RESTARTED`。
+未配置 `--execution-db` 时使用 process-local InMemory store；它默认最多保留 1024 个 terminal executions，并按 oldest whole-execution eviction 同时删除 record、events 与 manifest，unfinished executions 永不因 retention 被淘汰。显式配置 SQLite 表示 operator 选择 durable audit database，WorkspaceGuard 默认不会按数量静默删除其 audit history，数据库 rotation/retention 由 operator 管理。SQLite schema 当前为 v4；v1/v2/v3 会事务性迁移到 v4，并在迁移时 scrub 旧 schema 中可能由 caller/runtime 写入的 `error_summary`。旧 execution 的 artifact manifest 标记为 `manifest_complete=false`，不会把“历史不可知”伪造成“确定没有 artifact”；v4 也会对“incomplete manifest 却存在 artifact rows”或“unfinished execution 却宣称 manifest complete”这类矛盾状态 fail closed。持久化不会扫描、猜测、重新连接或接管旧 WorkspaceGuard 进程拥有的 runtime resource，包括 Docker/Podman container 或 Microsandbox sandbox；未完成 execution 在启动时标记为 `CRASHED / SERVER_RESTARTED`。
 
 `stdio` 适合本机连接。Streamable HTTP 默认只监听 `127.0.0.1:3001/mcp`；非回环或公开部署需要明确的网络开关、Host/Origin 配置、HTTPS 和外部 OAuth/OIDC。`--allow-unauthenticated-http` 仅用于临时开发，不应作为部署方案。完整 OAuth 拓扑和 RFC 9728 细节见 [SECURITY.md](SECURITY.md)。
 
@@ -368,7 +413,7 @@ src/workspace_guard_mcp/
   execution_store.py    # 内存 / SQLite record + append-only audit store
   execution_backend.py  # backend-neutral request / backend / handle contract
   container_backend.py  # hardened Docker/Podman CLI adapter
-  microsandbox_backend.py # optional Microsandbox adapter, 尚未由 config 选择
+  microsandbox_backend.py # production Microsandbox microVM adapter
   task_runner.py        # backend-neutral sync orchestration and runtime monitoring
   task_manager.py       # execution 生命周期、并发和 service runtime session
 tests/                   # 单元、边界和传输回归测试

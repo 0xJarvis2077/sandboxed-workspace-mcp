@@ -762,6 +762,22 @@ class MicrosandboxBackendTests(unittest.TestCase):
                 handle.wait(timeout=2)
             handle.close()
 
+    def test_runtime_timeout_remains_canonical_timeout(self) -> None:
+        class RuntimeTimeoutExecHandle(FakeExecHandle):
+            async def __anext__(self) -> object:
+                raise asyncio.TimeoutError
+
+        sdk = FakeSdk(exec_handle=RuntimeTimeoutExecHandle())
+        limits = TaskLimits(timeout_seconds=0.05, max_output_bytes=1024)
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_execution(
+                MicrosandboxBackend(_sdk=sdk),
+                self._request(Path(directory), limits=limits),
+            )
+        self.assertEqual(result.state, ExecutionState.TIMED_OUT)
+        self.assertEqual(result.reason, ExecutionReason.TIMEOUT)
+        self.assertNotIn("runtime monitor failure", result.stderr)
+
     def test_startup_deadline_is_bounded_and_generic_runner_reports_timeout(
         self,
     ) -> None:

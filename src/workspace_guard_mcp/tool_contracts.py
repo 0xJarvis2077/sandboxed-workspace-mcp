@@ -748,7 +748,7 @@ _CONTRACTS = (
     ),
     _contract(
         "run_task",
-        "Run one configured run-mode task in a disposable container snapshot.",
+        "Run one configured run-mode task in a disposable execution environment.",
         DISPOSABLE_EXECUTION,
         CommandExecutionResult,
     ),
@@ -802,13 +802,13 @@ _CONTRACTS = (
     ),
     _contract(
         "python_version",
-        "Read Python version inside an authorized pinned container image.",
+        "Read Python version inside an authorized pinned execution environment.",
         READ_ONLY_LOCAL,
         CommandExecutionResult,
     ),
     _contract(
         "run_pytest",
-        "Run structured targeted pytest in an authorized container profile.",
+        "Run structured targeted pytest in an authorized execution profile.",
         DISPOSABLE_EXECUTION,
         PytestResult,
     ),
@@ -838,7 +838,7 @@ _CONTRACTS = (
     ),
     _contract(
         "run_command",
-        "Run caller argv in an explicitly authorized container profile.",
+        "Run caller argv in an explicitly authorized execution profile.",
         DISPOSABLE_EXECUTION,
         CommandExecutionResult,
     ),

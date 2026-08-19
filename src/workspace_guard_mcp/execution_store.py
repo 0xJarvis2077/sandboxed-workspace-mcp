@@ -851,7 +851,7 @@ def validate_execution_db_path(path: str | Path, *, workspace_root: Path) -> Pat
 
 
 def reconcile_unfinished_executions(store: ExecutionStore) -> list[ExecutionRecord]:
-    """Mark old-process unfinished history as crashed without adopting containers."""
+    """Reconcile old-process unfinished history without adopting runtime resources."""
 
     reconciled: list[ExecutionRecord] = []
     now = time.time()

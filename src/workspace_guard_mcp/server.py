@@ -690,7 +690,7 @@ def create_server(
 
         @server.tool(annotations=TASK_EXECUTION)
         async def run_task(name: str) -> dict[str, object]:
-            """Run one configured run-mode task in a disposable container snapshot."""
+            """Run a configured run-mode task in a disposable execution environment."""
 
             cancellation = threading.Event()
             owner_scope = server.result_owner_scope()
@@ -755,7 +755,7 @@ def create_server(
 
             @server.tool(annotations=TASK_EXECUTION)
             async def python_version(profile: str | None = None) -> dict[str, object]:
-                """Read Python version inside an authorized pinned container image."""
+                """Read Python version inside an authorized execution environment."""
 
                 cancellation = threading.Event()
                 owner_scope = server.result_owner_scope()
@@ -788,7 +788,7 @@ def create_server(
                 show_locals: bool = False,
                 max_failures: int | None = None,
             ) -> dict[str, object]:
-                """Run structured targeted pytest in an authorized container profile."""
+                """Run structured targeted pytest in an authorized execution profile."""
 
                 cancellation = threading.Event()
                 owner_scope = server.result_owner_scope()
@@ -937,7 +937,7 @@ def create_server(
                 args: list[str] | None = None,
                 cwd: str = ".",
             ) -> dict[str, object]:
-                """Run caller argv in an explicitly authorized container profile."""
+                """Run caller argv in an explicitly authorized execution profile."""
 
                 cancellation = threading.Event()
                 owner_scope = server.result_owner_scope()

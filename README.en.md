@@ -12,7 +12,7 @@ Core capabilities:
 - **Recoverable changes** through an optional recycle bin, historical file reads, and a controlled first Git baseline.
 - **Agent-friendly review** with bounded Git queries, `workspace_diff`, structured Tool Results, and self-describing MCP Resources.
 - **Isolated execution** for pytest, Ruff, mypy, coverage, and approved commands inside pinned images and disposable workspace snapshots.
-- **Explicit privilege gates** for Git writes, recycle-bin purge, container execution, and HTTP/OAuth exposure.
+- **Explicit privilege gates** for Git writes, recycle-bin purge, controlled execution backends, and HTTP/OAuth exposure.
 
 ## Project boundary
 
@@ -25,12 +25,12 @@ Coding agents are therefore an important use case, not the architectural boundar
 - One server instance owns one `--root`. Run separate instances for unrelated projects.
 - Workspace tools are writable by default. Add `--read-only` when you only want the agent to inspect code.
 - `--read-only` does not disable testing: authorized tasks can still run in disposable snapshots without writing back to the real workspace.
-- Git initialization, the recycle bin, and container execution do not gain extra privileges automatically; each is explicitly enabled and configured.
-- Execution profiles use pinned image digests / full local `sha256` image IDs, and callers cannot add network access, arbitrary host mounts, or swap images at runtime.
+- Git initialization, the recycle bin, and execution backends do not gain extra privileges automatically; each is explicitly enabled and configured.
+- Execution profiles use immutable image references. Docker/Podman may use a full local `sha256` image ID, while Microsandbox requires a registry `repository@sha256` digest. Callers cannot add network access, arbitrary host mounts, or swap images at runtime.
 
 For personal local use, a good starting point is `stdio + --read-only`. Remove `--read-only` when you want direct edits, then enable Git writes, the recycle bin, or execution profiles only when you actually need them.
 
-For the full threat model, file semantics, Git restrictions, and container boundary, see [SECURITY.md](SECURITY.md).
+For the full threat model, file semantics, Git restrictions, and backend-specific execution boundaries, see [SECURITY.md](SECURITY.md).
 
 ## Start in five minutes
 
@@ -51,6 +51,18 @@ For source development and tests:
 ```bash
 .venv/bin/python -m pip install -e ".[dev]"
 ```
+
+### Execution backend installation
+
+Docker and Podman backends use the normal installation and require the corresponding CLI/runtime to be installed by the operator. Microsandbox is an optional production backend and requires the pinned SDK extra:
+
+```bash
+python -m pip install "workspace-guard-mcp[microsandbox]"
+# Source checkout
+.venv/bin/python -m pip install -e ".[microsandbox]"
+```
+
+`runtime` currently supports `docker`, `podman`, and `microsandbox`. Selecting `microsandbox` without the optional extra fails clearly during startup; WorkspaceGuard never falls back to Docker, Podman, or host execution.
 
 ### Connect an MCP client
 
@@ -95,7 +107,7 @@ The compatibility entrypoint remains available:
 | Execution queries | `execution_status`, `execution_events`, `execution_artifacts` | Canonical current truth including terminal resource accounting, bounded lifecycle history, and terminal artifact metadata |
 | Execution profiles | `list_execution_profiles`, `python_version`, `run_pytest`, `run_ruff`, `run_mypy`, `run_pytest_coverage`, `run_python_script`, `run_command`, `start_command` | Authorized execution and structured diagnostics in a pinned image and disposable snapshot |
 
-Without a task config, the task manager, container backend, and dynamic execution tools are not created or registered.
+Without a task config, the task manager, execution backend, and dynamic execution tools are not created or registered.
 
 ## Structured Tool Results
 
@@ -153,7 +165,7 @@ Resource Enforcement defines how much an execution is **allowed** to consume. Re
 
 `wall_time_ms` is monotonic elapsed time from canonical execution creation through terminal completion, including snapshot preparation, runtime execution, artifact collection, and temporary cleanup. The workspace baseline is measured after all server-side snapshot initialization and before runtime startup. Writable executions are measured again after runtime termination and before snapshot cleanup; deletion can reduce final size, but growth is floored at zero. `stdout_bytes` and `stderr_bytes` are lifetime bytes observed from runtime pipes, so they can exceed retained output; server-generated diagnostic stderr is not counted as runtime usage.
 
-The current CLI container backend has no reliable source for exact CPU time or true peak memory. Therefore `cpu_time_ms` and `peak_memory_bytes` are `null`. That means **unavailable**, not zero, and WorkspaceGuard does not substitute timeout, configured CPU/memory limits, or sampled estimates.
+The current backend-neutral accounting layer has no reliable source for exact CPU time or true peak memory across all supported runtimes. Microsandbox SDK metrics are intentionally not integrated in this round. Therefore `cpu_time_ms` and `peak_memory_bytes` remain `null`. That means **unavailable**, not zero, and WorkspaceGuard does not substitute timeout, configured CPU/memory limits, or sampled estimates.
 
 ## Tool Annotations
 
@@ -239,25 +251,58 @@ stop_task(started["task_id"])
 
 `start_task` and `start_command` do not map ports. They are intended for startup diagnostics and log inspection.
 
-## Container tasks and execution profiles
+## Execution backends, fixed tasks, and execution profiles
+
+The trusted task config currently supports three production `runtime` values:
+
+- `docker` → `CliContainerBackend("docker")`
+- `podman` → `CliContainerBackend("podman")`
+- `microsandbox` → `MicrosandboxBackend`
+
+All three enter the same `TaskManager → ExecutionRequest → ExecutionBackend` lifecycle. Tasks/profiles, audit, artifacts, output bounding, workspace monitoring, and terminal resource accounting remain backend-neutral. Backend-incompatible settings are rejected by the owning adapter rather than duplicated into the config parser.
 
 ### Fixed tasks
 
 Copy [examples/tasks.json](examples/tasks.json) outside the workspace, replace its obvious placeholders, and remove unused tasks. Each task fixes its image, argv, mode, and workspace access; dependencies are not downloaded at runtime.
 
-A task that must create workspace artifacts must explicitly use `"workspace_access": "writable"` and configure per-file, aggregate-growth, and best-effort disk limits. Ordinary tasks use a read-only bind mount.
+A task that must create workspace artifacts must explicitly use `"workspace_access": "writable"` and configure per-file, aggregate-growth, and best-effort disk limits. Ordinary tasks use a read-only execution workspace mount.
+
+### Microsandbox configuration example
+
+The first Microsandbox backend requires a registry-style `repository@sha256` OCI digest and does not accept a Docker-local `sha256:<id>`. CPU must be exactly representable as an integer vCPU, memory must convert exactly to an integer MiB value, execution networking is disabled, and runtime pulling is fixed to `pull_policy=never`.
+
+```json
+{
+  "version": 1,
+  "runtime": "microsandbox",
+  "limits": {
+    "cpus": "2",
+    "memory": "1g",
+    "pids": 128
+  },
+  "profiles": {
+    "python-safe": {
+      "image": "example.invalid/workspace-guard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "tools": ["python_version", "run_pytest"],
+      "workspace_access": "read-only"
+    }
+  }
+}
+```
+
+These are adapter representability constraints, not a claim that Microsandbox and Docker/Podman use identical enforcement primitives or provide identical security guarantees. In particular, Microsandbox currently uses `Rlimit.nproc` for the process limit and WorkspaceGuard does not claim that it is equivalent to Docker's cgroup `--pids-limit`. Hostile-workload parity remains a separate hardening concern.
 
 ### Execution profiles
 
 Copy [examples/execution-profiles.json](examples/execution-profiles.json) outside the workspace. A profile fixes its image, tool set, and workspace access:
 
-- `python_version`: runs `python --version` inside the container.
+- `python_version`: runs `python --version` inside the authorized execution environment.
 - `run_pytest`: validates targets, compiles pytest argv, and collects bounded failure/frame/local information.
 - `run_ruff`: runs a fixed Ruff check and returns JSON diagnostics; `fix=true` requires a writable profile.
 - `run_mypy`: runs fixed mypy arguments; `strict=true` only adds `--strict`.
 - `run_pytest_coverage`: runs pytest and coverage in one execution; data stays under `/tmp` and does not create workspace `.coverage`. By default it respects the project's coverage `source`/`branch` configuration, while `branch=true` explicitly enables branch coverage.
 - `run_python_script`: accepts one real workspace `.py` file.
-- `run_command`/`start_command`: require `allow_arbitrary_commands: true`; this grants arbitrary code execution inside the container.
+- `run_command`/`start_command`: require `allow_arbitrary_commands: true`; this grants arbitrary code execution inside the selected execution backend.
 
 An execution profile is operator security/environment policy, not a tool taxonomy the agent must memorize. Without `profile`, a structured tool first uses the top-level `default_profile`, then a unique capability candidate; multiple remaining candidates produce an explicit ambiguous-profile error. `run_command` and `start_command` always require an explicit profile and `allow_arbitrary_commands=true`. `list_execution_profiles` remains available for capability discovery and operator inspection and marks the default profile.
 
@@ -268,7 +313,7 @@ Profiles support **single inheritance** to reduce operator configuration duplica
 ```json
 {
   "python-safe": {
-    "image": "sha256:<64-hex-digest>",
+    "image": "example.invalid/workspace-guard@sha256:<64-hex-digest>",
     "tools": ["python_version", "run_pytest"]
   },
   "coding": {
@@ -281,9 +326,9 @@ Profiles support **single inheritance** to reduce operator configuration duplica
 
 A parent may be declared after its child. Unknown parents, inheritance cycles, and duplicate or unsupported `tools_add` entries fail closed during startup. Composition **does not relax authorization**: every resolved effective profile is independently revalidated against the same tool, workspace-access, writable disk-limit, and arbitrary-command safety rules. `TaskManager` and `list_execution_profiles` only see fully resolved effective profiles and never expose `extends` or `tools_add`.
 
-Callers cannot override environment, image, network, mounts, ports, resource limits, or container IDs. Every execution starts from a filtered temporary snapshot; snapshot changes are never written back to the real workspace.
+Callers cannot override environment, image, network, mounts, ports, resource limits, or backend-owned runtime identifiers. Every execution starts from a filtered temporary snapshot; snapshot changes are never written back to the real workspace.
 
-### Building and switching the execution image
+### Building and switching the Docker / Podman execution image
 
 `examples/Dockerfile.task` is the source for the standard execution image and preinstalls offline tools such as pytest, coverage, Ruff, and mypy. Editing the Dockerfile does not update an already running MCP service automatically; the operator must rebuild the image, obtain its immutable image ID/digest, update the execution profile configuration outside the workspace, and restart the MCP service. For example:
 
@@ -341,7 +386,7 @@ Common settings:
 
 WorkspaceGuard can optionally persist bounded, public-safe `ExecutionRecord` current truth, `ExecutionEvent` lifecycle history, and bounded Artifact Manifest metadata to an operator-controlled SQLite database outside the workspace. Terminal record/resources, the state-transition event, and the new execution's artifact manifest commit in the same durable transaction. `CANCELLATION_REQUESTED` is a separate audit fact recorded atomically with the transition into `CANCELLING`. Modern histories validate the CREATED origin, contiguous sequence, state chain, legal transitions, state-compatible reason/error metadata, monotonic timestamps, and exact final state/timestamp/reason/error agreement with the current record; broken or contradictory modern history fails closed, while version 1 legacy history without a CREATED event remains explicitly `history_complete=false`.
 
-Without `--execution-db`, WorkspaceGuard uses a process-local InMemory store. It retains at most 1024 terminal executions by default and evicts the oldest whole execution, including its record, events, and manifest; unfinished executions are never retention-evicted. Configuring SQLite explicitly opts into a durable audit database, and WorkspaceGuard does not silently prune that history by count; database rotation and retention are operator responsibilities. The current SQLite schema is v4. Versions 1, 2, and 3 migrate transactionally to v4 and scrub pre-v4 `error_summary` values that may have been caller/runtime-authored. Legacy executions receive `manifest_complete=false` rather than a fabricated claim that no artifacts existed; v4 also fails closed if an incomplete manifest has artifact rows or an unfinished execution claims a complete manifest. Persistence never scans for, reconnects to, or adopts old-process containers. Unfinished records are reconciled to `CRASHED / SERVER_RESTARTED` on startup.
+Without `--execution-db`, WorkspaceGuard uses a process-local InMemory store. It retains at most 1024 terminal executions by default and evicts the oldest whole execution, including its record, events, and manifest; unfinished executions are never retention-evicted. Configuring SQLite explicitly opts into a durable audit database, and WorkspaceGuard does not silently prune that history by count; database rotation and retention are operator responsibilities. The current SQLite schema is v4. Versions 1, 2, and 3 migrate transactionally to v4 and scrub pre-v4 `error_summary` values that may have been caller/runtime-authored. Legacy executions receive `manifest_complete=false` rather than a fabricated claim that no artifacts existed; v4 also fails closed if an incomplete manifest has artifact rows or an unfinished execution claims a complete manifest. Persistence never scans for, guesses ownership of, reconnects to, or adopts runtime resources owned by an old WorkspaceGuard process, including Docker/Podman containers and Microsandbox sandboxes. Unfinished records are reconciled to `CRASHED / SERVER_RESTARTED` on startup.
 
 `stdio` is intended for local clients. Streamable HTTP listens on `127.0.0.1:3001/mcp` by default; non-loopback or public deployments need explicit network, Host/Origin, HTTPS, and external OAuth/OIDC configuration. `--allow-unauthenticated-http` is for temporary development only. See [SECURITY.md](SECURITY.md) for the full OAuth topology and RFC 9728 details.
 
@@ -368,7 +413,7 @@ src/workspace_guard_mcp/
   execution_store.py    # In-memory / SQLite record + append-only audit stores
   execution_backend.py  # Backend-neutral request / backend / handle contract
   container_backend.py  # Hardened Docker/Podman CLI adapter
-  microsandbox_backend.py # Optional Microsandbox adapter, not config-selected yet
+  microsandbox_backend.py # Production Microsandbox microVM adapter
   task_runner.py        # Backend-neutral sync orchestration and runtime monitoring
   task_manager.py       # Execution lifecycle, concurrency, and service sessions
 tests/                   # Unit, boundary, and transport regression tests
