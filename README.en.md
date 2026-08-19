@@ -368,6 +368,7 @@ src/workspace_guard_mcp/
   execution_store.py    # In-memory / SQLite record + append-only audit stores
   execution_backend.py  # Backend-neutral request / backend / handle contract
   container_backend.py  # Hardened Docker/Podman CLI adapter
+  microsandbox_backend.py # Optional Microsandbox adapter, not config-selected yet
   task_runner.py        # Backend-neutral sync orchestration and runtime monitoring
   task_manager.py       # Execution lifecycle, concurrency, and service sessions
 tests/                   # Unit, boundary, and transport regression tests
