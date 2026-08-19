@@ -25,7 +25,7 @@ from starlette.applications import Starlette
 from starlette.types import Message
 
 from workspace_guard_mcp.config import Settings
-from workspace_guard_mcp.execution_backend import ExecutionRequest as ContainerRequest
+from workspace_guard_mcp.execution_backend import ExecutionRequest
 from workspace_guard_mcp.oauth import (
     DEFAULT_OAUTH_SCOPES,
     JWTTokenVerifier,
@@ -59,7 +59,7 @@ class _ImmediateHandle:
 
 class _FakeBackend:
     def __init__(self) -> None:
-        self.requests: list[ContainerRequest] = []
+        self.requests: list[ExecutionRequest] = []
 
     def start(self, request, on_stdout, on_stderr):
         self.requests.append(request)

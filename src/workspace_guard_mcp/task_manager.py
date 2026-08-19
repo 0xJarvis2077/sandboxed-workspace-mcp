@@ -21,6 +21,7 @@ from .artifact_store import (
 )
 from .command_execution import CommandCompiler
 from .config import Settings
+from .container_backend import CliContainerBackend
 from .diagnostics import (
     adapt_coverage_result,
     adapt_mypy_result,
@@ -64,7 +65,6 @@ from .task_config import (
 )
 from .task_runner import (
     ArtifactGrowthMonitor,
-    CliContainerBackend,
     WorkspaceGrowthMonitor,
     measure_workspace_usage,
     run_execution,

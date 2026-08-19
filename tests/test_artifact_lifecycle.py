@@ -9,8 +9,9 @@ from types import MappingProxyType
 
 from workspace_guard_mcp.artifact_store import EphemeralArtifactStore
 from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.container_backend import build_container_argv
 from workspace_guard_mcp.execution import ExecutionReason, ExecutionState
-from workspace_guard_mcp.execution_backend import ExecutionRequest as ContainerRequest
+from workspace_guard_mcp.execution_backend import ExecutionRequest
 from workspace_guard_mcp.execution_store import SqliteExecutionStore
 from workspace_guard_mcp.task_config import (
     TaskConfiguration,
@@ -18,7 +19,7 @@ from workspace_guard_mcp.task_config import (
     TaskLimits,
 )
 from workspace_guard_mcp.task_manager import TaskManager, TaskManagerError
-from workspace_guard_mcp.task_runner import ArtifactGrowthMonitor, build_container_argv
+from workspace_guard_mcp.task_runner import ArtifactGrowthMonitor
 
 PINNED_IMAGE = "example.invalid/workspace-guard-mcp@sha256:" + "b" * 64
 
@@ -154,7 +155,7 @@ class ArtifactWritingBackend:
         self.files = files
         self.exit_code = exit_code
         self.blocking = blocking
-        self.requests: list[ContainerRequest] = []
+        self.requests: list[ExecutionRequest] = []
         self.handles: list[ImmediateHandle | BlockingHandle] = []
         self.started = threading.Event()
 
@@ -219,7 +220,7 @@ class ArtifactContainerContractTests(unittest.TestCase):
         ):
             workspace = Path(workspace_dir)
             artifacts = Path(artifact_dir)
-            request = ContainerRequest(
+            request = ExecutionRequest(
                 "container",
                 workspace,
                 TaskDefinition(
@@ -248,7 +249,7 @@ class ArtifactContainerContractTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as workspace_dir,
             tempfile.TemporaryDirectory() as artifact_dir,
         ):
-            request = ContainerRequest(
+            request = ExecutionRequest(
                 "container",
                 Path(workspace_dir),
                 TaskDefinition(
@@ -552,7 +553,7 @@ class ArtifactLifecycleTests(unittest.TestCase):
                 handle_file.write(b"12345")
                 ghost.unlink()
                 handle_file.write(b"67890")
-                request = ContainerRequest(
+                request = ExecutionRequest(
                     "container",
                     Path(workspace_dir),
                     TaskDefinition("run", "run", PINNED_IMAGE, ("python",)),
@@ -573,7 +574,7 @@ class ArtifactLifecycleTests(unittest.TestCase):
             artifacts = Path(artifact_dir)
             (artifacts / "nested").mkdir()
             handle = BlockingHandle()
-            request = ContainerRequest(
+            request = ExecutionRequest(
                 "container",
                 Path(workspace_dir),
                 TaskDefinition("run", "run", PINNED_IMAGE, ("python",)),
@@ -595,7 +596,7 @@ class ArtifactLifecycleTests(unittest.TestCase):
             artifacts = Path(artifact_dir)
             (artifacts / "big.bin").write_bytes(b"12345")
             handle = BlockingHandle()
-            request = ContainerRequest(
+            request = ExecutionRequest(
                 "container",
                 Path(workspace_dir),
                 TaskDefinition("run", "run", PINNED_IMAGE, ("python",)),
