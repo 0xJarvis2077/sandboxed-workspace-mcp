@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Any
 
 MAX_TASK_CONFIG_BYTES = 1024 * 1024
+_MAX_EXECUTION_PROFILE_INHERITANCE_DEPTH = 128
 _TASK_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 _IMAGE_DIGEST = re.compile(
     r"(?:[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:|sha256:)[0-9a-fA-F]{64}\Z"
@@ -79,6 +80,19 @@ class ExecutionProfile:
     tools: frozenset[str]
     workspace_access: str = "read-only"
     allow_arbitrary_commands: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _RawExecutionProfile:
+    """Validated profile config before startup composition is resolved."""
+
+    name: str
+    extends: str | None
+    image: str | None
+    tools: frozenset[str] | None
+    tools_add: frozenset[str] | None
+    workspace_access: str | None
+    allow_arbitrary_commands: bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,13 +237,14 @@ def _validate_config(raw: Any, source: Path) -> TaskConfiguration:
                 f"invalid task name {name!r}; use 1-64 letters, digits, '_' or '-'"
             )
         tasks[name] = _validate_task(name, task_value)
-    profiles: dict[str, ExecutionProfile] = {}
+    raw_profiles: dict[str, _RawExecutionProfile] = {}
     for name, profile_value in profile_values.items():
         if not isinstance(name, str) or _TASK_NAME.fullmatch(name) is None:
             raise TaskConfigurationError(
                 f"invalid profile name {name!r}; use 1-64 letters, digits, '_' or '-'"
             )
-        profiles[name] = _validate_execution_profile(name, profile_value)
+        raw_profiles[name] = _parse_execution_profile(name, profile_value)
+    profiles = _resolve_execution_profiles(raw_profiles)
     default_profile = value.get("default_profile")
     if default_profile is not None:
         if (
@@ -446,60 +461,224 @@ def _validate_task(name: str, raw: Any) -> TaskDefinition:
     )
 
 
-def _validate_execution_profile(name: str, raw: Any) -> ExecutionProfile:
+def _parse_execution_profile(name: str, raw: Any) -> _RawExecutionProfile:
     value = _object(raw, f"profile {name!r}")
     _known_fields(
         value,
-        {"image", "tools", "workspace_access", "allow_arbitrary_commands"},
+        {
+            "extends",
+            "image",
+            "tools",
+            "tools_add",
+            "workspace_access",
+            "allow_arbitrary_commands",
+        },
         f"profile {name!r}",
     )
-    _required_fields(value, {"image", "tools"}, f"profile {name!r}")
-    image = value["image"]
-    if not isinstance(image, str) or _IMAGE_DIGEST.fullmatch(image) is None:
-        raise TaskConfigurationError(
-            f"profile {name!r} image must be a repository@sha256 digest or "
-            "full local sha256 image ID"
-        )
-    raw_tools = value["tools"]
-    if not isinstance(raw_tools, list) or not raw_tools:
-        raise TaskConfigurationError(
-            f"profile {name!r} tools must be a non-empty array"
-        )
-    if len(raw_tools) > len(EXECUTION_PROFILE_TOOLS):
-        raise TaskConfigurationError(f"profile {name!r} has too many tools")
-    tools: list[str] = []
-    for tool in raw_tools:
-        if not isinstance(tool, str) or tool not in EXECUTION_PROFILE_TOOLS:
+
+    extends: str | None = None
+    if "extends" in value:
+        candidate = value["extends"]
+        if not isinstance(candidate, str) or _TASK_NAME.fullmatch(candidate) is None:
             raise TaskConfigurationError(
-                f"profile {name!r} contains an unsupported execution tool: {tool!r}"
+                f"profile {name!r} extends must be a valid execution profile name"
             )
-        if tool in tools:
+        extends = candidate
+
+    if extends is None:
+        if "tools_add" in value:
             raise TaskConfigurationError(
-                f"profile {name!r} contains duplicate tool {tool!r}"
+                f"root profile {name!r} cannot use tools_add without extends"
             )
-        tools.append(tool)
-    workspace_access = value.get("workspace_access", "read-only")
-    if workspace_access not in {"read-only", "writable"}:
+        _required_fields(value, {"image", "tools"}, f"profile {name!r}")
+    elif "tools" in value and "tools_add" in value:
         raise TaskConfigurationError(
-            f"profile {name!r} workspace_access must be 'read-only' or 'writable'"
+            f"profile {name!r} cannot define both tools and tools_add"
         )
-    allow_arbitrary_commands = value.get("allow_arbitrary_commands", False)
-    if type(allow_arbitrary_commands) is not bool:
-        raise TaskConfigurationError(
-            f"profile {name!r} allow_arbitrary_commands must be a boolean"
-        )
-    if ARBITRARY_COMMAND_TOOLS.intersection(tools) and not allow_arbitrary_commands:
-        raise TaskConfigurationError(
-            f"profile {name!r} must explicitly set allow_arbitrary_commands=true "
-            "to authorize run_command or start_command"
-        )
-    return ExecutionProfile(
+
+    image: str | None = None
+    if "image" in value:
+        candidate = value["image"]
+        if not isinstance(candidate, str) or _IMAGE_DIGEST.fullmatch(candidate) is None:
+            raise TaskConfigurationError(
+                f"profile {name!r} image must be a repository@sha256 digest or "
+                "full local sha256 image ID"
+            )
+        image = candidate
+
+    tools = (
+        _parse_profile_tools(name, "tools", value["tools"])
+        if "tools" in value
+        else None
+    )
+    tools_add = (
+        _parse_profile_tools(name, "tools_add", value["tools_add"])
+        if "tools_add" in value
+        else None
+    )
+
+    workspace_access: str | None = None
+    if "workspace_access" in value:
+        candidate = value["workspace_access"]
+        if candidate not in {"read-only", "writable"}:
+            raise TaskConfigurationError(
+                f"profile {name!r} workspace_access must be 'read-only' or 'writable'"
+            )
+        workspace_access = candidate
+
+    allow_arbitrary_commands: bool | None = None
+    if "allow_arbitrary_commands" in value:
+        candidate = value["allow_arbitrary_commands"]
+        if type(candidate) is not bool:
+            raise TaskConfigurationError(
+                f"profile {name!r} allow_arbitrary_commands must be a boolean"
+            )
+        allow_arbitrary_commands = candidate
+
+    return _RawExecutionProfile(
         name=name,
+        extends=extends,
         image=image,
-        tools=frozenset(tools),
+        tools=tools,
+        tools_add=tools_add,
         workspace_access=workspace_access,
         allow_arbitrary_commands=allow_arbitrary_commands,
     )
+
+
+def _parse_profile_tools(name: str, field_name: str, raw: Any) -> frozenset[str]:
+    if not isinstance(raw, list) or not raw:
+        raise TaskConfigurationError(
+            f"profile {name!r} {field_name} must be a non-empty array"
+        )
+    if len(raw) > len(EXECUTION_PROFILE_TOOLS):
+        raise TaskConfigurationError(
+            f"profile {name!r} {field_name} has too many tools"
+        )
+    tools: set[str] = set()
+    for tool in raw:
+        if not isinstance(tool, str) or tool not in EXECUTION_PROFILE_TOOLS:
+            raise TaskConfigurationError(
+                f"profile {name!r} {field_name} contains an unsupported execution "
+                f"tool: {tool!r}"
+            )
+        if tool in tools:
+            raise TaskConfigurationError(
+                f"profile {name!r} {field_name} contains duplicate tool {tool!r}"
+            )
+        tools.add(tool)
+    return frozenset(tools)
+
+
+def _resolve_execution_profiles(
+    raw_profiles: Mapping[str, _RawExecutionProfile],
+) -> dict[str, ExecutionProfile]:
+    resolved: dict[str, ExecutionProfile] = {}
+    resolving: list[str] = []
+
+    def resolve(name: str) -> ExecutionProfile:
+        existing = resolved.get(name)
+        if existing is not None:
+            return existing
+        if name in resolving:
+            cycle_start = resolving.index(name)
+            cycle = resolving[cycle_start:] + [name]
+            raise TaskConfigurationError(
+                "execution profile inheritance cycle: " + " -> ".join(cycle)
+            )
+        if len(resolving) >= _MAX_EXECUTION_PROFILE_INHERITANCE_DEPTH:
+            raise TaskConfigurationError(
+                "execution profile inheritance depth exceeds "
+                f"{_MAX_EXECUTION_PROFILE_INHERITANCE_DEPTH}: {name!r}"
+            )
+
+        raw = raw_profiles[name]
+        resolving.append(name)
+        try:
+            if raw.extends is None:
+                effective = _build_root_execution_profile(raw)
+            else:
+                if raw.extends not in raw_profiles:
+                    raise TaskConfigurationError(
+                        f"profile {name!r} extends unknown profile {raw.extends!r}"
+                    )
+                effective = _compose_execution_profile(resolve(raw.extends), raw)
+            _validate_effective_execution_profile(effective)
+            resolved[name] = effective
+            return effective
+        finally:
+            resolving.pop()
+
+    for name in raw_profiles:
+        resolve(name)
+    return resolved
+
+
+def _build_root_execution_profile(raw: _RawExecutionProfile) -> ExecutionProfile:
+    if raw.image is None or raw.tools is None:
+        raise TaskConfigurationError(
+            f"root profile {raw.name!r} must define image and tools"
+        )
+    return ExecutionProfile(
+        name=raw.name,
+        image=raw.image,
+        tools=raw.tools,
+        workspace_access=raw.workspace_access or "read-only",
+        allow_arbitrary_commands=(
+            False
+            if raw.allow_arbitrary_commands is None
+            else raw.allow_arbitrary_commands
+        ),
+    )
+
+
+def _compose_execution_profile(
+    parent: ExecutionProfile,
+    raw: _RawExecutionProfile,
+) -> ExecutionProfile:
+    if raw.tools is not None:
+        tools = raw.tools
+    elif raw.tools_add is not None:
+        inherited_duplicates = parent.tools.intersection(raw.tools_add)
+        if inherited_duplicates:
+            duplicate = sorted(inherited_duplicates)[0]
+            raise TaskConfigurationError(
+                f"profile {raw.name!r} tools_add contains already inherited tool "
+                f"{duplicate!r}"
+            )
+        tools = parent.tools.union(raw.tools_add)
+    else:
+        tools = parent.tools
+
+    return ExecutionProfile(
+        name=raw.name,
+        image=parent.image if raw.image is None else raw.image,
+        tools=tools,
+        workspace_access=(
+            parent.workspace_access
+            if raw.workspace_access is None
+            else raw.workspace_access
+        ),
+        allow_arbitrary_commands=(
+            parent.allow_arbitrary_commands
+            if raw.allow_arbitrary_commands is None
+            else raw.allow_arbitrary_commands
+        ),
+    )
+
+
+def _validate_effective_execution_profile(profile: ExecutionProfile) -> None:
+    if not profile.tools:
+        raise TaskConfigurationError(
+            f"profile {profile.name!r} must authorize at least one execution tool"
+        )
+    if ARBITRARY_COMMAND_TOOLS.intersection(profile.tools) and not (
+        profile.allow_arbitrary_commands
+    ):
+        raise TaskConfigurationError(
+            f"profile {profile.name!r} must explicitly set "
+            "allow_arbitrary_commands=true to authorize run_command or start_command"
+        )
 
 
 def _object(value: Any, location: str) -> dict[str, Any]:

@@ -261,6 +261,26 @@ Copy [examples/execution-profiles.json](examples/execution-profiles.json) outsid
 
 An execution profile is operator security/environment policy, not a tool taxonomy the agent must memorize. Without `profile`, a structured tool first uses the top-level `default_profile`, then a unique capability candidate; multiple remaining candidates produce an explicit ambiguous-profile error. `run_command` and `start_command` always require an explicit profile and `allow_arbitrary_commands=true`. `list_execution_profiles` remains available for capability discovery and operator inspection and marks the default profile.
 
+#### Execution Profile Composition
+
+Profiles support **single inheritance** to reduce operator configuration duplication, resolved exactly once when the configuration is loaded at startup. A root profile must still provide `image` and `tools`. A derived profile uses `extends` to name one parent and may inherit or explicitly override `image`, `workspace_access`, and `allow_arbitrary_commands`. `tools_add` adds capabilities to the inherited tool set, while `tools` replaces the inherited tool set completely. They are mutually exclusive, and a root profile cannot use `tools_add` without a parent.
+
+```json
+{
+  "python-safe": {
+    "image": "sha256:<64-hex-digest>",
+    "tools": ["python_version", "run_pytest"]
+  },
+  "coding": {
+    "extends": "python-safe",
+    "tools_add": ["run_command", "start_command"],
+    "allow_arbitrary_commands": true
+  }
+}
+```
+
+A parent may be declared after its child. Unknown parents, inheritance cycles, and duplicate or unsupported `tools_add` entries fail closed during startup. Composition **does not relax authorization**: every resolved effective profile is independently revalidated against the same tool, workspace-access, writable disk-limit, and arbitrary-command safety rules. `TaskManager` and `list_execution_profiles` only see fully resolved effective profiles and never expose `extends` or `tools_add`.
+
 Callers cannot override environment, image, network, mounts, ports, resource limits, or container IDs. Every execution starts from a filtered temporary snapshot; snapshot changes are never written back to the real workspace.
 
 ### Building and switching the execution image

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
+
+from workspace_guard_mcp.task_config import load_task_config
 
 
 class ExecutionImageCapabilityTests(unittest.TestCase):
@@ -38,20 +41,33 @@ class ExecutionImageCapabilityTests(unittest.TestCase):
     def test_profiles_with_structured_analysis_use_complete_capability_set(
         self,
     ) -> None:
-        profiles = json.loads(
+        payload = json.loads(
             (self.project_root / "examples" / "execution-profiles.json").read_text(
                 encoding="utf-8"
             )
-        )["profiles"]
+        )
+        profiles = payload["profiles"]
+        profiles["python-safe"]["image"] = "sha256:" + "a" * 64
         required = {
             "run_pytest",
             "run_ruff",
             "run_mypy",
             "run_pytest_coverage",
         }
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace = base / "workspace"
+            workspace.mkdir()
+            config_path = base / "execution-profiles.json"
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            configuration = load_task_config(config_path, workspace_root=workspace)
+
         for profile_name in ("python-safe", "coding"):
             with self.subTest(profile=profile_name):
-                self.assertTrue(required.issubset(profiles[profile_name]["tools"]))
+                self.assertTrue(
+                    required.issubset(configuration.profiles[profile_name].tools)
+                )
 
     def test_ci_builds_and_offline_smoke_checks_execution_image(self) -> None:
         self.assertIn("execution-image:", self.ci)
