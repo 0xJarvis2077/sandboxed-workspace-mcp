@@ -23,6 +23,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from workspace_guard_mcp.cli import _transport_security, main, parse_runtime
 from workspace_guard_mcp.config import Settings
+from workspace_guard_mcp.microsandbox_backend import MicrosandboxExecutionError
 from workspace_guard_mcp.server import create_server
 
 
@@ -96,6 +97,52 @@ class CliTests(unittest.TestCase):
                 self.assertRaises(SystemExit),
             ):
                 parse_runtime(arguments, environment)
+
+    def test_microsandbox_missing_extra_is_bounded_startup_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as base:
+            base_path = Path(base)
+            root = base_path / "workspace"
+            root.mkdir()
+            task_config = base_path / "tasks.json"
+            task_config.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "runtime": "microsandbox",
+                        "tasks": {
+                            "test": {
+                                "mode": "run",
+                                "image": "example.invalid/test@sha256:" + "a" * 64,
+                                "argv": ["python", "-V"],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            error = io.StringIO()
+            with (
+                patch(
+                    "workspace_guard_mcp.task_manager.MicrosandboxBackend",
+                    side_effect=MicrosandboxExecutionError("SDK unavailable"),
+                ),
+                patch("workspace_guard_mcp.cli.create_server") as create_server_mock,
+                contextlib.redirect_stderr(error),
+            ):
+                exit_code = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-config",
+                        str(task_config),
+                    ]
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("startup error", error.getvalue())
+        self.assertIn("workspace-guard-mcp[microsandbox]", error.getvalue())
+        self.assertNotIn("Traceback", error.getvalue())
+        create_server_mock.assert_not_called()
 
     def test_module_entrypoint_exits_with_cli_result(self) -> None:
         with patch("workspace_guard_mcp.cli.main", return_value=0) as cli_main:

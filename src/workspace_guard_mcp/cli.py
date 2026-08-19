@@ -33,7 +33,7 @@ from .task_config import (
     TaskConfigurationError,
     load_task_config,
 )
-from .task_manager import TaskManager
+from .task_manager import TaskManager, TaskManagerError
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,7 +285,7 @@ def build_parser(
         default=env.get("WORKSPACE_GUARD_MCP_TASK_CONFIG"),
         metavar="ABSOLUTE_JSON_PATH",
         help=(
-            "trusted container-task JSON outside the workspace "
+            "trusted execution-task JSON outside the workspace "
             "(or set WORKSPACE_GUARD_MCP_TASK_CONFIG)"
         ),
     )
@@ -467,15 +467,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if runtime.execution_db is not None
         else InMemoryExecutionStore()
     )
-    task_manager = (
-        TaskManager(
-            runtime.settings,
-            runtime.task_configuration,
-            execution_store=execution_store,
-        )
-        if runtime.task_configuration is not None
-        else None
-    )
+    task_manager: TaskManager | None = None
+    if runtime.task_configuration is not None:
+        try:
+            task_manager = TaskManager(
+                runtime.settings,
+                runtime.task_configuration,
+                execution_store=execution_store,
+            )
+        except TaskManagerError as exc:
+            print(f"workspace-guard-mcp: startup error: {exc}", file=sys.stderr)
+            return 2
     server = create_server(
         runtime.settings, task_manager=task_manager, oauth=runtime.oauth
     )

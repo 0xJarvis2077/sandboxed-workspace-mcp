@@ -1,4 +1,4 @@
-"""Validate generic container commands and compile their fixed execution context."""
+"""Validate generic execution commands and compile their fixed execution context."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ class ExecutionPathError(ValueError):
 
 
 class CommandExecutionError(ValueError):
-    """Raised when a generic container command violates its public contract."""
+    """Raised when a generic execution command violates its public contract."""
 
 
 @dataclass(frozen=True, slots=True)

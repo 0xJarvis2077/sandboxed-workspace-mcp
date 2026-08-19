@@ -52,6 +52,7 @@ from .execution_store import (
     UnknownExecutionError,
     reconcile_unfinished_executions,
 )
+from .microsandbox_backend import MicrosandboxBackend, MicrosandboxExecutionError
 from .pytest_debug_plugin import (
     DEBUG_PLUGIN_FILENAME,
     build_pytest_debug_plugin_source,
@@ -76,7 +77,21 @@ _MAX_RETAINED_SERVICES = 128
 
 
 class TaskManagerError(ValueError):
-    """Raised when an MCP task request violates the configured contract."""
+    """Raised when task management cannot satisfy the configured contract."""
+
+
+def _create_default_backend(configuration: TaskConfiguration) -> ExecutionBackend:
+    if configuration.runtime in {"docker", "podman"}:
+        return CliContainerBackend(configuration.runtime)
+    if configuration.runtime == "microsandbox":
+        try:
+            return MicrosandboxBackend()
+        except MicrosandboxExecutionError as exc:
+            raise TaskManagerError(
+                "Microsandbox backend initialization failed: "
+                f"{exc}. Install workspace-guard-mcp[microsandbox]."
+            ) from exc
+    raise TaskManagerError(f"unsupported task runtime: {configuration.runtime}")
 
 
 @dataclass(slots=True)
@@ -235,6 +250,7 @@ class _ExecutionLease:
     cancellation: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
     handle: ExecutionHandle | None = None
+    runtime_handed_off: bool = False
     finished: bool = False
     capacity_transferred: bool = False
 
@@ -273,9 +289,22 @@ class _LeaseBackend:
                 or (self.cancellation is not None and self.cancellation.is_set())
             ):
                 raise TaskManagerError("task manager is shutting down")
-            handle = self.manager.backend.start(request, on_stdout, on_stderr)
+
+        handle = self.manager.backend.start(request, on_stdout, on_stderr)
+        with self.manager._lock:
             self.lease.handle = handle
+            shutting_down = self.manager._shutdown or self.lease.cancellation.is_set()
+            cancelled = shutting_down or (
+                self.cancellation is not None and self.cancellation.is_set()
+            )
+            if not cancelled:
+                self.lease.runtime_handed_off = True
+        if not cancelled:
             return handle
+
+        if shutting_down:
+            raise TaskManagerError("task manager is shutting down")
+        raise TaskManagerError("task start was cancelled")
 
 
 class TaskManager:
@@ -292,7 +321,9 @@ class TaskManager:
     ) -> None:
         self.settings = settings
         self.configuration = configuration
-        self.backend = backend or CliContainerBackend(configuration.runtime)
+        self.backend = (
+            backend if backend is not None else _create_default_backend(configuration)
+        )
         self.execution_store = execution_store or InMemoryExecutionStore()
         self.artifact_store = artifact_store or EphemeralArtifactStore()
         reconcile_unfinished_executions(self.execution_store)
@@ -696,6 +727,13 @@ class TaskManager:
                 on_started=lambda: self._mark_running(lease.execution_id),
                 on_cancelling=mark_cancelling,
             )
+            with self._lock:
+                runtime_handed_off = lease.runtime_handed_off
+                if runtime_handed_off:
+                    lease.handle = None
+            startup_cleanup_error = (
+                None if runtime_handed_off else self._cleanup_starting_handle(lease)
+            )
             runtime_state = task_result.state
             runtime_reason = task_result.reason
             if runtime_state is ExecutionState.CANCELLED:
@@ -748,6 +786,19 @@ class TaskManager:
                 artifact_manifest=artifacts,
             )
             result = task_result.as_dict()
+            if startup_cleanup_error is not None:
+                diagnostic = (
+                    "runtime cleanup failure after cancelled start: "
+                    f"{startup_cleanup_error}\n"
+                ).encode("utf-8", errors="replace")
+                existing_stderr = task_result.stderr.encode("utf-8", errors="replace")
+                combined_stderr = diagnostic + existing_stderr
+                result["stderr"] = _decode_bounded(
+                    combined_stderr,
+                    self.configuration.limits.max_output_bytes,
+                )
+                if len(combined_stderr) > self.configuration.limits.max_output_bytes:
+                    result["truncated"] = True
             if state is not task_result.state:
                 result["status"] = legacy_execution_status(state, reason)
                 result["timed_out"] = state is ExecutionState.TIMED_OUT
@@ -875,6 +926,7 @@ class TaskManager:
                 "status": "running",
             }
         except BaseException as exc:
+            startup_cleanup_error: str | None = None
             try:
                 if session is not None and lease.capacity_transferred:
                     self._rollback_service_start(session)
@@ -883,11 +935,7 @@ class TaskManager:
                         workspace_monitor.stop_and_join()
                     if artifact_monitor is not None:
                         artifact_monitor.stop_and_join()
-                    if lease.handle is not None:
-                        try:
-                            lease.handle.stop()
-                        finally:
-                            lease.handle.close()
+                    startup_cleanup_error = self._cleanup_starting_handle(lease)
                     if artifact_staging is not None:
                         artifact_staging.cleanup()
                     if snapshot is not None:
@@ -902,12 +950,17 @@ class TaskManager:
             finally:
                 self._finish_lease(lease)
             if isinstance(exc, TaskManagerError):
+                if startup_cleanup_error is not None:
+                    raise TaskManagerError(
+                        f"{exc}; runtime cleanup failure: {startup_cleanup_error}"
+                    ) from exc
                 raise
             if not isinstance(exc, Exception):
                 raise
-            raise TaskManagerError(
-                f"failed to start {failure_description}: {exc}"
-            ) from exc
+            message = f"failed to start {failure_description}: {exc}"
+            if startup_cleanup_error is not None:
+                message += f"; runtime cleanup failure: {startup_cleanup_error}"
+            raise TaskManagerError(message) from exc
 
     def execution_status(self, execution_id: str) -> dict[str, object]:
         record = self._execution_record(execution_id, id_label="execution_id")
@@ -1184,6 +1237,30 @@ class TaskManager:
         if release_capacity:
             self._capacity.release()
         lease.done.set()
+
+    def _cleanup_starting_handle(self, lease: _ExecutionLease) -> str | None:
+        with self._lock:
+            handle = lease.handle
+        if handle is None:
+            return None
+
+        failures: list[str] = []
+        try:
+            handle.stop()
+        except Exception as exc:
+            failures.append(f"stop failed: {exc}")
+        try:
+            handle.close()
+        except Exception as exc:
+            failures.append(f"close failed: {exc}")
+
+        if failures:
+            return "; ".join(failures)
+
+        with self._lock:
+            if lease.handle is handle:
+                lease.handle = None
+        return None
 
     def _transfer_lease_locked(self, lease: _ExecutionLease) -> None:
         lease.capacity_transferred = True
@@ -1531,7 +1608,7 @@ class TaskManager:
             except Exception:
                 pass
             session.logs.append_diagnostic_stderr(
-                f"container monitor failure: {exc}".encode("utf-8", errors="replace")
+                f"runtime monitor failure: {exc}".encode("utf-8", errors="replace")
             )
             state = ExecutionState.CRASHED
             reason = ExecutionReason.RUNTIME_MONITOR_FAILED
@@ -1557,9 +1634,7 @@ class TaskManager:
             except Exception as exc:
                 cleanup_failed = True
                 session.logs.append_diagnostic_stderr(
-                    f"container cleanup failure: {exc}".encode(
-                        "utf-8", errors="replace"
-                    )
+                    f"runtime cleanup failure: {exc}".encode("utf-8", errors="replace")
                 )
             final_workspace_bytes = self._measure_final_workspace(
                 session.task,

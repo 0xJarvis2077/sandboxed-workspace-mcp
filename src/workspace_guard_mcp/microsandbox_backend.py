@@ -363,6 +363,10 @@ class _MicrosandboxHandle:
         if not self._completed.wait(timeout=timeout):
             raise TimeoutError
         if self._execution_error is not None:
+            if isinstance(self._execution_error, TimeoutError):
+                raise TimeoutError(
+                    str(self._execution_error)
+                ) from self._execution_error
             raise MicrosandboxExecutionError(
                 f"Microsandbox execution failed: {self._execution_error}"
             ) from self._execution_error
@@ -508,11 +512,13 @@ class _MicrosandboxHandle:
                 )
             raise
         except asyncio.TimeoutError as exc:
+            startup_timed_out = not self._started.is_set()
+            phase = "startup" if startup_timed_out else "execution"
             timeout_error = TimeoutError(
-                "Microsandbox startup exceeded execution deadline"
+                f"Microsandbox {phase} exceeded execution deadline"
             )
             timeout_error.__cause__ = exc
-            if not self._started.is_set():
+            if startup_timed_out:
                 self._startup_error = timeout_error
                 await self._cleanup_partial_startup()
             elif not self._stop_requested.is_set():

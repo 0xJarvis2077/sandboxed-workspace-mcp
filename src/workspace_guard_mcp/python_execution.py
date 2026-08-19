@@ -1,4 +1,4 @@
-"""Compile structured Python debugging requests into fixed container argv."""
+"""Compile structured Python debugging requests into fixed execution argv."""
 
 from __future__ import annotations
 

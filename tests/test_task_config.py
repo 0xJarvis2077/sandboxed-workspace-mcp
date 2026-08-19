@@ -682,6 +682,14 @@ class TaskConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskConfigurationError, "full local sha256"):
             load_task_config(self._write(short_id), workspace_root=self.workspace)
 
+    def test_microsandbox_runtime_is_valid_without_loading_optional_sdk(self) -> None:
+        value = self._valid()
+        value["runtime"] = "microsandbox"
+        configuration = load_task_config(
+            self._write(value), workspace_root=self.workspace
+        )
+        self.assertEqual(configuration.runtime, "microsandbox")
+
     def test_invalid_limits_and_top_level_contract_are_rejected(self) -> None:
         cases = (
             ("runtime", "runc", "runtime"),

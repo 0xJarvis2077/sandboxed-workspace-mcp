@@ -1,4 +1,4 @@
-"""Load and freeze the trusted container-task configuration."""
+"""Load and freeze the trusted execution-task configuration."""
 
 from __future__ import annotations
 
@@ -219,8 +219,10 @@ def _validate_config(raw: Any, source: Path) -> TaskConfiguration:
     if type(value["version"]) is not int or value["version"] != 1:
         raise TaskConfigurationError("task config version must be integer 1")
     runtime = value["runtime"]
-    if runtime not in {"docker", "podman"}:
-        raise TaskConfigurationError("task runtime must be 'docker' or 'podman'")
+    if runtime not in {"docker", "podman", "microsandbox"}:
+        raise TaskConfigurationError(
+            "task runtime must be 'docker', 'podman', or 'microsandbox'"
+        )
 
     raw_limits = _object(value.get("limits", {}), "limits")
     limits = _validate_limits(raw_limits)
