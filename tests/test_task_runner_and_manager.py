@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import os
-import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -24,7 +21,7 @@ from workspace_guard_mcp.execution import (
     ExecutionRecord,
     ExecutionState,
 )
-from workspace_guard_mcp.execution_backend import ExecutionRequest as ContainerRequest
+from workspace_guard_mcp.execution_backend import ExecutionRequest
 from workspace_guard_mcp.execution_store import (
     InMemoryExecutionStore,
     SqliteExecutionStore,
@@ -44,16 +41,11 @@ from workspace_guard_mcp.task_manager import (
 )
 from workspace_guard_mcp.task_runner import (
     BoundedOutput,
-    CliContainerBackend,
-    TaskExecutionError,
     WorkspaceGrowthMonitor,
     _next_workspace_scan_delay,
     _WorkspaceUsage,
-    build_container_argv,
     measure_workspace_usage,
-)
-from workspace_guard_mcp.task_runner import (
-    run_execution as run_container_task,
+    run_execution,
 )
 
 PINNED_IMAGE = "example.invalid/workspace-guard-mcp@sha256:" + "b" * 64
@@ -115,7 +107,7 @@ class FakeBackend:
         self.exit_code = exit_code
         self.blocking = blocking
         self.start_error = start_error
-        self.requests: list[ContainerRequest] = []
+        self.requests: list[ExecutionRequest] = []
         self.handles: list[ImmediateHandle | BlockingHandle] = []
         self.started = threading.Event()
 
@@ -133,26 +125,6 @@ class FakeBackend:
         self.handles.append(handle)
         self.started.set()
         return handle
-
-
-class FakeProcess:
-    def __init__(self, *, return_code: int = 0, running: bool = False) -> None:
-        self.stdout = io.BytesIO(b"container stdout")
-        self.stderr = io.BytesIO(b"container stderr")
-        self.returncode = return_code
-        self.running = running
-        self.terminated = False
-
-    def wait(self, timeout: float | None = None) -> int:
-        self.running = False
-        return self.returncode
-
-    def poll(self) -> int | None:
-        return None if self.running else self.returncode
-
-    def terminate(self) -> None:
-        self.terminated = True
-        self.running = False
 
 
 def configuration(
@@ -205,7 +177,7 @@ def profile_configuration(
     )
 
 
-class ContainerRunnerTests(unittest.TestCase):
+class ExecutionRunnerTests(unittest.TestCase):
     def test_bounded_output_counts_observed_bytes_beyond_retention(self) -> None:
         capture = BoundedOutput(8)
         capture.stdout(b"12345")
@@ -295,103 +267,7 @@ class ContainerRunnerTests(unittest.TestCase):
         self.assertEqual(usage.total_bytes, 11)
         second.stat.assert_not_called()
 
-    def test_container_argv_has_every_required_isolation_and_no_shell(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            snapshot = Path(directory)
-            task = TaskDefinition(
-                "test", "run", PINNED_IMAGE, ("python", "-m", "unittest")
-            )
-            request = ContainerRequest(
-                "workspace-guard-mcp-test-token", snapshot, task, TaskLimits()
-            )
-            argv = build_container_argv("/usr/bin/docker", request)
-
-        rendered = " ".join(argv)
-        container_env = [
-            argv[index + 1] for index, item in enumerate(argv) if item == "--env"
-        ]
-        self.assertEqual(argv[0:2], ["/usr/bin/docker", "run"])
-        self.assertEqual(
-            container_env,
-            [
-                "HOME=/tmp/home",
-                "TMPDIR=/tmp",
-                "XDG_CACHE_HOME=/tmp/cache",
-                "RUFF_CACHE_DIR=/tmp/cache/ruff",
-                "MYPY_CACHE_DIR=/tmp/cache/mypy",
-                "COVERAGE_FILE=/tmp/.coverage",
-                "PYTHONDONTWRITEBYTECODE=1",
-                "PYTHONPYCACHEPREFIX=/tmp/cache/python",
-                "PIP_NO_CACHE_DIR=1",
-                "npm_config_cache=/tmp/npm-cache",
-                "CI=1",
-            ],
-        )
-        for expected in (
-            "--pull=never",
-            "--network=none",
-            "--read-only",
-            "--cap-drop=ALL",
-            "--security-opt=no-new-privileges",
-            "--pids-limit",
-            "--memory",
-            "--cpus",
-            "--tmpfs",
-            "destination=/workspace",
-            "readonly",
-            "HOME=/tmp/home",
-            "TMPDIR=/tmp",
-            "PYTHONDONTWRITEBYTECODE=1",
-            "PYTHONPYCACHEPREFIX=/tmp/cache/python",
-            "CI=1",
-        ):
-            self.assertIn(expected, rendered)
-        self.assertNotIn("shell", argv)
-        self.assertNotIn("-c", argv[: argv.index(PINNED_IMAGE)])
-        self.assertNotIn("PYTEST_ADDOPTS", rendered)
-        self.assertEqual(argv[-3:], ["python", "-m", "unittest"])
-
-    def test_command_workdir_and_argv_cannot_become_runtime_flags(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            snapshot = Path(directory)
-            task = TaskDefinition(
-                "coding-run_command",
-                "run",
-                PINNED_IMAGE,
-                ("tool", "--network=host", "-c", "echo unsafe"),
-            )
-            request = ContainerRequest(
-                "workspace-guard-mcp-command",
-                snapshot,
-                task,
-                TaskLimits(),
-                workdir="/workspace/src",
-            )
-            argv = build_container_argv("/usr/bin/docker", request)
-
-        image_index = argv.index(PINNED_IMAGE)
-        self.assertEqual(argv[argv.index("--workdir") + 1], "/workspace/src")
-        self.assertEqual(
-            argv[image_index + 1 :],
-            ["tool", "--network=host", "-c", "echo unsafe"],
-        )
-        self.assertNotIn("--network=host", argv[:image_index])
-        self.assertNotIn("sh", argv[:image_index])
-
-        with tempfile.TemporaryDirectory() as directory:
-            unsafe = ContainerRequest(
-                "workspace-guard-mcp-command",
-                Path(directory),
-                task,
-                TaskLimits(),
-                workdir="/tmp",
-            )
-            with self.assertRaisesRegex(TaskExecutionError, "inside /workspace"):
-                build_container_argv("/usr/bin/docker", unsafe)
-
-    def test_writable_mount_has_fsize_ulimit_and_growth_monitor_stops_task(
-        self,
-    ) -> None:
+    def test_writable_workspace_growth_monitor_stops_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory)
             task = TaskDefinition(
@@ -408,19 +284,13 @@ class ContainerRunnerTests(unittest.TestCase):
                 max_workspace_growth_bytes=5,
                 allow_best_effort_disk_limit=True,
             )
-            request = ContainerRequest(
+            request = ExecutionRequest(
                 "workspace-guard-mcp-growth", snapshot, task, limits
             )
-            argv = build_container_argv("/usr/bin/docker", request)
-            mount = argv[argv.index("--mount") + 1]
-            self.assertNotIn("readonly", mount)
-            self.assertIn("--ulimit", argv)
-            self.assertIn("fsize=5:5", argv)
-
             backend = FakeBackend(blocking=True)
             results = []
             worker = threading.Thread(
-                target=lambda: results.append(run_container_task(backend, request))
+                target=lambda: results.append(run_execution(backend, request))
             )
             worker.start()
             self.assertTrue(backend.started.wait(timeout=2))
@@ -436,7 +306,7 @@ class ContainerRunnerTests(unittest.TestCase):
             snapshot = Path(directory)
             (snapshot / "first.txt").write_bytes(b"1234")
             (snapshot / "second.txt").write_bytes(b"5678")
-            request = ContainerRequest(
+            request = ExecutionRequest(
                 "workspace-guard-mcp-growth-cancel",
                 snapshot,
                 TaskDefinition(
@@ -482,7 +352,7 @@ class ContainerRunnerTests(unittest.TestCase):
     def test_workspace_growth_monitor_ignores_transient_scan_oserror(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory)
-            request = ContainerRequest(
+            request = ExecutionRequest(
                 "workspace-guard-mcp-growth-oserror",
                 snapshot,
                 TaskDefinition(
@@ -522,7 +392,7 @@ class ContainerRunnerTests(unittest.TestCase):
 
     def test_read_only_task_does_not_start_growth_monitor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            request = ContainerRequest(
+            request = ExecutionRequest(
                 "workspace-guard-mcp-read-only",
                 Path(directory),
                 TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
@@ -534,177 +404,20 @@ class ContainerRunnerTests(unittest.TestCase):
 
         start.assert_not_called()
 
-    def test_missing_runtime_fails_without_host_fallback(self) -> None:
-        with (
-            tempfile.TemporaryDirectory() as directory,
-            patch("workspace_guard_mcp.task_runner.shutil.which", return_value=None),
-        ):
-            backend = CliContainerBackend("docker")
-            request = ContainerRequest(
-                "workspace-guard-mcp-test-token",
-                Path(directory),
-                TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
-                TaskLimits(),
-            )
-            with self.assertRaisesRegex(TaskExecutionError, "fallback is disabled"):
-                backend.start(request, lambda data: None, lambda data: None)
-
-    def test_cli_backend_uses_sanitized_environment_and_tracked_stop(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            request = ContainerRequest(
-                "workspace-guard-mcp-test-token",
-                Path(directory),
-                TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
-                TaskLimits(),
-            )
-            process = FakeProcess(running=True)
-            with (
-                patch(
-                    "workspace_guard_mcp.task_runner.shutil.which",
-                    return_value="/usr/bin/docker",
-                ),
-                patch(
-                    "workspace_guard_mcp.task_runner.subprocess.Popen",
-                    return_value=process,
-                ) as popen,
-                patch(
-                    "workspace_guard_mcp.task_runner.subprocess.run",
-                    return_value=subprocess.CompletedProcess([], 0),
-                ) as stop,
-            ):
-                backend = CliContainerBackend("docker")
-                stdout: list[bytes] = []
-                stderr: list[bytes] = []
-                handle = backend.start(request, stdout.append, stderr.append)
-                handle.stop()
-                handle.close()
-
-        call = popen.call_args
-        self.assertNotIn("shell", call.kwargs)
-        self.assertNotIn("HOME", call.kwargs["env"])
-        self.assertEqual(call.kwargs["stdin"], subprocess.DEVNULL)
-        self.assertEqual(stdout, [b"container stdout"])
-        self.assertEqual(stderr, [b"container stderr"])
-        self.assertTrue(process.terminated)
-        self.assertEqual(stop.call_args.args[0][-1], "workspace-guard-mcp-test-token")
-
-    def test_cli_backend_streams_flushed_pipe_output_before_eof(self) -> None:
-        child_script = (
-            "import sys\n"
-            "sys.stdout.buffer.write(b'booted\\n')\n"
-            "sys.stdout.buffer.flush()\n"
-            "sys.stderr.buffer.write(b'booted\\n')\n"
-            "sys.stderr.buffer.flush()\n"
-            "sys.stdin.buffer.read(1)\n"
-        )
-        real_popen = subprocess.Popen
-        process: subprocess.Popen[bytes] | None = None
-        handle = None
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
-        stdout_received = threading.Event()
-        stderr_received = threading.Event()
-
-        def launch_pipe_process(*args, **kwargs):
-            nonlocal process
-            process = real_popen(
-                [sys.executable, "-c", child_script],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                close_fds=True,
-            )
-            return process
-
-        def on_stdout(data: bytes) -> None:
-            stdout_chunks.append(data)
-            stdout_received.set()
-
-        def on_stderr(data: bytes) -> None:
-            stderr_chunks.append(data)
-            stderr_received.set()
-
-        try:
-            with tempfile.TemporaryDirectory() as directory:
-                request = ContainerRequest(
-                    "workspace-guard-mcp-live-logs",
-                    Path(directory),
-                    TaskDefinition("dev", "service", PINNED_IMAGE, ("python",)),
-                    TaskLimits(),
-                )
-                with (
-                    patch(
-                        "workspace_guard_mcp.task_runner.shutil.which",
-                        return_value="/usr/bin/docker",
-                    ),
-                    patch(
-                        "workspace_guard_mcp.task_runner.subprocess.Popen",
-                        side_effect=launch_pipe_process,
-                    ),
-                ):
-                    handle = CliContainerBackend("docker").start(
-                        request, on_stdout, on_stderr
-                    )
-
-                self.assertTrue(stdout_received.wait(timeout=2))
-                self.assertTrue(stderr_received.wait(timeout=2))
-                self.assertEqual(b"".join(stdout_chunks), b"booted\n")
-                self.assertEqual(b"".join(stderr_chunks), b"booted\n")
-                assert process is not None
-                self.assertIsNone(process.poll(), "pipe writers must still be open")
-        finally:
-            if process is not None and process.stdin is not None:
-                process.stdin.close()
-            if handle is not None:
-                try:
-                    handle.wait(timeout=2)
-                except TimeoutError:
-                    assert process is not None
-                    process.kill()
-                    process.wait(timeout=2)
-                finally:
-                    handle.close()
-            elif process is not None and process.poll() is None:
-                process.kill()
-                process.wait(timeout=2)
-
-    def test_cli_backend_start_error_is_explicit(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            request = ContainerRequest(
-                "workspace-guard-mcp-test-token",
-                Path(directory),
-                TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
-                TaskLimits(),
-            )
-            with (
-                patch(
-                    "workspace_guard_mcp.task_runner.shutil.which",
-                    return_value="/usr/bin/docker",
-                ),
-                patch(
-                    "workspace_guard_mcp.task_runner.subprocess.Popen",
-                    side_effect=OSError("denied"),
-                ),
-                self.assertRaisesRegex(TaskExecutionError, "failed to start"),
-            ):
-                CliContainerBackend("docker").start(
-                    request, lambda data: None, lambda data: None
-                )
-
     def test_sync_results_separate_streams_and_report_failures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            request = ContainerRequest(
+            request = ExecutionRequest(
                 "workspace-guard-mcp-test-token",
                 Path(directory),
                 TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
                 TaskLimits(timeout_seconds=1, max_output_bytes=1024),
             )
-            failed = run_container_task(
+            failed = run_execution(
                 FakeBackend(stdout=b"out", stderr=b"traceback", exit_code=3),
                 request,
             )
-            start_failed = run_container_task(
-                FakeBackend(start_error=TaskExecutionError("runtime unavailable")),
+            start_failed = run_execution(
+                FakeBackend(start_error=RuntimeError("runtime unavailable")),
                 request,
             )
 
@@ -718,7 +431,7 @@ class ContainerRunnerTests(unittest.TestCase):
     def test_monitor_start_failure_cleans_up_started_handle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             backend = FakeBackend(blocking=True)
-            request = ContainerRequest(
+            request = ExecutionRequest(
                 "workspace-guard-mcp-monitor-start-failure",
                 Path(directory),
                 TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
@@ -729,7 +442,7 @@ class ContainerRunnerTests(unittest.TestCase):
                 "start",
                 side_effect=RuntimeError("thread unavailable"),
             ):
-                result = run_container_task(backend, request)
+                result = run_execution(backend, request)
 
         self.assertEqual(result.status, "start_failed")
         self.assertIn("workspace monitor start failure", result.stderr)
@@ -739,7 +452,7 @@ class ContainerRunnerTests(unittest.TestCase):
     def test_cleanup_failure_does_not_mask_completed_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             backend = FakeBackend(exit_code=0)
-            request = ContainerRequest(
+            request = ExecutionRequest(
                 "workspace-guard-mcp-cleanup-failure",
                 Path(directory),
                 TaskDefinition("test", "run", PINNED_IMAGE, ("python",)),
@@ -750,20 +463,20 @@ class ContainerRunnerTests(unittest.TestCase):
                 "close",
                 side_effect=RuntimeError("pipe cleanup failed"),
             ):
-                result = run_container_task(backend, request)
+                result = run_execution(backend, request)
 
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("container cleanup failure", result.stderr)
+        self.assertIn("runtime cleanup failure", result.stderr)
         self.assertIn("pipe cleanup failed", result.stderr)
 
     def test_timeout_and_output_overflow_stop_the_tracked_handle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             task = TaskDefinition("test", "run", PINNED_IMAGE, ("python",))
             timeout_backend = FakeBackend(blocking=True)
-            timeout = run_container_task(
+            timeout = run_execution(
                 timeout_backend,
-                ContainerRequest(
+                ExecutionRequest(
                     "workspace-guard-mcp-timeout",
                     Path(directory),
                     task,
@@ -771,9 +484,9 @@ class ContainerRunnerTests(unittest.TestCase):
                 ),
             )
             overflow_backend = FakeBackend(stdout=b"x" * 1025, blocking=True)
-            overflow = run_container_task(
+            overflow = run_execution(
                 overflow_backend,
-                ContainerRequest(
+                ExecutionRequest(
                     "workspace-guard-mcp-overflow",
                     Path(directory),
                     task,
@@ -783,9 +496,9 @@ class ContainerRunnerTests(unittest.TestCase):
             cancellation = threading.Event()
             cancellation.set()
             cancelled_backend = FakeBackend(blocking=True)
-            cancelled = run_container_task(
+            cancelled = run_execution(
                 cancelled_backend,
-                ContainerRequest(
+                ExecutionRequest(
                     "workspace-guard-mcp-cancelled",
                     Path(directory),
                     task,

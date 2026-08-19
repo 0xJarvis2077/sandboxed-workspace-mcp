@@ -367,7 +367,8 @@ src/workspace_guard_mcp/
   execution.py          # Canonical Execution record/event lifecycle domain model
   execution_store.py    # In-memory / SQLite record + append-only audit stores
   execution_backend.py  # Backend-neutral request / backend / handle contract
-  task_runner.py        # Docker/Podman argv, pipes, and generic sync orchestration
+  container_backend.py  # Hardened Docker/Podman CLI adapter
+  task_runner.py        # Backend-neutral sync orchestration and runtime monitoring
   task_manager.py       # Execution lifecycle, concurrency, and service sessions
 tests/                   # Unit, boundary, and transport regression tests
 examples/                # Digest-based config templates and task image

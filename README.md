@@ -367,7 +367,8 @@ src/workspace_guard_mcp/
   execution.py          # canonical Execution record/event lifecycle domain model
   execution_store.py    # 内存 / SQLite record + append-only audit store
   execution_backend.py  # backend-neutral request / backend / handle contract
-  task_runner.py        # Docker/Podman argv、pipe 和通用同步执行编排
+  container_backend.py  # hardened Docker/Podman CLI adapter
+  task_runner.py        # backend-neutral sync orchestration and runtime monitoring
   task_manager.py       # execution 生命周期、并发和 service runtime session
 tests/                   # 单元、边界和传输回归测试
 examples/                # 必须替换 digest 的配置模板和任务镜像
