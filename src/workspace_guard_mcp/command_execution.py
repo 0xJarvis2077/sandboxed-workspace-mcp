@@ -35,10 +35,10 @@ class ValidatedWorkspaceEntry:
 
 @dataclass(frozen=True, slots=True)
 class CompiledCommand:
-    """Caller argv plus a server-generated container workdir."""
+    """Caller argv plus a server-generated workspace workdir."""
 
     argv: tuple[str, ...]
-    container_workdir: str
+    workdir: str
 
 
 class WorkspaceExecutionPathValidator:
@@ -155,7 +155,7 @@ class CommandCompiler:
             workdir += f"/{directory.relative}"
         return CompiledCommand(
             argv=(validated_program, *validated_args),
-            container_workdir=workdir,
+            workdir=workdir,
         )
 
     @staticmethod

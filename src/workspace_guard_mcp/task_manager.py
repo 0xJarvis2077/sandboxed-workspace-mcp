@@ -37,6 +37,12 @@ from .execution import (
     ExecutionState,
     legacy_execution_status,
 )
+from .execution_backend import (
+    ExecutionBackend,
+    ExecutionHandle,
+    ExecutionRequest,
+    OutputCallback,
+)
 from .execution_store import (
     ExecutionConflictError,
     ExecutionStore,
@@ -59,12 +65,9 @@ from .task_config import (
 from .task_runner import (
     ArtifactGrowthMonitor,
     CliContainerBackend,
-    ContainerBackend,
-    ContainerHandle,
-    ContainerRequest,
     WorkspaceGrowthMonitor,
     measure_workspace_usage,
-    run_container_task,
+    run_execution,
 )
 from .task_snapshot import SnapshotBuilder, WorkspaceSnapshot
 
@@ -210,7 +213,7 @@ class TaskLogBuffer:
 class _ServiceSession:
     execution_id: str
     task: TaskDefinition
-    handle: ContainerHandle
+    handle: ExecutionHandle
     snapshot: WorkspaceSnapshot
     artifact_staging: ArtifactStaging
     logs: TaskLogBuffer
@@ -231,7 +234,7 @@ class _ExecutionLease:
     owner_scope: str | None = None
     cancellation: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
-    handle: ContainerHandle | None = None
+    handle: ExecutionHandle | None = None
     finished: bool = False
     capacity_transferred: bool = False
 
@@ -257,7 +260,12 @@ class _LeaseBackend:
         self.lease = lease
         self.cancellation = cancellation
 
-    def start(self, request, on_stdout, on_stderr):
+    def start(
+        self,
+        request: ExecutionRequest,
+        on_stdout: OutputCallback,
+        on_stderr: OutputCallback,
+    ) -> ExecutionHandle:
         with self.manager._lock:
             if (
                 self.manager._shutdown
@@ -278,7 +286,7 @@ class TaskManager:
         settings: Settings,
         configuration: TaskConfiguration,
         *,
-        backend: ContainerBackend | None = None,
+        backend: ExecutionBackend | None = None,
         execution_store: ExecutionStore | None = None,
         artifact_store: EphemeralArtifactStore | None = None,
     ) -> None:
@@ -537,7 +545,7 @@ class TaskManager:
             profile,
             "run_command",
             command.argv,
-            container_workdir=command.container_workdir,
+            workdir=command.workdir,
             cancellation_event=cancellation_event,
             owner_scope=owner_scope,
         )
@@ -568,7 +576,7 @@ class TaskManager:
             task,
             lease,
             started=started,
-            container_workdir=command.container_workdir,
+            workdir=command.workdir,
             cancellation_event=cancellation_event,
             failure_description=f"command profile {profile!r}",
         )
@@ -601,7 +609,7 @@ class TaskManager:
         tool: str,
         argv: tuple[str, ...],
         *,
-        container_workdir: str = "/workspace",
+        workdir: str = "/workspace",
         cancellation_event: threading.Event | None,
         owner_scope: str | None = None,
         result_adapter: Callable[[dict[str, object]], dict[str, object]] | None = None,
@@ -618,7 +626,7 @@ class TaskManager:
             started=started,
             deadline=deadline,
             cancellation_event=cancellation_event,
-            container_workdir=container_workdir,
+            workdir=workdir,
             snapshot_initializer=snapshot_initializer,
         )
         result = capability_result(result)
@@ -634,7 +642,7 @@ class TaskManager:
         started: float,
         deadline: float,
         cancellation_event: threading.Event | None,
-        container_workdir: str = "/workspace",
+        workdir: str = "/workspace",
         snapshot_initializer: Callable[[Path], None] | None = None,
     ) -> dict[str, object]:
         cancellation = _CombinedCancellation(lease.cancellation, cancellation_event)
@@ -663,13 +671,13 @@ class TaskManager:
                 raise
 
             assert initial_workspace_bytes is not None
-            request = ContainerRequest(
-                container_name=self._container_name(),
-                snapshot_path=snapshot.path,
+            request = ExecutionRequest(
+                runtime_name=self._runtime_name(),
+                workspace_path=snapshot.path,
                 task=task,
                 limits=self.configuration.limits,
                 artifact_path=artifact_staging.path,
-                container_workdir=container_workdir,
+                workdir=workdir,
                 initial_workspace_bytes=initial_workspace_bytes,
                 started_at=started,
                 deadline=deadline,
@@ -681,7 +689,7 @@ class TaskManager:
                     self._cancellation_reason(lease, cancellation_event),
                 )
 
-            task_result = run_container_task(
+            task_result = run_execution(
                 _LeaseBackend(self, lease, cancellation),
                 request,
                 cancellation,  # type: ignore[arg-type]
@@ -794,7 +802,7 @@ class TaskManager:
         started: float,
         cancellation_event: threading.Event | None,
         failure_description: str,
-        container_workdir: str = "/workspace",
+        workdir: str = "/workspace",
     ) -> dict[str, object]:
         deadline = started + self.configuration.limits.timeout_seconds
         cancellation = _CombinedCancellation(lease.cancellation, cancellation_event)
@@ -812,13 +820,13 @@ class TaskManager:
             initial_workspace_bytes = self._measure_workspace_baseline(snapshot)
             artifact_staging = ArtifactStaging.create()
             logs = TaskLogBuffer(self.configuration.limits.max_output_bytes)
-            request = ContainerRequest(
-                container_name=self._container_name(),
-                snapshot_path=snapshot.path,
+            request = ExecutionRequest(
+                runtime_name=self._runtime_name(),
+                workspace_path=snapshot.path,
                 task=task,
                 limits=self.configuration.limits,
                 artifact_path=artifact_staging.path,
-                container_workdir=container_workdir,
+                workdir=workdir,
                 initial_workspace_bytes=initial_workspace_bytes,
                 started_at=started,
                 deadline=deadline,
@@ -1478,7 +1486,7 @@ class TaskManager:
             deadline=deadline, cancellation_event=cancellation_event
         )
 
-    def _container_name(self) -> str:
+    def _runtime_name(self) -> str:
         return f"workspace-guard-mcp-{self._instance_token}-{secrets.token_hex(8)}"
 
     def _monitor_service(self, session: _ServiceSession) -> None:

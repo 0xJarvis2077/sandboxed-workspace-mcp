@@ -366,7 +366,8 @@ src/workspace_guard_mcp/
   task_snapshot.py      # Filtered bounded temporary snapshots
   execution.py          # Canonical Execution record/event lifecycle domain model
   execution_store.py    # In-memory / SQLite record + append-only audit stores
-  task_runner.py        # Docker/Podman argv, pipes, and synchronous execution
+  execution_backend.py  # Backend-neutral request / backend / handle contract
+  task_runner.py        # Docker/Podman argv, pipes, and generic sync orchestration
   task_manager.py       # Execution lifecycle, concurrency, and service sessions
 tests/                   # Unit, boundary, and transport regression tests
 examples/                # Digest-based config templates and task image

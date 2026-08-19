@@ -34,9 +34,9 @@ class CommandCompilerTests(unittest.TestCase):
         )
 
         self.assertEqual(root.argv, ("missing-in-host-path", "--check", ""))
-        self.assertEqual(root.container_workdir, "/workspace")
+        self.assertEqual(root.workdir, "/workspace")
         self.assertEqual(nested.argv, ("ruff", "check", "--fix", "."))
-        self.assertEqual(nested.container_workdir, "/workspace/src")
+        self.assertEqual(nested.workdir, "/workspace/src")
         self.assertEqual(self.compiler.compile("python").argv, ("python",))
         self.assertEqual(
             self.compiler.compile("sh", ["-c", "printf ok"]).argv,

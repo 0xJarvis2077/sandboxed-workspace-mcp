@@ -24,6 +24,7 @@ from workspace_guard_mcp.execution import (
     ExecutionRecord,
     ExecutionState,
 )
+from workspace_guard_mcp.execution_backend import ExecutionRequest as ContainerRequest
 from workspace_guard_mcp.execution_store import (
     InMemoryExecutionStore,
     SqliteExecutionStore,
@@ -44,14 +45,15 @@ from workspace_guard_mcp.task_manager import (
 from workspace_guard_mcp.task_runner import (
     BoundedOutput,
     CliContainerBackend,
-    ContainerRequest,
     TaskExecutionError,
     WorkspaceGrowthMonitor,
     _next_workspace_scan_delay,
     _WorkspaceUsage,
     build_container_argv,
     measure_workspace_usage,
-    run_container_task,
+)
+from workspace_guard_mcp.task_runner import (
+    run_execution as run_container_task,
 )
 
 PINNED_IMAGE = "example.invalid/workspace-guard-mcp@sha256:" + "b" * 64
@@ -363,7 +365,7 @@ class ContainerRunnerTests(unittest.TestCase):
                 snapshot,
                 task,
                 TaskLimits(),
-                container_workdir="/workspace/src",
+                workdir="/workspace/src",
             )
             argv = build_container_argv("/usr/bin/docker", request)
 
@@ -382,7 +384,7 @@ class ContainerRunnerTests(unittest.TestCase):
                 Path(directory),
                 task,
                 TaskLimits(),
-                container_workdir="/tmp",
+                workdir="/tmp",
             )
             with self.assertRaisesRegex(TaskExecutionError, "inside /workspace"):
                 build_container_argv("/usr/bin/docker", unsafe)
@@ -835,8 +837,8 @@ class TaskManagerTests(unittest.TestCase):
         self.assertNotIn(PINNED_IMAGE, repr(public))
         self.assertNotIn(str(self.base), repr(public))
         request = backend.requests[0]
-        self.assertNotEqual(request.snapshot_path, self.root)
-        self.assertFalse(request.snapshot_path.exists())
+        self.assertNotEqual(request.workspace_path, self.root)
+        self.assertFalse(request.workspace_path.exists())
         self.assertEqual(
             (self.root / "test_module.py").read_text(encoding="utf-8"),
             "value = 1\n",
@@ -1204,7 +1206,7 @@ class TaskManagerTests(unittest.TestCase):
             backend.requests[0].initial_workspace_bytes,
         )
         self.assertTrue(
-            all(not request.snapshot_path.exists() for request in backend.requests)
+            all(not request.workspace_path.exists() for request in backend.requests)
         )
 
         public = manager.list_execution_profiles()
@@ -1237,8 +1239,8 @@ class TaskManagerTests(unittest.TestCase):
         self.assertEqual(request.task.image, PINNED_IMAGE)
         self.assertEqual(request.task.mode, "run")
         self.assertEqual(request.task.argv, ("ruff", "check", "--fix", "."))
-        self.assertEqual(request.container_workdir, "/workspace/src")
-        self.assertFalse(request.snapshot_path.exists())
+        self.assertEqual(request.workdir, "/workspace/src")
+        self.assertFalse(request.workspace_path.exists())
 
         public = manager.list_execution_profiles()
         self.assertNotIn(PINNED_IMAGE, repr(public))
@@ -1279,13 +1281,13 @@ class TaskManagerTests(unittest.TestCase):
         assert isinstance(task_id, str)
         request = backend.requests[0]
 
-        self.assertNotEqual(task_id, request.container_name)
+        self.assertNotEqual(task_id, request.runtime_name)
         self.assertEqual(request.task.mode, "service")
         self.assertEqual(
             request.task.argv,
             ("uvicorn", "app:app", "--log-level", "debug"),
         )
-        self.assertEqual(request.container_workdir, "/workspace")
+        self.assertEqual(request.workdir, "/workspace")
         self.assertNotIn("uvicorn", repr(manager.task_status(task_id)))
         self.assertEqual(manager.task_logs(task_id)["stdout"], "ready\n")
         self.assertEqual(manager.task_logs(task_id)["stderr"], "warning\n")
@@ -1295,7 +1297,7 @@ class TaskManagerTests(unittest.TestCase):
         stopped = manager.stop_task(task_id)
         self.assertEqual(stopped["status"], "stopped")
         self.assertTrue(backend.handles[0].stopped)
-        self.assertFalse(request.snapshot_path.exists())
+        self.assertFalse(request.workspace_path.exists())
 
         cancelled_backend = FakeBackend(blocking=True)
         cancelled_manager = TaskManager(
@@ -1331,7 +1333,7 @@ class TaskManagerTests(unittest.TestCase):
         shutdown_manager.start_command("debug", "python", ["-m", "http.server"])
         shutdown_manager.shutdown()
         self.assertTrue(shutdown_backend.handles[0].stopped)
-        self.assertFalse(shutdown_backend.requests[0].snapshot_path.exists())
+        self.assertFalse(shutdown_backend.requests[0].workspace_path.exists())
 
     def test_python_profile_rejects_unauthorized_options_and_unsafe_paths(self) -> None:
         manager = TaskManager(
@@ -1401,7 +1403,7 @@ class TaskManagerTests(unittest.TestCase):
         )
         result = manager.python_version("debug")
         self.assertEqual(result["status"], "timed_out")
-        self.assertFalse(backend.requests[0].snapshot_path.exists())
+        self.assertFalse(backend.requests[0].workspace_path.exists())
 
         failed_backend = FakeBackend(exit_code=2)
         failed_manager = TaskManager(
@@ -1411,7 +1413,7 @@ class TaskManagerTests(unittest.TestCase):
         )
         failed = failed_manager.python_version("debug")
         self.assertEqual(failed["status"], "failed")
-        self.assertFalse(failed_backend.requests[0].snapshot_path.exists())
+        self.assertFalse(failed_backend.requests[0].workspace_path.exists())
 
         cancelled_backend = FakeBackend(blocking=True)
         cancelled_manager = TaskManager(
@@ -1434,7 +1436,7 @@ class TaskManagerTests(unittest.TestCase):
         worker.join(timeout=2)
         self.assertFalse(worker.is_alive())
         self.assertEqual(cancelled_results[0]["status"], "cancelled")
-        self.assertFalse(cancelled_backend.requests[0].snapshot_path.exists())
+        self.assertFalse(cancelled_backend.requests[0].workspace_path.exists())
 
         shutdown_backend = FakeBackend(blocking=True)
         shutdown_manager = TaskManager(
@@ -1454,7 +1456,7 @@ class TaskManagerTests(unittest.TestCase):
         shutdown_worker.join(timeout=2)
         self.assertFalse(shutdown_worker.is_alive())
         self.assertEqual(shutdown_results[0]["status"], "cancelled")
-        self.assertFalse(shutdown_backend.requests[0].snapshot_path.exists())
+        self.assertFalse(shutdown_backend.requests[0].workspace_path.exists())
 
     def test_concurrency_limit_rejects_a_second_task(self) -> None:
         backend = FakeBackend(blocking=True)
@@ -1488,7 +1490,7 @@ class TaskManagerTests(unittest.TestCase):
         started = manager.start_task("dev")
         task_id = started["task_id"]
         assert isinstance(task_id, str)
-        snapshot_path = backend.requests[0].snapshot_path
+        workspace_path = backend.requests[0].workspace_path
 
         logs = manager.task_logs(task_id)
         self.assertEqual(logs["stdout"], "ready\n")
@@ -1502,7 +1504,7 @@ class TaskManagerTests(unittest.TestCase):
         stopped = manager.stop_task(task_id)
         self.assertEqual(stopped["status"], "stopped")
         self.assertTrue(backend.handles[0].stopped)
-        self.assertFalse(snapshot_path.exists())
+        self.assertFalse(workspace_path.exists())
 
     def test_service_timeout_and_shutdown_stop_only_tracked_handles(self) -> None:
         timeout_backend = FakeBackend(blocking=True)
@@ -1675,7 +1677,7 @@ class TaskManagerTests(unittest.TestCase):
 
         self.assertTrue(backend.handles[0].stopped)
         self.assertTrue(backend.handles[0].closed)
-        self.assertFalse(backend.requests[0].snapshot_path.exists())
+        self.assertFalse(backend.requests[0].workspace_path.exists())
         self.assertEqual(manager._sessions, {})
         self.assertTrue(manager._capacity.acquire(blocking=False))
         manager._capacity.release()
