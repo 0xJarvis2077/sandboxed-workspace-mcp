@@ -3,20 +3,28 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import importlib
 import re
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Mapping
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 from pathlib import PurePosixPath
 from types import ModuleType
 from typing import Any, Protocol, TypeVar, cast
 
 from .execution_backend import ExecutionHandle, ExecutionRequest, OutputCallback
+from .execution_identity import local_execution_user
 
 _OCI_DIGEST_IMAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-fA-F]{64}\Z")
+_LOCAL_IMAGE_TAG = re.compile(
+    r"local/[a-z0-9]+(?:[._-][a-z0-9]+)*"
+    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*:"
+    r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\Z"
+)
 _MEMORY = re.compile(r"([1-9][0-9]*)([kKmMgG])?(?:[bB])?\Z")
 _MIB = 1024 * 1024
 _MAX_MICROSANDBOX_CPUS = 255
@@ -71,6 +79,7 @@ class _MicrosandboxSdk(Protocol):
         args: list[str],
         *,
         cwd: str,
+        user: str,
         env: Mapping[str, str],
         timeout: float | None,
         stdin: object,
@@ -104,14 +113,19 @@ class _LoadedMicrosandboxSdk:
         nosuid: bool,
         nodev: bool,
     ) -> object:
+        mount = self._module.Volume.bind(
+            path,
+            readonly=readonly,
+            noexec=noexec,
+            nosuid=nosuid,
+            nodev=nodev,
+        )
         return cast(
             object,
-            self._module.Volume.bind(
-                path,
-                readonly=readonly,
-                noexec=noexec,
-                nosuid=nosuid,
-                nodev=nodev,
+            replace(
+                mount,
+                stat_virtualization="off",
+                host_permissions="private",
             ),
         )
 
@@ -160,6 +174,7 @@ class _LoadedMicrosandboxSdk:
         args: list[str],
         *,
         cwd: str,
+        user: str,
         env: Mapping[str, str],
         timeout: float | None,
         stdin: object,
@@ -173,6 +188,7 @@ class _LoadedMicrosandboxSdk:
                 cmd,
                 args,
                 cwd=cwd,
+                user=user,
                 env=dict(env),
                 timeout=timeout,
                 stdin=stdin,
@@ -473,6 +489,7 @@ class _MicrosandboxHandle:
                     self._request.task.argv[0],
                     list(self._request.task.argv[1:]),
                     cwd=self._workdir,
+                    user=local_execution_user(),
                     env=_guest_environment(self._request.artifact_path is not None),
                     timeout=command_timeout,
                     stdin=self._sdk.stdin_null(),
@@ -492,6 +509,11 @@ class _MicrosandboxHandle:
                 elif event_type == "started":
                     continue
                 elif event_type == "failed":
+                    failed_errno = _event_code(event)
+                    if failed_errno == errno.ENOENT:
+                        self._on_stderr(_event_data(event, "failed"))
+                        self._exit_code = 127
+                        break
                     raise MicrosandboxExecutionError(
                         "Microsandbox command failed after exec stream start"
                     )
@@ -679,10 +701,14 @@ def _parse_microsandbox_memory_mib(value: str) -> int:
 
 
 def _validated_microsandbox_image(value: str) -> str:
-    if _OCI_DIGEST_IMAGE.fullmatch(value) is None:
+    if (
+        _OCI_DIGEST_IMAGE.fullmatch(value) is None
+        and _LOCAL_IMAGE_TAG.fullmatch(value) is None
+    ):
         raise MicrosandboxExecutionError(
-            "Microsandbox requires an OCI repository@sha256 digest; "
-            "Docker local sha256 image IDs are not supported"
+            "Microsandbox requires an OCI repository@sha256 digest or an explicit "
+            "local/...:tag cache reference; Docker local sha256 image IDs are not "
+            "supported"
         )
     return value
 

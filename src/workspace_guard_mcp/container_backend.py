@@ -13,6 +13,7 @@ from .execution_backend import (
     ExecutionRequest,
     OutputCallback,
 )
+from .execution_identity import local_execution_user
 
 
 class TaskExecutionError(RuntimeError):
@@ -191,7 +192,7 @@ def build_container_argv(executable: str, request: ExecutionRequest) -> list[str
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
         "--user",
-        _container_user(),
+        local_execution_user(),
         "--memory",
         limits.memory,
         "--cpus",
@@ -249,17 +250,6 @@ def build_container_argv(executable: str, request: ExecutionRequest) -> list[str
         )
     argv.extend([request.task.image, *request.task.argv])
     return argv
-
-
-def _container_user() -> str:
-    get_uid = getattr(os, "getuid", None)
-    get_gid = getattr(os, "getgid", None)
-    if get_uid is not None and get_gid is not None:
-        uid = get_uid()
-        gid = get_gid()
-        if uid > 0:
-            return f"{uid}:{gid}"
-    return "65532:65532"
 
 
 def _validated_container_workdir(value: str) -> str:

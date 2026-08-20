@@ -3,5 +3,7 @@ include SECURITY.md
 include server.py
 include examples/tasks.json
 include examples/execution-profiles.json
+include examples/execution-profiles.microsandbox.json
 include examples/Dockerfile.task
 recursive-include scripts *.py
+recursive-include tests/fixtures/microsandbox_security *.py

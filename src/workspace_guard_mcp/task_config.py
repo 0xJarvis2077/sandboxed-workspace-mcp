@@ -16,8 +16,16 @@ from typing import Any
 MAX_TASK_CONFIG_BYTES = 1024 * 1024
 _MAX_EXECUTION_PROFILE_INHERITANCE_DEPTH = 128
 _TASK_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
+_OCI_REPOSITORY_DIGEST = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-fA-F]{64}\Z"
+)
 _IMAGE_DIGEST = re.compile(
     r"(?:[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:|sha256:)[0-9a-fA-F]{64}\Z"
+)
+_MICROSANDBOX_LOCAL_IMAGE_TAG = re.compile(
+    r"local/[a-z0-9]+(?:[._-][a-z0-9]+)*"
+    r"(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*:"
+    r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}\Z"
 )
 _MEMORY = re.compile(r"[1-9][0-9]*(?:[kKmMgG](?:[bB])?)?\Z")
 _CPUS = re.compile(r"[0-9]+(?:\.[0-9]{1,3})?\Z")
@@ -73,7 +81,7 @@ class TaskDefinition:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionProfile:
-    """Operator-authorized execution tools sharing one pinned image."""
+    """Operator-authorized execution tools sharing one trusted image reference."""
 
     name: str
     image: str
@@ -238,14 +246,16 @@ def _validate_config(raw: Any, source: Path) -> TaskConfiguration:
             raise TaskConfigurationError(
                 f"invalid task name {name!r}; use 1-64 letters, digits, '_' or '-'"
             )
-        tasks[name] = _validate_task(name, task_value)
+        tasks[name] = _validate_task(name, task_value, runtime=runtime)
     raw_profiles: dict[str, _RawExecutionProfile] = {}
     for name, profile_value in profile_values.items():
         if not isinstance(name, str) or _TASK_NAME.fullmatch(name) is None:
             raise TaskConfigurationError(
                 f"invalid profile name {name!r}; use 1-64 letters, digits, '_' or '-'"
             )
-        raw_profiles[name] = _parse_execution_profile(name, profile_value)
+        raw_profiles[name] = _parse_execution_profile(
+            name, profile_value, runtime=runtime
+        )
     profiles = _resolve_execution_profiles(raw_profiles)
     default_profile = value.get("default_profile")
     if default_profile is not None:
@@ -415,7 +425,16 @@ def _validate_limits(raw: Any) -> TaskLimits:
     )
 
 
-def _validate_task(name: str, raw: Any) -> TaskDefinition:
+def _valid_image_reference(value: str, runtime: str) -> bool:
+    if runtime == "microsandbox":
+        return (
+            _OCI_REPOSITORY_DIGEST.fullmatch(value) is not None
+            or _MICROSANDBOX_LOCAL_IMAGE_TAG.fullmatch(value) is not None
+        )
+    return _IMAGE_DIGEST.fullmatch(value) is not None
+
+
+def _validate_task(name: str, raw: Any, *, runtime: str) -> TaskDefinition:
     value = _object(raw, f"task {name!r}")
     _known_fields(
         value,
@@ -427,11 +446,18 @@ def _validate_task(name: str, raw: Any) -> TaskDefinition:
     if mode not in {"run", "service"}:
         raise TaskConfigurationError(f"task {name!r} mode must be 'run' or 'service'")
     image = value["image"]
-    if not isinstance(image, str) or _IMAGE_DIGEST.fullmatch(image) is None:
-        raise TaskConfigurationError(
-            f"task {name!r} image must be a repository@sha256 digest or "
-            "full local sha256 image ID"
-        )
+    if not isinstance(image, str) or not _valid_image_reference(image, runtime):
+        if runtime == "microsandbox":
+            message = (
+                f"task {name!r} image must be a repository@sha256 digest or "
+                "local/...:tag cache reference"
+            )
+        else:
+            message = (
+                f"task {name!r} image must be a repository@sha256 digest or "
+                "full local sha256 image ID"
+            )
+        raise TaskConfigurationError(message)
     argv_value = value["argv"]
     if not isinstance(argv_value, list) or not argv_value:
         raise TaskConfigurationError(f"task {name!r} argv must be a non-empty array")
@@ -463,7 +489,9 @@ def _validate_task(name: str, raw: Any) -> TaskDefinition:
     )
 
 
-def _parse_execution_profile(name: str, raw: Any) -> _RawExecutionProfile:
+def _parse_execution_profile(
+    name: str, raw: Any, *, runtime: str
+) -> _RawExecutionProfile:
     value = _object(raw, f"profile {name!r}")
     _known_fields(
         value,
@@ -501,11 +529,20 @@ def _parse_execution_profile(name: str, raw: Any) -> _RawExecutionProfile:
     image: str | None = None
     if "image" in value:
         candidate = value["image"]
-        if not isinstance(candidate, str) or _IMAGE_DIGEST.fullmatch(candidate) is None:
-            raise TaskConfigurationError(
-                f"profile {name!r} image must be a repository@sha256 digest or "
-                "full local sha256 image ID"
-            )
+        if not isinstance(candidate, str) or not _valid_image_reference(
+            candidate, runtime
+        ):
+            if runtime == "microsandbox":
+                message = (
+                    f"profile {name!r} image must be a repository@sha256 digest or "
+                    "local/...:tag cache reference"
+                )
+            else:
+                message = (
+                    f"profile {name!r} image must be a repository@sha256 digest or "
+                    "full local sha256 image ID"
+                )
+            raise TaskConfigurationError(message)
         image = candidate
 
     tools = (

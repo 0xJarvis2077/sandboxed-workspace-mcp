@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import tempfile
 import threading
 import time
 import unittest
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from unittest.mock import patch
 
+from workspace_guard_mcp.config import Settings
 from workspace_guard_mcp.execution import ExecutionReason, ExecutionState
 from workspace_guard_mcp.execution_backend import ExecutionBackend, ExecutionRequest
 from workspace_guard_mcp.microsandbox_backend import (
@@ -20,7 +23,13 @@ from workspace_guard_mcp.microsandbox_backend import (
     _parse_microsandbox_cpus,
     _parse_microsandbox_memory_mib,
 )
-from workspace_guard_mcp.task_config import TaskDefinition, TaskLimits
+from workspace_guard_mcp.task_config import (
+    ExecutionProfile,
+    TaskConfiguration,
+    TaskDefinition,
+    TaskLimits,
+)
+from workspace_guard_mcp.task_manager import TaskManager
 from workspace_guard_mcp.task_runner import run_execution
 
 PINNED_IMAGE = "example.invalid/workspace-guard-mcp@sha256:" + "a" * 64
@@ -171,6 +180,7 @@ class FakeSdk:
         args: list[str],
         *,
         cwd: str,
+        user: str,
         env: Mapping[str, str],
         timeout: float | None,
         stdin: object,
@@ -183,6 +193,7 @@ class FakeSdk:
                 "cmd": cmd,
                 "args": list(args),
                 "cwd": cwd,
+                "user": user,
                 "env": dict(env),
                 "timeout": timeout,
                 "stdin": stdin,
@@ -299,6 +310,12 @@ class MicrosandboxBackendTests(unittest.TestCase):
         self.assertEqual(execution["cmd"], "tool")
         self.assertEqual(execution["args"], ["--network=host", "-c", "echo unsafe"])
         self.assertEqual(execution["cwd"], "/workspace/src")
+        user = execution["user"]
+        self.assertIsInstance(user, str)
+        assert isinstance(user, str)
+        uid_text, gid_text = user.split(":", 1)
+        self.assertGreater(int(uid_text), 0)
+        self.assertGreaterEqual(int(gid_text), 0)
         self.assertEqual(execution["stdin"], {"stdin": "null"})
         self.assertIs(execution["tty"], False)
         self.assertEqual(execution["rlimits"], [("nproc", 17, 17)])
@@ -511,10 +528,26 @@ class MicrosandboxBackendTests(unittest.TestCase):
             async def remove(name: str) -> None:
                 calls["remove"] = name
 
+        @dataclass(frozen=True)
+        class NativeMount:
+            path: str
+            readonly: bool
+            noexec: bool
+            nosuid: bool
+            nodev: bool
+            stat_virtualization: str | None = None
+            host_permissions: str | None = None
+
         class VolumeApi:
             @staticmethod
             def bind(path: str, **kwargs: object) -> object:
-                return ("volume", path, dict(kwargs))
+                return NativeMount(
+                    path=path,
+                    readonly=bool(kwargs["readonly"]),
+                    noexec=bool(kwargs["noexec"]),
+                    nosuid=bool(kwargs["nosuid"]),
+                    nodev=bool(kwargs["nodev"]),
+                )
 
         class NetworkApi:
             @staticmethod
@@ -560,15 +593,14 @@ class MicrosandboxBackendTests(unittest.TestCase):
                 nosuid=True,
                 nodev=True,
             ),
-            (
-                "volume",
-                "/host",
-                {
-                    "readonly": True,
-                    "noexec": False,
-                    "nosuid": True,
-                    "nodev": True,
-                },
+            NativeMount(
+                path="/host",
+                readonly=True,
+                noexec=False,
+                nosuid=True,
+                nodev=True,
+                stat_virtualization="off",
+                host_permissions="private",
             ),
         )
         self.assertEqual(sdk.network_none(), ("network", "none"))
@@ -592,6 +624,7 @@ class MicrosandboxBackendTests(unittest.TestCase):
                 "tool",
                 ["arg"],
                 cwd="/workspace",
+                user="1000:1000",
                 env={"CI": "1"},
                 timeout=3.0,
                 stdin=("stdin", "null"),
@@ -618,6 +651,9 @@ class MicrosandboxBackendTests(unittest.TestCase):
         exec_call = calls["exec_stream"]
         assert isinstance(exec_call, tuple)
         self.assertEqual(exec_call[0:2], ("tool", ["arg"]))
+        exec_kwargs = exec_call[2]
+        assert isinstance(exec_kwargs, dict)
+        self.assertEqual(exec_kwargs["user"], "1000:1000")
         self.assertEqual(calls["stop"], 2.0)
         self.assertEqual(calls["kill"], 1.0)
 
@@ -663,6 +699,121 @@ class MicrosandboxBackendTests(unittest.TestCase):
             sdk.remove_calls,
             ["workspace-guard-mcp-msb-test", "workspace-guard-mcp-msb-test"],
         )
+
+    def test_missing_exec_program_is_a_normal_failed_execution(self) -> None:
+        sdk = FakeSdk(
+            exec_handle=FakeExecHandle(
+                [
+                    FakeEvent(
+                        "failed",
+                        data=b"No such file or directory",
+                        code=errno.ENOENT,
+                    )
+                ]
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_execution(
+                MicrosandboxBackend(_sdk=sdk),
+                self._request(Path(directory), argv=("missing-tool",)),
+            )
+        self.assertEqual(result.state, ExecutionState.FAILED)
+        self.assertEqual(result.exit_code, 127)
+        self.assertIn("No such file or directory", result.stderr)
+        self.assertNotIn("runtime monitor failure", result.stderr)
+
+    def test_missing_ruff_binary_is_capability_unavailable_not_runtime_crash(
+        self,
+    ) -> None:
+        sdk = FakeSdk(
+            exec_handle=FakeExecHandle(
+                [
+                    FakeEvent(
+                        "failed",
+                        data=b"No such file or directory",
+                        code=errno.ENOENT,
+                    )
+                ]
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = ExecutionProfile(
+                "debug",
+                PINNED_IMAGE,
+                frozenset({"run_ruff"}),
+            )
+            configuration = TaskConfiguration(
+                source=root / "profiles.json",
+                runtime="microsandbox",
+                limits=TaskLimits(timeout_seconds=5, max_output_bytes=4096),
+                tasks=MappingProxyType({}),
+                profiles=MappingProxyType({"debug": profile}),
+                default_profile="debug",
+            )
+            manager = TaskManager(
+                Settings.create(root),
+                configuration,
+                backend=MicrosandboxBackend(_sdk=sdk),
+            )
+            result = manager.run_ruff("debug", paths=["."])
+            manager.shutdown()
+
+        self.assertEqual(result["status"], "capability_unavailable")
+        self.assertEqual(result["exit_code"], 127)
+        self.assertIn("No such file or directory", str(result["stderr"]))
+        self.assertNotIn("runtime monitor failure", str(result["stderr"]))
+
+    def test_service_stop_interrupts_running_microsandbox_command(self) -> None:
+        exec_handle = FakeExecHandle(
+            [FakeEvent("stdout", data=b"READY\n")],
+            blocking=True,
+        )
+        sdk = FakeSdk(exec_handle=exec_handle)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profile = ExecutionProfile(
+                "debug",
+                PINNED_IMAGE,
+                frozenset({"start_command"}),
+                workspace_access="read-only",
+                allow_arbitrary_commands=True,
+            )
+            configuration = TaskConfiguration(
+                source=root / "profiles.json",
+                runtime="microsandbox",
+                limits=TaskLimits(timeout_seconds=30, max_output_bytes=4096),
+                tasks=MappingProxyType({}),
+                profiles=MappingProxyType({"debug": profile}),
+                default_profile="debug",
+            )
+            manager = TaskManager(
+                Settings.create(root),
+                configuration,
+                backend=MicrosandboxBackend(_sdk=sdk),
+            )
+            started = manager.start_command(
+                "debug",
+                "python",
+                ["-c", "import time; print('READY'); time.sleep(20)"],
+            )
+            task_id = str(started["task_id"])
+            self.assertEqual(manager.task_logs(task_id)["stdout"], "READY\n")
+
+            before = time.monotonic()
+            stopped = manager.stop_task(task_id)
+            elapsed = time.monotonic() - before
+
+            self.assertLess(elapsed, 2.0)
+            self.assertEqual(stopped["status"], "stopped")
+            self.assertEqual(exec_handle.kill_calls, 1)
+            record = manager.execution_status(task_id)
+            self.assertEqual(record["state"], "cancelled")
+            self.assertEqual(record["reason"], "user_cancelled")
+            self.assertEqual(manager.stop_task(task_id)["status"], "stopped")
+            self.assertEqual(exec_handle.kill_calls, 1)
+            self.assertEqual(len(sdk.remove_calls), 1)
+            manager.shutdown()
 
     def test_wait_timeout_does_not_stop_execution_and_stop_is_idempotent(self) -> None:
         exec_handle = FakeExecHandle(blocking=True)
