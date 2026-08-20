@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "runtime": "microsandbox",
+  "limits": {
+    "timeout_seconds": 120,
+    "max_output_bytes": 200000,
+    "max_snapshot_files": 20000,
+    "max_snapshot_bytes": 268435456,
+    "memory": "1g",
+    "cpus": "2",
+    "pids": 128,
+    "max_concurrent_tasks": 1
+  },
+  "default_profile": "microsandbox-coding",
+  "profiles": {
+    "microsandbox-python-safe": {
+      "image": "example.invalid/workspace-guard-debug@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "tools": [
+        "python_version",
+        "run_python_script"
+      ],
+      "workspace_access": "read-only"
+    },
+    "microsandbox-pytest-debug": {
+      "extends": "microsandbox-python-safe",
+      "tools_add": [
+        "run_pytest",
+        "run_ruff",
+        "run_mypy",
+        "run_pytest_coverage"
+      ]
+    },
+    "microsandbox-coding": {
+      "extends": "microsandbox-pytest-debug",
+      "tools_add": [
+        "run_command",
+        "start_command"
+      ],
+      "allow_arbitrary_commands": true
+    }
+  }
+}

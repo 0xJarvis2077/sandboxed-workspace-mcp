@@ -1,6 +1,6 @@
 # WorkspaceGuard MCP
 
-[中文](README.md) · [Security boundary](SECURITY.md) · [Task template](examples/tasks.json) · [Execution profile template](examples/execution-profiles.json)
+[中文](README.md) · [Security boundary](SECURITY.md) · [Task template](examples/tasks.json) · [Docker/Podman profile template](examples/execution-profiles.json) · [Microsandbox profile template](examples/execution-profiles.microsandbox.json)
 
 WorkspaceGuard MCP is a secure execution layer for AI agents. It keeps workspace access, Git operations, code execution, commands, and operator-authorized tasks inside explicit capability, policy, and resource boundaries.
 
@@ -271,6 +271,16 @@ A task that must create workspace artifacts must explicitly use `"workspace_acce
 
 The first Microsandbox backend requires a registry-style `repository@sha256` OCI digest and does not accept a Docker-local `sha256:<id>`. CPU must be exactly representable as an integer vCPU, memory must convert exactly to an integer MiB value, execution networking is disabled, and runtime pulling is fixed to `pull_policy=never`.
 
+The standard Python/Coding Agent execution image remains defined by the single [examples/Dockerfile.task](examples/Dockerfile.task), which includes Python, pytest, coverage, mypy, Ruff, and git. The same OCI image can be used by Docker, Podman, and Microsandbox. Microsandbox image provisioning is intentionally separate from runtime execution; operators should prepare it in this order:
+
+1. Build `examples/Dockerfile.task` in a trusted build environment.
+2. Push the image to an operator-controlled trusted OCI registry.
+3. Obtain the immutable `repository@sha256:<64hex>` registry digest, not a local image ID or mutable tag.
+4. Before starting WorkspaceGuard, pre-cache that digest through Microsandbox's operator-owned provisioning workflow on the host.
+5. Put the same digest into the profiles in `examples/execution-profiles.microsandbox.json`, then start WorkspaceGuard.
+
+WorkspaceGuard does not automatically run `docker build`, push to a registry, pull/cache Microsandbox images, or install pytest/mypy/Ruff over the network during an execution. Runtime consumes only an operator-provisioned immutable image and fails closed when the cache is missing.
+
 ```json
 {
   "version": 1,
@@ -290,11 +300,13 @@ The first Microsandbox backend requires a registry-style `repository@sha256` OCI
 }
 ```
 
-These are adapter representability constraints, not a claim that Microsandbox and Docker/Podman use identical enforcement primitives or provide identical security guarantees. In particular, Microsandbox currently uses `Rlimit.nproc` for the process limit and WorkspaceGuard does not claim that it is equivalent to Docker's cgroup `--pids-limit`. Hostile-workload parity remains a separate hardening concern.
+These are adapter representability constraints, not a claim that Microsandbox and Docker/Podman use identical enforcement primitives or provide identical security guarantees. In particular, Microsandbox currently uses `Rlimit.nproc` for the process limit and WorkspaceGuard does not claim that it is equivalent to Docker's cgroup `--pids-limit`; integer vCPU allocation is also different from Docker CPU quota, and a private disposable microVM rootfs is different from a Docker read-only rootfs.
+
+The repository now also provides an explicit opt-in real-microVM security gate in `tests/test_microsandbox_security_integration.py`. The operator must preinstall the pinned `microsandbox==0.6.8`, pre-cache a `repository@sha256` test image, and set both `WORKSPACE_GUARD_MCP_RUN_MICROSANDBOX_SECURITY_TESTS=1` and `WORKSPACE_GUARD_MCP_MICROSANDBOX_TEST_IMAGE=...`. The test harness never installs the runtime, builds or pulls the image, or provisions over the network. Ordinary `scripts/check.py` runs see a transparent skip; **a skip is not evidence that real enforcement was verified**. A previous Darwin arm64 run with `microsandbox==0.6.8` and a pinned cached Python image completed all 16 recorded security probes. On 2026-08-20, a separate live service-path check on the same host/runtime family verified `start_command → READY → stop_task`: the command stopped well before its 20-second natural exit, the post-sleep marker was absent, and the canonical state was `cancelled/user_cancelled`. The opt-in source suite now includes that service-path regression, but the enlarged suite still needs an explicit operator rerun before it can be called fully passed. All real evidence applies only to the recorded host/runtime/image combination. See [SECURITY.md](SECURITY.md) for the verified / best-effort / not-verified evidence matrix and maintainer command.
 
 ### Execution profiles
 
-Copy [examples/execution-profiles.json](examples/execution-profiles.json) outside the workspace. A profile fixes its image, tool set, and workspace access:
+`runtime` is currently a **top-level choice for the whole task config**, not a per-profile field, so one config file cannot mix Docker/Podman and Microsandbox backends. Use [examples/execution-profiles.json](examples/execution-profiles.json) for Docker/Podman and [examples/execution-profiles.microsandbox.json](examples/execution-profiles.microsandbox.json) for Microsandbox; copy the chosen template outside the workspace and replace its image placeholder. A profile fixes its image, tool set, and workspace access:
 
 - `python_version`: runs `python --version` inside the authorized execution environment.
 - `run_pytest`: validates targets, compiles pytest argv, and collects bounded failure/frame/local information.

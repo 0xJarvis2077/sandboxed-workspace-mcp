@@ -1,6 +1,6 @@
 # WorkspaceGuard MCP
 
-[English](README.en.md) · [安全边界](SECURITY.md) · [任务模板](examples/tasks.json) · [Execution profile 模板](examples/execution-profiles.json)
+[English](README.en.md) · [安全边界](SECURITY.md) · [任务模板](examples/tasks.json) · [Docker/Podman profile 模板](examples/execution-profiles.json) · [Microsandbox profile 模板](examples/execution-profiles.microsandbox.json)
 
 WorkspaceGuard MCP 是面向 AI Agent 的安全执行层（secure execution layer）。它把 Agent 对真实工作区的文件访问、Git 操作以及代码、命令和任务执行限制在显式的 capability、安全策略和资源边界内。
 
@@ -271,6 +271,16 @@ stop_task(started["task_id"])
 
 Microsandbox 第一版要求 registry-style `repository@sha256` OCI digest，不能使用 Docker 本机 `sha256:<id>`。CPU 必须能精确表示为整数 vCPU，memory 必须精确换算为整数 MiB；execution network 固定关闭，运行期间固定 `pull_policy=never`。
 
+用于 Python/Coding Agent 的标准 execution image 继续由单一 [examples/Dockerfile.task](examples/Dockerfile.task) 定义，包含 Python、pytest、coverage、mypy、Ruff 和 git；同一 OCI image 可供 Docker、Podman 和 Microsandbox 使用。Microsandbox 的 image provisioning 与 runtime execution 明确分离，operator 应按以下顺序准备：
+
+1. 在受信任的 build 环境构建 `examples/Dockerfile.task`。
+2. 推送到 operator 控制的可信 OCI registry。
+3. 从 registry 获取不可变的 `repository@sha256:<64hex>` digest，而不是本地 image ID 或 mutable tag。
+4. 在启动 WorkspaceGuard 前，通过 Microsandbox 的 operator-owned provisioning 流程把该 digest 对应 image 预缓存到 host。
+5. 把同一个 digest 写入 `examples/execution-profiles.microsandbox.json` 的 profile，再启动 WorkspaceGuard。
+
+WorkspaceGuard 本身不会自动 `docker build`、push registry、pull/cache Microsandbox image，也不会在 execution 期间联网安装 pytest/mypy/Ruff 等依赖。运行阶段只消费 operator 已 provision 的 immutable image；cache 缺失时必须 fail closed。
+
 ```json
 {
   "version": 1,
@@ -290,11 +300,13 @@ Microsandbox 第一版要求 registry-style `repository@sha256` OCI digest，不
 }
 ```
 
-这些是 adapter representability constraints，不代表 Microsandbox 与 Docker/Podman 具有完全相同的 enforcement primitive 或安全保证。例如 Microsandbox 当前用 `Rlimit.nproc` 表达进程限制，它不被宣称等价于 Docker cgroup `--pids-limit`。更深入的真实 hostile-workload parity 属于后续 hardening。
+这些是 adapter representability constraints，不代表 Microsandbox 与 Docker/Podman 具有完全相同的 enforcement primitive 或安全保证。例如 Microsandbox 当前用 `Rlimit.nproc` 表达进程限制，它不被宣称等价于 Docker cgroup `--pids-limit`；整数 vCPU allocation 也不等价于 Docker CPU quota，private disposable microVM rootfs 也不等价于 Docker read-only rootfs。
+
+仓库现在另外提供显式 opt-in 的真实 microVM security gate：`tests/test_microsandbox_security_integration.py`。它要求 operator 预先安装固定的 `microsandbox==0.6.8`、准备已缓存的 `repository@sha256` test image，并同时设置 `WORKSPACE_GUARD_MCP_RUN_MICROSANDBOX_SECURITY_TESTS=1` 与 `WORKSPACE_GUARD_MCP_MICROSANDBOX_TEST_IMAGE=...`。测试不会自动安装 runtime、build/pull image 或联网 provision。普通 `scripts/check.py` 只会看到透明 skip；**skip 不代表真实 enforcement 已验证**。此前已记录一轮 Darwin arm64 + `microsandbox==0.6.8` + pinned cached Python image 的 16/16 security probes；2026-08-20 又在同类真实 host/runtime 路径上单独验证了 `start_command → READY → stop_task`，任务在 20 秒自然结束前被终止、后续 marker 未输出且 canonical state 为 `cancelled/user_cancelled`。源码中的 opt-in suite 现已加入该 service-path regression，但扩展后的整套 suite 仍需 operator 重新显式执行后才能宣称全部通过。所有真实 evidence 都只适用于记录的 host/runtime/image 组合。完整 verified / best-effort / not-verified evidence matrix 与 maintainer 命令见 [SECURITY.md](SECURITY.md)。
 
 ### Execution profile
 
-复制 [examples/execution-profiles.json](examples/execution-profiles.json) 到工作区外。profile 固定 image、工具集合和 workspace 访问模式：
+`runtime` 当前是**整个 task config 的顶层选择**，不是单个 profile 字段，所以同一个配置文件不能同时混用 Docker/Podman 与 Microsandbox backend。Docker/Podman 使用 [examples/execution-profiles.json](examples/execution-profiles.json)，Microsandbox 使用 [examples/execution-profiles.microsandbox.json](examples/execution-profiles.microsandbox.json)；两份模板都应复制到工作区外并替换 image 占位符。profile 固定 image、工具集合和 workspace 访问模式：
 
 - `python_version`：在授权 execution environment 中运行 `python --version`。
 - `run_pytest`：服务端验证 target、生成 pytest argv，并返回有界 failure/frame/local 信息。

@@ -73,3 +73,8 @@ fail_under = 85
 precision = 1
 show_missing = true
 skip_covered = true
+
+[tool.pytest.ini_options]
+markers = [
+  "microsandbox_security: opt-in real Microsandbox enforcement tests",
+]

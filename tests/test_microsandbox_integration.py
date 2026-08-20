@@ -157,6 +157,7 @@ class ControlledSdk:
         args: list[str],
         *,
         cwd: str,
+        user: str,
         env: Mapping[str, str],
         timeout: float | None,
         stdin: object,

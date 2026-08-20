@@ -38,4 +38,28 @@ jobs:
       - run: >-
           docker run --rm --network none
           workspace-guard-mcp-execution:ci
+          python --version
+      - run: >-
+          docker run --rm --network none
+          workspace-guard-mcp-execution:ci
+          python -m pytest --version
+      - run: >-
+          docker run --rm --network none
+          workspace-guard-mcp-execution:ci
+          python -m coverage --version
+      - run: >-
+          docker run --rm --network none
+          workspace-guard-mcp-execution:ci
           python -m mypy --version
+      - run: >-
+          docker run --rm --network none
+          workspace-guard-mcp-execution:ci
+          ruff --version
+      - run: >-
+          docker run --rm --network none
+          workspace-guard-mcp-execution:ci
+          git --version
+      - run: >-
+          docker run --rm --network none
+          workspace-guard-mcp-execution:ci
+          python -c "import coverage, mypy, pytest, shutil; assert shutil.which('ruff'); assert shutil.which('git')"

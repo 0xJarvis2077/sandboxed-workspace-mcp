@@ -32,11 +32,13 @@ class ExecutionImageCapabilityTests(unittest.TestCase):
             "python -m coverage --version",
             "python -m mypy --version",
             "ruff --version",
+            "git --version",
         ):
             with self.subTest(command=command):
                 self.assertIn(command, self.dockerfile)
         self.assertIn("import coverage, mypy, pytest", self.dockerfile)
         self.assertIn("shutil.which('ruff')", self.dockerfile)
+        self.assertIn("shutil.which('git')", self.dockerfile)
 
     def test_profiles_with_structured_analysis_use_complete_capability_set(
         self,
@@ -69,12 +71,61 @@ class ExecutionImageCapabilityTests(unittest.TestCase):
                     required.issubset(configuration.profiles[profile_name].tools)
                 )
 
+    def test_microsandbox_profile_template_loads_with_debug_capabilities(self) -> None:
+        payload = json.loads(
+            (
+                self.project_root / "examples" / "execution-profiles.microsandbox.json"
+            ).read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace = base / "workspace"
+            workspace.mkdir()
+            config_path = base / "execution-profiles.microsandbox.json"
+            config_path.write_text(json.dumps(payload), encoding="utf-8")
+            configuration = load_task_config(config_path, workspace_root=workspace)
+
+        self.assertEqual(configuration.runtime, "microsandbox")
+        self.assertEqual(configuration.default_profile, "microsandbox-coding")
+        required = {
+            "python_version",
+            "run_pytest",
+            "run_ruff",
+            "run_mypy",
+            "run_pytest_coverage",
+            "run_python_script",
+            "run_command",
+            "start_command",
+        }
+        self.assertTrue(
+            required.issubset(configuration.profiles["microsandbox-coding"].tools)
+        )
+        self.assertTrue(
+            {
+                "python_version",
+                "run_pytest",
+                "run_ruff",
+                "run_mypy",
+                "run_pytest_coverage",
+                "run_python_script",
+            }.issubset(configuration.profiles["microsandbox-pytest-debug"].tools)
+        )
+
     def test_ci_builds_and_offline_smoke_checks_execution_image(self) -> None:
         self.assertIn("execution-image:", self.ci)
         self.assertIn("docker build", self.ci)
         self.assertIn("examples/Dockerfile.task", self.ci)
         self.assertIn("docker run --rm --network none", self.ci)
-        self.assertIn("python -m mypy --version", self.ci)
+        for command in (
+            "python --version",
+            "python -m pytest --version",
+            "python -m coverage --version",
+            "python -m mypy --version",
+            "ruff --version",
+            "git --version",
+        ):
+            with self.subTest(command=command):
+                self.assertIn(command, self.ci)
 
 
 if __name__ == "__main__":
